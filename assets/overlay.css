@@ -176,9 +176,10 @@ body.pdf2html-search-entered ::-moz-selection { background: transparent; color: 
 
 /* Native browser find shadow layer.
    Chromium find ignores `display:none`, which is why hidden `.pc` pages are
-   not searchable. The overlay appends one clipped plain-text node per page
-   from <hash>/text.json; it remains in layout for Cmd-F but does not paint,
-   intercept pointer events, or alter page sizing. */
+   not searchable. The overlay appends clipped plain-text nodes from
+   <hash>/text.json only for pages whose real `.pc` is not currently rendered;
+   they remain in layout for Cmd-F but do not paint, intercept pointer events,
+   or alter page sizing. */
 .pdf2html-find-shadow {
     position: absolute;
     top: 0;
@@ -193,6 +194,8 @@ body.pdf2html-search-entered ::-moz-selection { background: transparent; color: 
     color: transparent;
     background: transparent;
 }
+/* Correctness is enforced in overlay.js by removing shadow nodes from rendered
+   pages; this is a fallback for stale nodes during live editing or upgrades. */
 .pf.pdf2html-force > .pdf2html-find-shadow {
     display: none !important;
 }

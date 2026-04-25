@@ -1986,7 +1986,7 @@
         var to = Math.max(startPage, endPage);
         for (var p = from; p <= to; p++) {
             var pf = pageElement(p);
-            if (pf) pf.classList.add('pdf2html-force');
+            if (pf) setPageForceRendered(pf, true);
         }
     }
 
@@ -3368,7 +3368,7 @@
             // touching the DOM 797 times per observer callback during scroll.
             if (renderAll) {
                 if (allForced) return;
-                for (var i = 0; i < pages.length; i++) pages[i].classList.add('pdf2html-force');
+                for (var i = 0; i < pages.length; i++) setPageForceRendered(pages[i], true);
                 allForced = true;
                 return;
             }
@@ -3394,7 +3394,7 @@
             for (var j = 0; j < pages.length; j++) {
                 var want = j >= from && j <= to;
                 if (want !== pages[j].classList.contains('pdf2html-force')) {
-                    pages[j].classList.toggle('pdf2html-force', want);
+                    setPageForceRendered(pages[j], want);
                 }
             }
         }
@@ -4227,14 +4227,15 @@
     // deliberately hides non-buffered `.pc` elements that way, so Cmd-F only
     // sees the current render buffer. Conversion/cache-upgrade writes
     // <hash>/text.json with one plain-text blob per page; this mounts those
-    // blobs as clipped 1px nodes under the matching `.pf` wrappers. They stay
+    // blobs as clipped 1px nodes under non-rendered `.pf` wrappers. They stay
     // in layout for browser-find indexing, but they do not paint or affect the
     // pdf2htmlEX visible layer.
     //
-    // Rendered pages hide their shadow node via CSS, so native find sees one
-    // source per page: real `.pc` text when rendered, shadow text otherwise.
-    // Selection bridging below promotes shadow hits to real `.t` ranges after
-    // native find has used the shadow layer to discover the page.
+    // The strict invariant is one searchable source per page: rendered pages
+    // have real `.pc` text and no shadow node; non-rendered pages have shadow
+    // text and hidden `.pc` content. Selection bridging below promotes shadow
+    // hits to real `.t` ranges after native find has used the shadow layer to
+    // discover the page.
     // ------------------------------------------------------------------------
     function mountNativeFindShadowLayer() {
         var hash = entryHash();
@@ -4250,13 +4251,16 @@
         }).catch(function () { /* Missing text.json is non-fatal for old cache entries. */ });
     }
 
+    var nativeFindShadowTextByPage = new Map();
+
     function mountFindShadowPages(pages) {
         var queue = [];
         for (var i = 0; i < pages.length; i++) {
             var page = parseInt(pages[i] && pages[i].page, 10);
             var text = pages[i] && pages[i].text;
             if (!page || typeof text !== 'string' || !text.trim()) continue;
-            queue.push({ page: page, text: text });
+            nativeFindShadowTextByPage.set(page, text);
+            queue.push(page);
         }
         if (!queue.length) return;
 
@@ -4264,7 +4268,7 @@
         function work(deadline) {
             var start = performance.now();
             while (idx < queue.length) {
-                mountFindShadowPage(queue[idx].page, queue[idx].text);
+                ensureFindShadowPage(queue[idx]);
                 idx += 1;
 
                 // Keep startup responsive on large textbooks. requestIdleCallback
@@ -4278,11 +4282,30 @@
         scheduleIdle(work);
     }
 
-    function mountFindShadowPage(page, text) {
+    function setPageForceRendered(pf, forced) {
+        if (!pf) return;
+        if (forced) {
+            removeFindShadowElement(pf);
+            pf.classList.add('pdf2html-force');
+        } else {
+            pf.classList.remove('pdf2html-force');
+            ensureFindShadowPage(pageNumberFromElement(pf));
+        }
+    }
+
+    function ensureFindShadowPage(page) {
+        if (!page) return;
         var pf = pageElement(page);
         if (!pf) return;
+        if (pf.classList.contains('pdf2html-force')) {
+            removeFindShadowElement(pf);
+            return;
+        }
         var existing = pf.querySelector('.pdf2html-find-shadow');
         if (existing && existing.parentElement === pf) return;
+
+        var text = nativeFindShadowTextByPage.get(page);
+        if (typeof text !== 'string' || !text.trim()) return;
 
         var shadow = document.createElement('div');
         shadow.className = 'pdf2html-find-shadow';
@@ -4290,6 +4313,11 @@
         shadow.dataset.pageNo = String(page);
         shadow.textContent = text;
         pf.appendChild(shadow);
+    }
+
+    function removeFindShadowElement(pf) {
+        var nodes = pf.querySelectorAll('.pdf2html-find-shadow');
+        for (var i = 0; i < nodes.length; i++) nodes[i].remove();
     }
 
     var nativeFindBridgeMounted = false;
@@ -4369,16 +4397,13 @@
         var realRange = realRangeFromIndex(index, start, selectedText.length);
         if (!realRange) return;
 
-        // Close the race where native find selectionchange fires before the
-        // IntersectionObserver render-window has force-rendered the target.
-        // Do this only after mapping succeeds; otherwise the page's shadow
-        // node would become display:none while still owning the active native
-        // find selection.
-        pf.classList.add('pdf2html-force');
-
         nativeFindBridgeActive = true;
         searchSuppressPinUntil = performance.now() + 500;
         try {
+            // Mapping is complete, so it is now safe to remove the shadow node
+            // that native find selected and expose the real text instead.
+            setPageForceRendered(pf, true);
+
             var sel = window.getSelection();
             if (sel) {
                 sel.removeAllRanges();
