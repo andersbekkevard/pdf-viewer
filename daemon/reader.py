@@ -293,6 +293,9 @@ class Reader:
             if path.is_file():
                 return path
             data = self._run(pdfium_doc.render_png, str(pdf), page - 1, width)
+            if not (self.root / hash_).is_dir():
+                # Deleted while this page rendered: do not bring it back.
+                raise FileNotFoundError(hash_)
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
             tmp.write_bytes(data)

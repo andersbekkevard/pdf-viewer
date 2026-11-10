@@ -31,7 +31,7 @@ SEGMENT_GAP_EM = 1.0
 # Characters whose centre leaves the line by more than this many line heights
 # belong to another line, even when PDFium reports no line break.
 LINE_DRIFT_EM = 0.7
-TEXT_LAYER_VERSION = 2
+TEXT_LAYER_VERSION = 3
 
 
 @functools.lru_cache(maxsize=6)
@@ -280,6 +280,13 @@ def page_text(path: str, index: int) -> list[dict]:
                     continue
                 if code == 0xFFFE or code == 0x02:
                     code = 0x2D  # PDFium's marker for a line-end hyphen
+                if 0xD800 <= code <= 0xDBFF and i + 1 < count:
+                    # PDFium hands out UTF-16 units: a character outside the
+                    # BMP (mathematical italics, script letters) is a
+                    # surrogate pair whose box is on the first unit.
+                    low = raw.FPDFText_GetUnicode(textpage, i + 1)
+                    if 0xDC00 <= low <= 0xDFFF:
+                        code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)
                 if code < 0x20 or code == 0xFFFF or 0xD800 <= code <= 0xDFFF:
                     if code == 0x09:
                         chars.append((" ", None))

@@ -141,7 +141,11 @@ export function createDocumentModel(core) {
         var root = container();
         var extent = pageExtent(pf);
         if (!root || !extent) return false;
-        root.scrollTo({ top: Math.max(0, extent.top - (lead || 0)), behavior: smooth ? 'smooth' : 'instant' });
+        var top = Math.max(0, extent.top - (lead || 0));
+        // A smooth scroll across many pages mounts and renders every page it
+        // passes; past a few screens, jump.
+        var near = Math.abs(top - root.scrollTop) <= 3 * root.clientHeight;
+        root.scrollTo({ top: top, behavior: smooth && near ? 'smooth' : 'instant' });
         return true;
     }
     // Put a point `y` page px down the page `lead` px below the viewport top.

@@ -13,6 +13,7 @@ import json
 import pathlib
 import re
 import shutil
+import threading
 import urllib.parse
 from typing import Optional, Protocol
 
@@ -129,6 +130,9 @@ class CacheCatalog:
         self._content_hashes: dict[tuple[str, int, int], str] = {}
         self._manifests: Optional[dict[str, dict]] = None
         self._manifests_stamp: Optional[int] = None
+        # Request threads register entries while others list them; a scan that
+        # started before a write must not replace the copy that has it.
+        self._manifests_lock = threading.RLock()
 
     @property
     def mappings_path(self) -> pathlib.Path:
@@ -175,6 +179,10 @@ class CacheCatalog:
         """`<hash>/entry.json` of every entry that has one. Entry directories
         coming and going change the root's mtime, which refreshes the scan;
         this process's own writes update the cached copy directly."""
+        with self._manifests_lock:
+            return self._scan_manifests()
+
+    def _scan_manifests(self) -> dict[str, dict]:
         try:
             stamp = self.root.stat().st_mtime_ns
         except OSError:
@@ -194,6 +202,10 @@ class CacheCatalog:
         return self._manifests
 
     def _write_manifest(self, hash_: str, manifest: dict) -> None:
+        with self._manifests_lock:
+            self._write_manifest_locked(hash_, manifest)
+
+    def _write_manifest_locked(self, hash_: str, manifest: dict) -> None:
         entry_dir = self.root / hash_
         entry_dir.mkdir(parents=True, exist_ok=True)
         path = entry_dir / ENTRY_MANIFEST
