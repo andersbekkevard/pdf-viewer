@@ -25,6 +25,39 @@ probe/artifacts/<sha>/        diff images for failing pages
 Disk budget: 25 GB for `files/` plus `incoming/`. Keep at least 50 GB free on
 the volume; check `df -h ~` before any bulk step.
 
+## Offloaded copy on Storage Box
+
+On 2026-10-21 the corpus was moved off the Mac to free disk space. The Storage
+Box namespace `pdf-viewer-corpus` (root `projects/pdf-viewer-corpus`) holds,
+under `v2026-10-21/`:
+
+- `metadata.tar`: `manifest.jsonl`, `ingest-state.json`, `summary-final.json`,
+  the probe results (`probe/*.json`) and the local-only source's `_files.tsv`
+  and `_collect.py`;
+- `incoming-<source>.tar`: one archive per downloaded source, including its
+  `_files.tsv`;
+- `probe-artifacts.tar`: the probe's diff sheets.
+
+The local-only source (`incoming/own-local/`) is not uploaded; its files are
+clones of Anders' own documents and are rebuilt with its `_collect.py`.
+
+To restore, from the repo root:
+
+```bash
+SB=~/dotfiles/agents/storage-box
+C=~/.local/share/pdf_viewer/corpus
+mkdir -p "$C" && cd "$C"
+$SB ls pdf-viewer-corpus v2026-10-21
+$SB get pdf-viewer-corpus v2026-10-21/metadata.tar metadata.tar && tar -xf metadata.tar && rm metadata.tar
+# for each incoming-<source>.tar listed (and probe-artifacts.tar into probe/):
+$SB get pdf-viewer-corpus v2026-10-21/incoming-arxiv.tar x.tar && tar -xf x.tar -C incoming && rm x.tar
+python3 incoming/own-local/_collect.py
+cd - && uv run bench/corpus/ingest.py   # recreates files/ as APFS clones
+```
+
+Ingest recognises the existing manifest rows, so it only rehashes and clones;
+no facts or probes are recomputed. The tiers in `manifest.jsonl` survive.
+
 ## Sources
 
 `sources/*.md` lists each source: what it is, why it is in the corpus, license
