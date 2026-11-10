@@ -31,7 +31,7 @@ SEGMENT_GAP_EM = 1.0
 # Characters whose centre leaves the line by more than this many line heights
 # belong to another line, even when PDFium reports no line break.
 LINE_DRIFT_EM = 0.7
-TEXT_LAYER_VERSION = 1
+TEXT_LAYER_VERSION = 2
 
 
 @functools.lru_cache(maxsize=6)
@@ -217,6 +217,7 @@ def _build_line(chars: list[tuple]) -> list[dict]:
                  "segs": [{"t": text_all.strip(), "w": x1 - x0, "gap": 0.0, "sp": False}]}]
 
     last_x0 = last_x1 = 0.0
+    line_h = line_top = 0.0
     for ch in chars:
         if ch[1] is None:
             pending_space = current is not None or bool(segments)
@@ -224,9 +225,13 @@ def _build_line(chars: list[tuple]) -> list[dict]:
         lx0, ly0, lx1, ly1 = _to_local(direction, ch[1:5])
         h = max(0.5, ly1 - ly0)
         if current is not None or segments:
-            line_h = statistics.median(heights)
+            # The line's height and top are medians over its characters; they
+            # settle after a few, so refresh them at 1, 2, 4, 8… characters.
+            if len(heights) & (len(heights) - 1) == 0:
+                line_h = statistics.median(heights)
+                line_top = statistics.median(tops)
             centre = (ly0 + ly1) / 2
-            line_centre = statistics.median(tops) + line_h / 2
+            line_centre = line_top + line_h / 2
             gap = lx0 - last_x1
             # PDFium expands a ligature into characters that share one box,
             # so a character starting inside the previous box is no jump back.
