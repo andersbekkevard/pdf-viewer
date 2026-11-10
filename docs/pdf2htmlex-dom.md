@@ -259,7 +259,7 @@ a rescale. Lengths applied inside a page (e.g. the sidebar shift's
 | Scroll to a specific page | `documentModel.scrollToPage(documentModel.page(n), lead)` (flush, ignores scroll-padding) or `scrollIntoView({block:'start'})` (honors scroll-padding) |
 | Force-show a page | unnecessary — `content-visibility: auto` auto-renders pages near the viewport. |
 | Observe page visibility | IntersectionObserver with `root: #page-container`, observing each `.pf` (still useful for outline tracker, page counter, etc.; visibility is no longer JS-controlled) |
-| Find current reading page | Follow `pdf2html-page-change` (the page counter is the one tracker); on demand, `documentModel.mostVisiblePage()`. `document.elementFromPoint(viewport_center)` walked up to `.pf` also works. |
+| Find current reading page | Follow `pdf2html-page-change` (`assets/overlay-navigation.js` is the one tracker); on demand, `documentModel.mostVisiblePage()`. `document.elementFromPoint(viewport_center)` walked up to `.pf` also works. |
 | Iterate outline entries | `outline.querySelectorAll('a[href^="#pf"]')` — captures `a.l` entries cleanly |
 | Get selection's current focus | `window.getSelection().focusNode` → walk to `.t` parent if you need the line element |
 

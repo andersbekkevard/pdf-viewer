@@ -114,8 +114,9 @@ All core phases done (1 → 7). What works end-to-end today:
   `GET /view-canonical?path=` / `GET /view-canonical?url=` /
   `GET /_assets/*` / `GET /healthz` / `GET /stats` /
   `GET /stats/recent` / `GET /library`. Cache lookup ≈ 1–3 ms.
-- **launchd autostart** — `launchd/com.anders.pdf_viewer.plist` symlinked
-  into `~/Library/LaunchAgents/`. `KeepAlive=true`, respawns within a
+- **launchd autostart** — `launchd/com.anders.pdf_viewer.plist`, installed
+  into `~/Library/LaunchAgents/` by `scripts/setup.sh` (see
+  [Externalities](#externalities) §2). `KeepAlive=true`, respawns within a
   second if killed; brought up on login.
 - **Comet MV3 extension** (`extension/`) — static
   `declarativeNetRequest` rules redirect `^https?://.*\.pdf(\?.*)?$`
@@ -189,7 +190,8 @@ pdf_viewer/
 │   └── visits.py
 ├── extension/                   # Comet MV3 redirect extension
 │   ├── manifest.json
-│   └── rules.json
+│   ├── rules.json               # static *.pdf redirect + passthrough allow
+│   └── background.js            # per-entry dynamic rules, daemon signals, toolbar toggle
 ├── launchd/                     # LaunchAgent plist
 ├── docs/
 │   ├── adr/                     # immutable architectural decisions
@@ -374,8 +376,5 @@ with an ETag and a short `max-age` that forces revalidation.
 - [`docs/non-goals.md`](docs/non-goals.md) — explicit scope boundaries
 - [`docs/pdf2htmlex-dom.md`](docs/pdf2htmlex-dom.md) — DOM conventions
   of converted HTML
-- [`docs/adr/`](docs/adr/) — architectural decisions: engine choice
-  (0001), render-window + cursor pin (0002), keyboard strategy under
-  Vimium (0003), on-demand-compute + daemon split (0004; Docker-compute
-  half superseded by native pdf2htmlEX, 0011), Vimium scroll
-  scoping (0005), scrolloff (0006)
+- [`docs/adr/`](docs/adr/) — architectural decisions 0001–0013; the
+  index with each one's status is [`docs/adr/README.md`](docs/adr/README.md)

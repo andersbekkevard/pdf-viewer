@@ -21,7 +21,7 @@ if [[ -z "$PDF" || -z "$OUT" ]]; then
 fi
 [[ -f "$PDF" ]] || { echo "not a file: $PDF" >&2; exit 1; }
 
-REPO_DIR="/Users/andersbekkevard/dev/misc/pdf_viewer"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PARSER="$REPO_DIR/scripts/extract-meta.py"
 
 # Optional feature: with no local pdfinfo there's nothing to fall back to now

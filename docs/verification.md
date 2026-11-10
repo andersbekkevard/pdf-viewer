@@ -11,7 +11,6 @@ uv run python -m unittest discover -s scripts/tests
 
 ## Verification surfaces
 
-For browser operation, use the installed `anders-environment` skill and its browser reference.
 Use the available browser tooling for real converted HTML and screenshots. Comet extension,
 Vimium, Raycast and the Comet LLM sidebar require those actual surfaces; a standalone browser
 check cannot establish their integration. Daemon/cache behavior can also use curl and logs.
@@ -38,7 +37,7 @@ For the launchd-managed daemon:
 
 ```bash
 launchctl kickstart -k gui/$UID/com.anders.pdf_viewer
-tail -f ~/.cache/pdf_viewer/log
+tail -f ~/.cache/pdf_viewer/daemon.log   # daemon; conversions log to ~/.cache/pdf_viewer/log
 ```
 
 Before closing a bead:

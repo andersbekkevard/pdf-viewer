@@ -129,11 +129,19 @@ if [[ "$TAB_URL" =~ ^file://.*\.[pP][dD][fF]$ ]]; then
     # Stable per-file cache key (content hash, survives moves/renames)
     HASH=$(content_hash "$LOCAL_PATH")
     PDF_NAME=$(basename "$LOCAL_PATH")
-    OUT_NAME="${PDF_NAME%.*}.html"
     OUT_DIR="$CACHE_DIR/$HASH"
     PDF_DIR=$(dirname "$LOCAL_PATH")
     SOURCE_REF="$LOCAL_PATH"
     mkdir -p "$OUT_DIR"
+    # An entry that already has HTML keeps its name: the same bytes under
+    # another filename, or an entry renamed with :rename, must not convert a
+    # second canonical HTML into the directory.
+    EXISTING_HTML=$(canonical_html "$OUT_DIR")
+    if [[ -n "$EXISTING_HTML" ]]; then
+        OUT_NAME=$(basename "$EXISTING_HTML")
+    else
+        OUT_NAME="${PDF_NAME%.*}.html"
+    fi
 
 elif [[ "$TAB_URL" =~ ^https?:// ]]; then
     # host+path hash (query stripped, so signed URLs cache across sessions)
@@ -147,7 +155,7 @@ elif [[ "$TAB_URL" =~ ^https?:// ]]; then
     #   1. fully cached (OUT_DIR has *.html)      → read name from html
     #   2. _source has leftover *.pdf from a prior crashed convert → reuse
     #   3. cold miss                               → download + parse filename
-    EXISTING_HTML=$(ls "$OUT_DIR"/*.html 2>/dev/null | head -1)
+    EXISTING_HTML=$(canonical_html "$OUT_DIR")
     EXISTING_PDF=$(ls "$OUT_DIR/_source"/*.pdf 2>/dev/null | head -1)
 
     if [[ -n "$EXISTING_HTML" ]]; then
@@ -251,7 +259,7 @@ fi
 # Title, favicon and overlay tags on the canonical HTML (fatal), then the
 # light variant when missing or older than the canonical HTML (non-fatal).
 # Every step is idempotent, so a cache hit refreshes injection too.
-build_entry "$OUT_DIR" "$OUT_NAME" "$HASH" "${PDF_NAME%.*}" \
+build_entry "$OUT_DIR" "$OUT_NAME" "$HASH" "${OUT_NAME%.html}" \
     || fail "overlay injection failed"
 LIGHT_OUT_NAME="${OUT_NAME%.html}.light.html"
 

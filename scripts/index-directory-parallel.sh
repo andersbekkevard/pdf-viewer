@@ -155,8 +155,10 @@ say "index: $total PDFs under $DIR (jobs=$JOBS)"
 notify "Indexing $total PDFs…"
 start_ts=$(date +%s)
 
+# No -I: BSD xargs caps a replaced argument at 255 bytes and aborts the whole
+# run on the first longer path. -n 1 appends the path as the worker's $1.
 "$FD" -t f -e pdf -e PDF . "$DIR" -0 2>/dev/null \
-    | xargs -0 -P "$JOBS" -n 1 -I{} bash -c 'worker "$@"' _ {}
+    | xargs -0 -P "$JOBS" -n 1 bash -c 'worker "$@"' _
 
 count() { grep -cx "$1" "$RUN_STATUS" 2>/dev/null || true; }
 converted=$(count converted)

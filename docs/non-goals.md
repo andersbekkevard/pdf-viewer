@@ -2,9 +2,12 @@
 
 Explicitly out of scope. Revisit carefully before adding any of these.
 
-- **Auth-gated PDF fetching** (SharePoint, paywalls, corporate SSO).
-  Let the browser handle the download; user drops into Raycast to
-  convert the local copy.
+- **Auth-gated PDF fetching outside the browser** (SharePoint, paywalls,
+  corporate SSO). The scripts and daemon hold no credentials and run no
+  sign-in flow. A source open in a signed-in tab is fetched by the
+  extension inside that browser session (`POST /signal/fetch`, see
+  README); anything else: let the browser download it and convert the
+  local copy.
 - **Smart auto-detection of PDFs without a `.pdf` extension.** Manual
   Raycast trigger is the escape hatch. The extension deliberately does
   not try to sniff Content-Type.

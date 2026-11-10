@@ -4,8 +4,9 @@ One row per visit. Aggregates computed at query time; at personal-use
 volume (single-digit visits/day) the events table stays well under 1MB
 for years, so maintaining a rollup is unnecessary overhead.
 
-LRU eviction is deliberately NOT built on top of this (PLAN §3:
-"Deferred until cache bloat becomes real"). This is observability only.
+LRU eviction is deliberately NOT built on top of this (docs/cache.md:
+deferred until cache bloat becomes real). The rows feed /stats and the
+frecency order of /library.
 """
 from __future__ import annotations
 
@@ -143,22 +144,6 @@ def summary(top_n: int = 20) -> dict:
             for h, n, f, l in top
         ],
     }
-
-
-def all_counts() -> dict[str, dict]:
-    """hash → {count, last_seen}. One per doc. Empty on DB error.
-
-    Used by /library to rank cache entries by recency. Kept in visits.py
-    so the SQL stays next to the schema that defines it.
-    """
-    try:
-        with _connect() as conn:
-            rows = conn.execute(
-                "SELECT hash, COUNT(*), MAX(ts) FROM visits GROUP BY hash"
-            ).fetchall()
-        return {h: {"count": n, "last_seen": t} for h, n, t in rows}
-    except sqlite3.Error:
-        return {}
 
 
 def _zoxide_multiplier(age_sec: int) -> float:

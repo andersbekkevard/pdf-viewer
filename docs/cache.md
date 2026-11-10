@@ -86,19 +86,16 @@ the legacy `PDF_VIEWER_ENABLE_EXPERIMENTAL_LIGHT` flag remains honored.
 
 Two different algorithms, picked deliberately:
 
-- **Local PDF**: `sha256(path + mtime + size)[:16]`. Fast — no read of
-  the PDF bytes. Trade-off: moving or renaming a file invalidates the
-  cache entry. Accepted because bulk-indexing (which *does* content-hash
-  to dedupe renames) is the common entry point for local PDFs.
+- **Local PDF**: `sha256(file bytes)[:16]`, the content hash
+  (`content_hash` in `scripts/lib/pipeline.sh`, `_content_hash` in
+  `daemon/catalog.py`). Moving or renaming a file keeps its cache entry,
+  and the same book under two filenames is one entry. The daemon first
+  looks the path up in `mappings.tsv` and only hashes on a miss.
 - **Remote PDF**: `sha256(host + path)[:16]`. **Query string stripped
   entirely.** This is what makes signed URLs (Blackboard, S3,
   CloudFront, Azure, GCS) hit cache across sessions — the path carries
   the stable document ID, the query string carries only ephemeral auth
   state.
-
-The `index-directory.sh` path is a special case: it content-hashes the
-PDF bytes so that the same book under two filenames dedupes to one
-cache entry.
 
 ## URL normalization
 

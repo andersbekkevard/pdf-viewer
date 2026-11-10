@@ -191,6 +191,9 @@ else
     fi
 
     if [ "$plist_changed" -eq 1 ]; then
+        # An older install symlinked the repo template here; writing through
+        # that link would overwrite the checked-in template.
+        [ -L "$PLIST_DEST" ] && rm -f "$PLIST_DEST"
         printf '%s\n' "$DESIRED_PLIST" > "$PLIST_DEST"
         ok "wrote templated plist → $PLIST_DEST"
     else

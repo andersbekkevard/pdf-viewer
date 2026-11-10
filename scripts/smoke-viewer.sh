@@ -18,7 +18,7 @@
 set -euo pipefail
 
 PORT=7435
-REPO_DIR="/Users/andersbekkevard/dev/misc/pdf_viewer"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CACHE_DIR="$HOME/.cache/pdf_viewer"
 FIXTURE="$REPO_DIR/test/fixtures/basic_text.pdf"
 INJECTOR="$REPO_DIR/scripts/inject-overlay.py"

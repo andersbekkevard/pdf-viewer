@@ -14,7 +14,7 @@ top-level "provenance" object so the two writers never collide:
         "pdf2htmlex": "0.18.8.rc2",
         "poppler": "24.06.1",
         "converted_at": "2026-06-12",
-        "overlay_version": 25
+        "overlay_version": "8efe6927a5"
       }
     }
 
@@ -29,7 +29,7 @@ Either writer can run first; order does not matter.
 
 Usage:
   write-provenance.py <meta.json> [--converter NAME] [--pdf2htmlex V]
-      [--poppler V] [--converted-at ISO] [--overlay-version N]
+      [--poppler V] [--converted-at ISO] [--overlay-version HASH]
       [--extra KEY=VALUE ...] [--bin /path/to/pdf2htmlEX]
 
 If --pdf2htmlex / --poppler are omitted and --bin is given, versions are
@@ -115,10 +115,9 @@ def main() -> int:
         # backfilled=true + a documented date heuristic instead).
         prov["converted_at"] = datetime.date.today().isoformat()
     if args.overlay_version is not None:
-        try:
-            prov["overlay_version"] = int(args.overlay_version)
-        except ValueError:
-            prov["overlay_version"] = args.overlay_version
+        # A content hash (inject-overlay.py --print-version). Always a string:
+        # an all-digit hash must not turn into a number or lose leading zeros.
+        prov["overlay_version"] = args.overlay_version
 
     for kv in args.extra:
         key, _, value = kv.partition("=")

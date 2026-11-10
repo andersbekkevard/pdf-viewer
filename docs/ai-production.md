@@ -76,8 +76,8 @@ br dep add <blocked-bead-id> <blocker-bead-id>
 7. Close the bead only after implementation, docs, and verification are done.
 8. Run `br sync --flush-only` before ending so `.beads/issues.jsonl` is current.
 
-The generated Beads checklist in `CLAUDE.md` describes the full publish path.
-Use `git push` and PR creation only when the user asks for publication or the
+`CLAUDE.md` ("Publication boundary") describes the publish path. Use
+`git push` and PR creation only when the user asks for publication or the
 session is explicitly a shipping session.
 
 ## Documentation rules

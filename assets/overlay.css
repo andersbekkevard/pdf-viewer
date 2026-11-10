@@ -49,8 +49,6 @@
     --sidebar-w:         280px;
     --pdf2html-page-shift: 0px;
     --r-lg:              14px;
-    --r-md:              10px;
-    --r-sm:              7px;
 }
 
 
@@ -775,34 +773,7 @@ body.sidebar-shown #pdf2html-sidebar-body #outline {
 }
 
 
-/* ---- Control atoms: segmented, switch, slider, accent dots ---------------- */
-
-.pdf2html-seg {
-    display: inline-flex;
-    background: var(--bg-input);
-    border: 1px solid var(--hairline);
-    border-radius: 8px;
-    padding: 2px;
-    gap: 0;
-}
-.pdf2html-seg button {
-    padding: 5px 11px;
-    font-size: 12px;
-    color: var(--fg-dim);
-    background: transparent;
-    border: 0;
-    border-radius: 6px;
-    cursor: pointer;
-    font-family: inherit;
-    font-weight: 400;
-    transition: background 100ms ease-out, color 100ms ease-out;
-}
-.pdf2html-seg button:hover:not(.active) { color: var(--fg); }
-.pdf2html-seg button.active {
-    background: var(--bg-elevated-2);
-    color: var(--fg);
-    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset;
-}
+/* ---- Control atoms: switch, slider, accent dots ---------------------------- */
 
 .pdf2html-switch {
     width: 34px;

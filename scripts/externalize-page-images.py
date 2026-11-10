@@ -4,10 +4,11 @@
 The canonical pdf2htmlEX output embeds every full-page raster as a base64
 data URI. This script keeps the canonical HTML untouched, writes each inline
 page raster to a sibling directory, and writes a derived HTML file whose
-page-raster <img> tags carry data-pdf2html-src instead of eager src. By
-default it retains the original positioned pdf2htmlEX text subtree byte for
-byte. The externalized raster and original text keep their canonical paint
-roles, while the text remains the browser's find/copy/selection surface.
+page-raster <img> tags carry data-pdf2html-src instead of eager src. The
+default text mode, paint-safe, simplifies only the lines proved to be hidden
+fallback text and keeps every other positioned pdf2htmlEX text line byte for
+byte, so the raster and text keep their canonical paint roles while the text
+remains the browser's find/copy/selection surface.
 
 Usage:
     externalize-page-images.py <input.html> <output.light.html> \
@@ -474,27 +475,6 @@ def validate_source(text: str, input_html: pathlib.Path) -> tuple[int, int]:
     return pages, rasters
 
 
-def validate_inline_rasters(text: str, input_html: pathlib.Path) -> None:
-    """Fail before clearing/rebuilding assets when an inline raster is bad."""
-    page_index = 0
-    for match in IMG_TAG_RE.finditer(text):
-        tag = match.group(0)
-        if not is_page_raster(tag):
-            continue
-        page_index += 1
-        src_match = SRC_RE.search(tag)
-        assert src_match  # validate_source() already checked this invariant.
-        data_match = DATA_URI_RE.match(src_match.group(2))
-        if not data_match:
-            continue
-        try:
-            base64.b64decode(re.sub(r"\s+", "", data_match.group(2)), validate=True)
-        except Exception as exc:
-            raise RuntimeError(
-                f"failed to decode page raster {page_index} in {input_html}: {exc}"
-            ) from exc
-
-
 def validate_geometry_output(source: str, output: str, expected_pages: int, expected_rasters: int) -> None:
     if page_frame_count(output) != expected_pages:
         raise RuntimeError("geometry output changed the page-frame count")
@@ -603,7 +583,6 @@ def externalize(
 ) -> tuple[int, int, int, int, int]:
     text = input_html.read_text(encoding="utf-8", errors="ignore")
     expected_pages, expected_rasters = validate_source(text, input_html)
-    validate_inline_rasters(text, input_html)
 
     if not url_prefix.endswith("/"):
         url_prefix += "/"
@@ -662,6 +641,8 @@ def externalize(
         out_parts.append(replacement)
         pos = match.end()
 
+    # Every raster is decoded above and held in pending_assets, so a bad one
+    # has already failed before any published asset is cleared or replaced.
     out_parts.append(text[pos:])
     output_text = mark_light_html(mark_light_body("".join(out_parts)), text_layer)
     page_text_count = 0
