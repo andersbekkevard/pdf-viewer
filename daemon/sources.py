@@ -43,19 +43,44 @@ def filename_for(url: str, content_disposition: str = "") -> str:
     return (stem[:196] or "document") + extension
 
 
+def save(body: bytes, url: str, content_disposition: str, target_dir: pathlib.Path) -> str:
+    """Store PDF bytes fetched elsewhere (the browser, through the extension)
+    into target_dir and return the filename, with the same checks as a
+    download."""
+    if body[:4] != b"%PDF":
+        raise SourceError("bytes are not a PDF (a sign-in page?)")
+    if len(body) > MAX_BYTES:
+        raise SourceError("source larger than 512 MB")
+    name = filename_for(url, content_disposition)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    tmp = target_dir / f".save.{os.getpid()}.tmp"
+    try:
+        tmp.write_bytes(body)
+        tmp.replace(target_dir / name)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    return name
+
+
 def download(url: str, target_dir: pathlib.Path) -> str:
     """Download a PDF into target_dir and return its filename."""
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise SourceError("not an http(s) URL")
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/pdf,*/*"})
-    target_dir.mkdir(parents=True, exist_ok=True)
+    # A failed download (the common sign-in page) leaves no empty entry
+    # directory behind: those are created only for a PDF, and removed again
+    # if the download fails after all.
+    created = [d for d in (target_dir.parent, target_dir) if not d.exists()]
     tmp = target_dir / f".download.{os.getpid()}.tmp"
+    stored = False
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT_SEC) as response:
             head = response.read(5)
             if head[:4] != b"%PDF":
                 raise SourceError("response is not a PDF (a sign-in page?)")
+            target_dir.mkdir(parents=True, exist_ok=True)
             size = len(head)
             with tmp.open("wb") as out:
                 out.write(head)
@@ -69,9 +94,16 @@ def download(url: str, target_dir: pathlib.Path) -> str:
                     out.write(chunk)
             name = filename_for(url, response.headers.get("Content-Disposition", ""))
         tmp.replace(target_dir / name)
+        stored = True
         return name
     except (urllib.error.URLError, OSError, ValueError) as error:
         raise SourceError(str(error)) from error
     finally:
         if tmp.exists():
             tmp.unlink()
+        if not stored:
+            for directory in reversed(created):
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass

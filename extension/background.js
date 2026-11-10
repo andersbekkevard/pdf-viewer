@@ -12,13 +12,15 @@
 // URLs containing `&` stay intact.
 //
 // Ordering: disabled allow rules use priority 4, active dynamic redirects use
-// 3, the passthrough allow uses 2, and the static redirect uses 1. Highest
-// priority wins, so:
+// 3, the passthrough allow uses 2, and the static redirect and the generic
+// file rule use 1. Highest priority wins, so:
 //   - disabled cached URL click → dynamic allow (p4) → native viewer
 //   - cached URL click → dynamic (p3) → /view-raw serves HTML
 //   - unknown `.pdf$` URL → static (p1) → /view-raw 307s with marker
 //   - 307-target with marker → allow (p2) → native viewer
 //   - cache miss on non-.pdf URL → no rule → browser opens natively
+//   - uncached `file://….pdf`, reader engine only → generic (p1) →
+//     /view-file-raw opens the reader
 //
 // Service workers in MV3 can be terminated, so we use chrome.alarms (survives
 // suspension) rather than setInterval.
@@ -36,6 +38,24 @@ const SYNC_ALARM = 'pdfviewer-sync';
 // universally safely — we reject rather than guess. `*` never appears in
 // valid URL/file paths we care about.
 const URLFILTER_META = /[*^|]/;
+
+// Any local PDF, for the reader engine, which opens files without
+// conversion. `/view-file-raw` reads the raw query because the substitution
+// cannot percent-encode the capture. Per-entry file rules (p3, p4) win, so a
+// disabled entry's allow rule still keeps it native.
+const GENERIC_FILE_PRIORITY = 1;
+const GENERIC_FILE_REGEX = '^file://.*\\.[Pp][Dd][Ff](?:[?#].*)?$';
+
+// The URL a tab reports is the browser's normalized form of what the daemon
+// sent it to; compare both that way.
+function sameUrl(tabUrl, url) {
+    if (tabUrl === url) return true;
+    try {
+        return tabUrl === new URL(url).href;
+    } catch (_) {
+        return false;
+    }
+}
 
 function escapeRegex(s) {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -61,7 +81,15 @@ function syncCachedRules() {
 
 async function _runSync() {
     let entries;
+    let engine;
     try {
+        const health = await fetch(`${DAEMON}/healthz`, { cache: 'no-store' });
+        if (!health.ok) {
+            console.warn(`pdf_viewer: /healthz returned ${health.status}`);
+            return;
+        }
+        // Daemons older than the reader report no engine: pdf2htmlEX.
+        engine = (await health.json()).engine || 'pdf2htmlex';
         const resp = await fetch(`${DAEMON}/cache-urls`, { cache: 'no-store' });
         if (!resp.ok) {
             console.warn(`pdf_viewer: /cache-urls returned ${resp.status}`);
@@ -88,6 +116,21 @@ async function _runSync() {
 
     const addRules = [];
     let ruleIdCounter = DYNAMIC_RULE_ID_BASE;
+
+    if (engine === 'reader') {
+        addRules.push({
+            id: ruleIdCounter++,
+            priority: GENERIC_FILE_PRIORITY,
+            action: {
+                type: 'redirect',
+                redirect: { regexSubstitution: `${VIEWER}/view-file-raw?\\0` }
+            },
+            condition: {
+                regexFilter: GENERIC_FILE_REGEX,
+                resourceTypes: ['main_frame']
+            }
+        });
+    }
 
     for (const entry of entries) {
         let rule;
@@ -245,7 +288,7 @@ async function _runSync() {
     // on the next sync.
     _appliedRulesKey = skipped.length === 0 ? rulesKey : null;
     console.log(
-        `pdf_viewer: synced ${installed}/${addRules.length} cache entries ` +
+        `pdf_viewer: synced ${installed}/${addRules.length} rules (engine ${engine}) ` +
         `(${removeRuleIds.length} stale rules removed, ${skipped.length} skipped)`
     );
 }
@@ -286,7 +329,7 @@ async function navigateTab({ from_url, to_url }) {
         // convert script captured includes the `_pdfvw=passthrough` marker
         // and must match byte-for-byte).
         const allTabs = await chrome.tabs.query({});
-        const matches = allTabs.filter(t => t.url === from_url);
+        const matches = allTabs.filter(t => sameUrl(t.url, from_url));
         if (matches.length === 0) {
             console.log(`pdf_viewer: nav signal — no tab with URL ${from_url}`);
             return;
@@ -302,10 +345,10 @@ async function navigateTab({ from_url, to_url }) {
     }
 }
 
-// Fetch signals — the convert script's curl download hit an auth wall
-// (Cloudflare Access, campus SSO) because curl has none of the browser's
-// cookies. Fetch the same URL here, where the session lives, and hand the
-// bytes back through the daemon. Only URLs open in one of this browser's tabs
+// Fetch signals — the convert script's curl download, or the reader's own
+// download in the daemon, hit an auth wall (Cloudflare Access, campus SSO)
+// because neither has the browser's cookies. Fetch the same URL here, where
+// the session lives, and hand the bytes back through the daemon. Only URLs open in one of this browser's tabs
 // are fetched, so a signal cannot make the extension read arbitrary pages.
 const _handledFetchIds = new Set();
 
@@ -321,7 +364,7 @@ async function fetchSourceForDaemon({ id, url }) {
     if (_handledFetchIds.has(id)) return;
     _handledFetchIds.add(id);
     const tabs = await chrome.tabs.query({});
-    if (!tabs.some(t => t.url === url)) {
+    if (!tabs.some(t => sameUrl(t.url, url))) {
         console.log(`pdf_viewer: fetch signal — no tab with URL ${url}`);
         return;
     }

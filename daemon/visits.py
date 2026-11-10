@@ -11,12 +11,16 @@ frecency order of /library.
 from __future__ import annotations
 
 import contextlib
+import os
 import pathlib
 import sqlite3
 import time
 from typing import Iterator, Literal
 
-DB_PATH = pathlib.Path.home() / ".cache" / "pdf_viewer" / "visits.db"
+# Beside the cache, which PDF_VIEWER_CACHE_DIR moves for scratch daemons.
+DB_PATH = pathlib.Path(
+    os.environ.get("PDF_VIEWER_CACHE_DIR") or pathlib.Path.home() / ".cache" / "pdf_viewer"
+) / "visits.db"
 SESSION_WINDOW_SEC = 15 * 60
 
 VisitKind = Literal["url", "path", "reader", "boost"]

@@ -4,6 +4,7 @@ Routes:
     GET    /view?path=<local>   light HTML by default, canonical/PDF fallback
     GET    /view?url=<remote>   light HTML by default, canonical/remote fallback
     GET    /view-raw?<remote>   same as /view?url=, but preserves raw query strings
+    GET    /view-file-raw?<file-url>  same as /view?path=, from a raw file:// URL
     GET    /view-canonical?...  canonical HTML rollback route (also -raw)
     GET    /view-light?...      explicit light HTML, canonical fallback (also -raw)
     GET    /read?...            open any PDF in the reader, no conversion (also -raw)
@@ -68,7 +69,11 @@ from catalog import (
     with_passthrough,
 )
 
-CACHE_DIR = pathlib.Path.home() / ".cache" / "pdf_viewer"
+# PDF_VIEWER_CACHE_DIR points a scratch daemon (scripts/verify-extension.sh)
+# at a throwaway cache; production leaves it unset.
+CACHE_DIR = pathlib.Path(
+    os.environ.get("PDF_VIEWER_CACHE_DIR") or pathlib.Path.home() / ".cache" / "pdf_viewer"
+)
 REPO_DIR = pathlib.Path(__file__).resolve().parents[1]
 ASSETS_DIR = REPO_DIR / "assets"
 catalog = CacheCatalog(CACHE_DIR, visits)
@@ -77,10 +82,15 @@ reader = Reader(CACHE_DIR)
 
 @contextlib.asynccontextmanager
 async def _lifespan(_app: FastAPI):
+    global _loop
+    # Sync routes run in worker threads; they hand signal and relay work to
+    # this loop, which owns the asyncio objects those use.
+    _loop = asyncio.get_running_loop()
     visits.init()
     yield
 
 
+_loop: Optional[asyncio.AbstractEventLoop] = None
 app = FastAPI(title="pdf_viewer", version="0.1.0", lifespan=_lifespan)
 # Per-document position, marks and zoom (daemon/state.py). Included before
 # the static mounts at the end of this file, which catch every other path.
@@ -152,7 +162,22 @@ def _nav_event() -> asyncio.Event:
     return _nav_signal_event
 
 
+def _off_loop() -> bool:
+    """True in a sync route's worker thread while the daemon's loop runs."""
+    if _loop is None or _loop.is_closed():
+        return False
+    try:
+        return asyncio.get_running_loop() is not _loop
+    except RuntimeError:
+        return True
+
+
 def _wake_nav_waiters() -> None:
+    # asyncio.Event is not thread-safe: from a sync route's worker thread the
+    # wake-up is handed to the loop, or long-polls would sleep through it.
+    if _off_loop():
+        _loop.call_soon_threadsafe(_wake_nav_waiters)
+        return
     # Set the current event and start a fresh one: every waiter holding the
     # old event wakes, and no waiter can clear it for the others.
     global _nav_signal_event
@@ -287,10 +312,7 @@ class FetchSignal(BaseModel):
     url: str
 
 
-@app.post("/signal/fetch")
-async def signal_fetch(sig: FetchSignal):
-    if not sig.url.startswith(("https://", "http://")):
-        raise HTTPException(400, "only http(s) URLs can be fetched")
+def _queue_fetch_signal(url: str) -> int:
     _purge_expired_nav_signals()
     _purge_expired_fetches()
     fetch_id = _next_nav_signal_id()
@@ -298,11 +320,18 @@ async def signal_fetch(sig: FetchSignal):
     _pending_nav_signals.append({
         "type": "fetch",
         "id": fetch_id,
-        "url": sig.url,
+        "url": url,
         "created_at": time.time(),
     })
     _wake_nav_waiters()
-    return {"id": fetch_id}
+    return fetch_id
+
+
+@app.post("/signal/fetch")
+async def signal_fetch(sig: FetchSignal):
+    if not sig.url.startswith(("https://", "http://")):
+        raise HTTPException(400, "only http(s) URLs can be fetched")
+    return {"id": _queue_fetch_signal(sig.url)}
 
 
 @app.put("/fetch/{fetch_id}")
@@ -365,6 +394,123 @@ async def fetch_get(fetch_id: int):
     )
 
 
+# -----------------------------------------------------------------------------
+# Reader delivery relay — a sign-in-gated PDF still ends up in the reader.
+#
+# In reader mode a URL the daemon cannot download itself (the host answers its
+# cookie-less request with a sign-in page) goes back to the browser with the
+# passthrough marker, so the tab shows the native viewer at that exact URL.
+# The relay then asks the extension for that tab's bytes through the fetch
+# signal above, stores them as the entry's `_source/` PDF, registers the entry
+# and queues a navigate signal that swaps the tab to the reader. A later click
+# on the link finds the stored source and opens the reader directly.
+#
+# The extension fetches only a URL open in one of its tabs, so the daemon
+# still stores bytes only for a URL the browser itself had open. The signal
+# can reach the extension before the tab has followed the 307, and the
+# extension drops a signal for good once handled, so the relay asks again with
+# a fresh id while nothing has answered and gives up quietly after the bounds
+# below. One relay runs per hash at a time.
+# -----------------------------------------------------------------------------
+
+# The first ask waits for the tab to follow the 307; each ask then waits this
+# long for an acknowledgement before the next, about 20 s of silence in all.
+_RELAY_FIRST_ASK_SEC = 0.4
+_RELAY_ANSWER_WAIT_SEC = (1.0, 2.0, 3.0, 5.0, 8.0)
+# Bound on the download once the extension has acknowledged.
+_RELAY_DOWNLOAD_SEC = 300
+_RELAY_POLL_SEC = 0.1
+_relays: dict[str, asyncio.Task] = {}
+
+
+def _request_relay(hash_: str, tab_url: str, source_ref: str, base_url: str) -> None:
+    """Start a relay from any thread; a no-op without the daemon's loop."""
+    if _loop is None or _loop.is_closed():
+        return
+    if _off_loop():
+        _loop.call_soon_threadsafe(_start_relay, hash_, tab_url, source_ref, base_url)
+    else:
+        _start_relay(hash_, tab_url, source_ref, base_url)
+
+
+def _start_relay(hash_: str, tab_url: str, source_ref: str, base_url: str) -> Optional[asyncio.Task]:
+    current = _relays.get(hash_)
+    if current is not None and not current.done():
+        return None
+    if catalog.is_disabled(hash_):
+        return None
+    task = asyncio.get_running_loop().create_task(
+        _relay_source(hash_, tab_url, source_ref, base_url))
+    _relays[hash_] = task
+
+    def forget(done: asyncio.Task) -> None:
+        if _relays.get(hash_) is done:
+            del _relays[hash_]
+    task.add_done_callback(forget)
+    return task
+
+
+def _store_relayed_source(hash_: str, source_ref: str, body: bytes, disposition: str) -> None:
+    # A source stored meanwhile (another tab's relay, a direct download) wins.
+    existing = catalog.cached_source(hash_)
+    name = existing.name if existing else sources.save(
+        body, source_ref, disposition, catalog.root / hash_ / "_source")
+    catalog.register(hash_, source_ref, pathlib.PurePath(name).stem)
+
+
+async def _relay_source(hash_: str, tab_url: str, source_ref: str, base_url: str) -> bool:
+    loop = asyncio.get_running_loop()
+    waits = list(_RELAY_ANSWER_WAIT_SEC)
+    ids: list[int] = []
+    next_ask = loop.time() + _RELAY_FIRST_ASK_SEC
+    download_deadline: Optional[float] = None
+    result: Optional[dict] = None
+    try:
+        while result is None:
+            if catalog.is_disabled(hash_):
+                return False
+            answers = {i: _fetches[i] for i in ids if i in _fetches}
+            result = next((e for e in answers.values() if e["state"] == "done"), None)
+            if result is not None:
+                break
+            error = next((e for e in answers.values() if e["state"] == "error"), None)
+            if error is not None:
+                print(f"reader relay: extension could not fetch {source_ref}: {error['error']}", flush=True)
+                return False
+            now = loop.time()
+            started = [i for i, e in answers.items() if e["state"] == "started"]
+            if started:
+                if download_deadline is None:
+                    download_deadline = now + _RELAY_DOWNLOAD_SEC
+                    # Unanswered retries would start a second download.
+                    for i in ids:
+                        if i not in started:
+                            _fetches.pop(i, None)
+                elif now >= download_deadline:
+                    print(f"reader relay: download of {source_ref} timed out", flush=True)
+                    return False
+            elif now >= next_ask:
+                if not waits:
+                    print(f"reader relay: no browser tab answered for {source_ref}", flush=True)
+                    return False
+                ids.append(_queue_fetch_signal(tab_url))
+                next_ask = now + waits.pop(0)
+            await asyncio.sleep(_RELAY_POLL_SEC)
+    finally:
+        for i in ids:
+            _fetches.pop(i, None)
+    try:
+        await asyncio.to_thread(_store_relayed_source, hash_, source_ref,
+                                result["body"], result.get("disposition", ""))
+    except (sources.SourceError, OSError, InvalidCatalogInput) as error:
+        print(f"reader relay: could not store {source_ref}: {error}", flush=True)
+        return False
+    if catalog.is_disabled(hash_):
+        return False
+    _queue_navigate_signal(tab_url, f"{base_url}/r/{hash_}/")
+    return True
+
+
 @app.get("/healthz")
 def healthz():
     entries = 0
@@ -378,6 +524,8 @@ def healthz():
         "cache_dir": str(CACHE_DIR),
         "cache_exists": CACHE_DIR.is_dir(),
         "entries": entries,
+        # The extension installs its generic file:// rule only for the reader.
+        "engine": "reader" if _prefer_reader() else "pdf2htmlex",
     }
 
 
@@ -386,12 +534,12 @@ def healthz():
 # pick the representation; _view_query and _raw_url hold the shared rules.
 
 def _view_query(path: Optional[str], url: Optional[str], background: BackgroundTasks, *,
-                light: bool, reader_first: bool = False):
+                light: bool, reader_first: bool = False, base_url: Optional[str] = None):
     if (path is None) == (url is None):
         raise HTTPException(400, "provide exactly one of: path, url")
     if path is not None:
         return _view_path(path, background, light=light, reader_first=reader_first)
-    return _view_url(url, background, light=light, reader_first=reader_first)
+    return _view_url(url, background, light=light, reader_first=reader_first, base_url=base_url)
 
 
 def _raw_url(request: Request) -> str:
@@ -414,14 +562,44 @@ def _raw_url(request: Request) -> str:
     return url
 
 
+def _raw_file_path(request: Request) -> str:
+    """The local path of a raw `file://` URL query string.
+
+    The extension's generic file rule redirects `file://….pdf` to
+    `/view-file-raw?<file-url>` for the same reason as `/view-raw`: its
+    substitution cannot percent-encode the capture. Only local `.pdf` paths
+    are accepted, the files that rule matches.
+    """
+    raw_query = request.scope.get("query_string", b"")
+    if not raw_query:
+        raise HTTPException(400, "missing raw file URL query string")
+    try:
+        url = raw_query.decode("ascii")
+    except UnicodeDecodeError:
+        raise HTTPException(400, "raw file URL must be ASCII / percent-encoded")
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "file" or parsed.netloc not in {"", "localhost"}:
+        raise HTTPException(400, "raw URL must be a local file:// URL")
+    try:
+        path = urllib.parse.unquote(parsed.path, errors="strict")
+    except UnicodeDecodeError:
+        raise HTTPException(400, "raw file URL path is not UTF-8")
+    if not path.startswith("/") or "\x00" in path or not path.lower().endswith(".pdf"):
+        raise HTTPException(400, "raw file URL must name an absolute .pdf path")
+    return path
+
+
 @app.get("/view")
 def view(
     background: BackgroundTasks,
     path: Optional[str] = Query(None, description="absolute local path"),
     url: Optional[str] = Query(None, description="http(s) URL"),
+    # Injected by FastAPI from the annotation; last so direct callers can omit it.
+    request: Request = None,  # type: ignore[assignment]
 ):
     return _view_query(path, url, background, light=_prefer_light_from_environment(),
-                       reader_first=_prefer_reader())
+                       reader_first=_prefer_reader(),
+                       base_url=_base_url(request) if request else None)
 
 
 @app.get("/read")
@@ -429,15 +607,19 @@ def read(
     background: BackgroundTasks,
     path: Optional[str] = Query(None, description="absolute local path"),
     url: Optional[str] = Query(None, description="http(s) URL"),
+    # Injected by FastAPI from the annotation; last so direct callers can omit it.
+    request: Request = None,  # type: ignore[assignment]
 ):
     """Open any PDF in the reader, converted or not: a local file is read in
     place, a remote one is downloaded once into its entry."""
-    return _view_query(path, url, background, light=True, reader_first=True)
+    return _view_query(path, url, background, light=True, reader_first=True,
+                       base_url=_base_url(request) if request else None)
 
 
 @app.get("/read-raw")
 def read_raw(request: Request, background: BackgroundTasks):
-    return _view_url(_raw_url(request), background, light=True, reader_first=True)
+    return _view_url(_raw_url(request), background, light=True, reader_first=True,
+                     base_url=_base_url(request))
 
 
 @app.get("/view-light")
@@ -462,7 +644,14 @@ def view_canonical(
 def view_raw(request: Request, background: BackgroundTasks):
     """Remote URL view route for extension redirects."""
     return _view_url(_raw_url(request), background, light=_prefer_light_from_environment(),
-                     reader_first=_prefer_reader())
+                     reader_first=_prefer_reader(), base_url=_base_url(request))
+
+
+@app.get("/view-file-raw")
+def view_file_raw(request: Request, background: BackgroundTasks):
+    """Local file view route for the extension's generic file:// rule."""
+    return _view_path(_raw_file_path(request), background, light=_prefer_light_from_environment(),
+                      reader_first=_prefer_reader())
 
 
 @app.get("/view-light-raw")
@@ -514,7 +703,8 @@ def _view_path(path: str, background: BackgroundTasks, *, light: bool, reader_fi
     )
 
 
-def _view_url(url: str, background: BackgroundTasks, *, light: bool, reader_first: bool = False):
+def _view_url(url: str, background: BackgroundTasks, *, light: bool, reader_first: bool = False,
+              base_url: Optional[str] = None):
     try:
         resolved = catalog.resolve_source(url, prefer_light=light)
     except InvalidCatalogInput as error:
@@ -525,9 +715,13 @@ def _view_url(url: str, background: BackgroundTasks, *, light: bool, reader_firs
                 name = sources.download(url, CACHE_DIR / resolved.hash / "_source")
             except sources.SourceError as error:
                 # No bytes (sign-in page, network): the browser's own viewer
-                # still opens the original URL.
+                # opens the original URL, and the relay fetches it from that
+                # tab's session to swap the tab to the reader.
                 print(f"reader: download failed for {resolved.source_ref}: {error}", flush=True)
-                return RedirectResponse(with_passthrough(url), status_code=307)
+                fallback = with_passthrough(url)
+                if base_url:
+                    _request_relay(resolved.hash, fallback, resolved.source_ref, base_url)
+                return RedirectResponse(fallback, status_code=307)
             catalog.register(resolved.hash, resolved.source_ref, pathlib.PurePath(name).stem)
         elif resolved.hash not in catalog.mappings():
             cached = catalog.source_pdf(resolved.hash)
