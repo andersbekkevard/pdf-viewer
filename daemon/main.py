@@ -1,6 +1,7 @@
 """pdf_viewer daemon — read-only FastAPI service over ~/.cache/pdf_viewer/.
 
 Routes:
+    GET    /                    home page: the library, searchable (assets/home.html)
     GET    /view?path=<local>   light HTML by default, canonical/PDF fallback
     GET    /view?url=<remote>   light HTML by default, canonical/remote fallback
     GET    /view-raw?<remote>   same as /view?url=, but preserves raw query strings
@@ -973,6 +974,13 @@ def rename_entry(hash_: str, body: RenameRequest):
         raise HTTPException(404, str(error)) from error
     except NameConflict as error:
         raise HTTPException(409, str(error)) from error
+
+
+@app.get("/")
+def home():
+    """The library as a keyboard-first start page (assets/home.{html,js,css})."""
+    return FileResponse(ASSETS_DIR / "home.html", media_type="text/html; charset=utf-8",
+                        headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/library")

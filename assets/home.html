@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Library · pdf_viewer</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/_assets/home.css">
+<script type="module" src="/_assets/home.js"></script>
+</head>
+<body>
+<header class="head">
+  <div class="head-inner">
+    <h1 class="title">Library <span class="count" id="count" aria-live="polite"></span></h1>
+    <form class="search" role="search" id="search-form">
+      <label class="visually-hidden" for="q">Search the library, or paste a PDF URL or path</label>
+      <input id="q" type="search" autocomplete="off" spellcheck="false" autofocus
+             placeholder="Search, or paste a PDF URL or path" aria-describedby="keys">
+      <label class="sort">
+        <span class="visually-hidden">Sort</span>
+        <select id="sort">
+          <option value="frecency">Recent and frequent</option>
+          <option value="recent">Last opened</option>
+          <option value="name">Name</option>
+        </select>
+      </label>
+    </form>
+  </div>
+</header>
+<main class="main">
+  <ol class="rows" id="rows" aria-label="Documents"></ol>
+  <p class="state" id="state" hidden></p>
+</main>
+<footer class="foot" id="keys">
+  <span><kbd>↑</kbd><kbd>↓</kbd> move</span>
+  <span><kbd>Enter</kbd> open</span>
+  <span><kbd>⌘</kbd><kbd>Enter</kbd> new tab</span>
+  <span><kbd>Esc</kbd> clear</span>
+  <span><kbd>/</kbd> search</span>
+</footer>
+<p class="visually-hidden" id="status" role="status" aria-live="polite"></p>
+</body>
+</html>

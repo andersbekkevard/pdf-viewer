@@ -449,17 +449,47 @@ class CacheCatalog:
                                        "age_multiplier": 0.0, "frecency_score": 0.0})
             canonical = representation.canonical if representation else None
             name = self.entry_name(hash_)
+            has_source = self.source_pdf(hash_) is not None
+            meta = self._entry_meta(hash_)
             out.append({"hash": hash_, "name": name, "source_ref": mapping.source_ref,
                         "search_text": self._search_text(name, mapping.source_ref),
                         "href": href,
-                        "reader_href": f"/r/{hash_}/" if self.source_pdf(hash_) is not None else None,
+                        "reader_href": f"/r/{hash_}/" if has_source else None,
                         "canonical_href": f"/{hash_}/{canonical.name}" if canonical else None,
                         "light_href": f"/{hash_}/{representation.light.name}" if representation and representation.light else None,
                         "count": score["raw_count"], "rank": score["rank"],
                         "last_seen": score["last_seen"], "age_multiplier": score["age_multiplier"],
-                        "frecency_score": score["frecency_score"]})
+                        "frecency_score": score["frecency_score"],
+                        # Home page (assets/home.js): meta.json fields and a page-1 thumbnail.
+                        "pages": meta.get("pages"), "title": meta.get("title"),
+                        "author": meta.get("author"),
+                        "thumb_href": self._thumb_href(hash_, has_source)})
         out.sort(key=lambda entry: (-entry["frecency_score"], -(entry["last_seen"] or 0), entry["name"].lower()))
         return out
+
+    def _entry_meta(self, hash_: str) -> dict:
+        """`<hash>/meta.json` (pdfinfo or the reader's PDFium copy), or {}.
+        Never opens the PDF."""
+        try:
+            meta = json.loads((self.root / hash_ / "meta.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(meta, dict):
+            return {}
+        pages = meta.get("pages")
+        return {"pages": pages if isinstance(pages, int) and pages > 0 else None,
+                "title": str(meta["title"]).strip() or None if meta.get("title") else None,
+                "author": str(meta["author"]).strip() or None if meta.get("author") else None}
+
+    def _thumb_href(self, hash_: str, has_source: bool) -> Optional[str]:
+        """Page 1 small: the reader renders it from the source PDF (240 px,
+        the width the sidebar's Pages tab already caches); converted entries
+        may carry pdftocairo's thumbs/1.jpg."""
+        if has_source:
+            return f"/r/{hash_}/p/1/240.png"
+        if (self.root / hash_ / "thumbs" / "1.jpg").is_file():
+            return f"/{hash_}/thumbs/1.jpg"
+        return None
 
     def search_entries(self, query: str) -> list[dict]:
         needle = self._search_text(query, None)
