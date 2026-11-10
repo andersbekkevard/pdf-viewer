@@ -74,6 +74,40 @@ it. Run it green before closing an overlay bead; a richer interactive proof
 from the list below is still warranted when the bead changes behavior the smoke
 test does not assert.
 
+## Vimium check
+
+`scripts/verify-vimium.sh [--engine reader|pdf2htmlex|both]` runs the viewer under the
+real Vimium extension. It copies the Vimium installed in the Chrome Default profile into a
+temp dir (read-only; nothing is committed) and loads it with a patched copy of `extension/`
+into headless Chromium for Testing, against a scratch reader daemon on the first free port in
+7470–7479 with a temp cache and state db. It generates a 14-page PDF with an outline, an
+internal link, an external link and URL/DOI text (reportlab through `uv`), opens it in the
+reader through `/read?path=`, and, when native pdf2htmlEX is installed, converts a copy with
+`scripts/lib/pipeline.sh` and runs the same checks on its `.light.html`. Vimium gets the
+exclusion rule from `docs/keybindings.md` ("Vimium setup") through
+`chrome.storage.sync.exclusionRules`; the run confirms it is active, and that `?` reaches
+Vimium on an origin the rule does not match.
+
+Keys are trusted CDP key events, so they pass through Vimium's handlers as typed keys do.
+The checks cover `j k d u` steps at fit zoom and at zoom 2, `gg` / `G`, link hints for PDF
+links, outline entries and overlay buttons (including both jumps), visual and caret mode
+with `y` (the headless clipboard is separate from the macOS pasteboard), the overlay keys
+and Esc chain, sidebar scroll scoping and page console errors. A string check, with no
+browser, shows that a rule containing `<c-f>` would pass plain `f` to the page, which is
+why the documented rule leaves `<c-f>` out. A full run takes about 90 s (`--engine reader`
+about 40 s) and opens no window (`PDFV_HEADED=1` shows it).
+
+Two known limitations are NOTE lines and do not affect the exit status. Vimium's `ma` /
+`'a` marks store the window's scroll position, which is always 0 because the viewer scrolls
+`#page-container`; `:mark` / `:jump` is the supported path. On the pdf2htmlEX engine only,
+the internal and external PDF link elements are not hit-testable, so the script notes that
+they receive no hint; on the reader engine those two stay real checks.
+
+Exit status 0 means no regression: every check passed. A FAIL line is a regression. The
+script does not prove Comet, the owner's real Vimium settings, held-key scrolling speed,
+the browser's own Cmd-F find bar or a sign-in host. It has no baseline file. If the same
+check fails on both engines, the problem predates the reader.
+
 ## Pick the right proof
 
 Use the smallest proof that exercises the changed behavior:
