@@ -36,6 +36,7 @@ export function createSettings(core) {
         body.appendChild(group('Appearance', [
             row('Zoom', 'Page scale (:zoom N | auto)',
                 slider(0.6, 2.5, 0.1, zoom.current(), formatZoom, function (v) { zoom.set(v); }).wrap),
+            row('Dark pages', ':dark · inverts the pages for reading at night', prefSwitch('darkPages')),
         ]));
 
         // Pin locks the scrolloff slider at 50%; unpinning restores the
@@ -51,6 +52,7 @@ export function createSettings(core) {
 
         body.appendChild(group('Behavior', [
             row('Page counter visible', 'Top pill; toggles with ⌘⇧. or :counter', prefSwitch('pageCounterVisible')),
+            row('Page counter on page change', ':counter brief · shows it for a moment while hidden', prefSwitch('pageCounterBrief')),
             row('Scrolloff', 'Auto-scroll when cursor enters ±N% band (:so N)', scrollOffSlider.wrap),
             row('Pin cursor to center', ':pin · locks scrolloff to 50%', prefSwitch('pinned', syncScrollOff)),
             row('Case-sensitive search', ':case · / matches exact casing', prefSwitch('searchCaseSensitive')),

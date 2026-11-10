@@ -30,6 +30,11 @@ export function createPreferences(storage) {
             parse: function (raw) { return raw === '0'; },
             format: function (on) { return on ? '0' : '1'; },
         },
+        // Show the page counter for a moment on each page change while it is
+        // otherwise hidden.
+        pageCounterBrief: flag('pdf2html-pageno-brief', false),
+        // Invert the pages for reading in the dark.
+        darkPages: flag('pdf2html-dark-pages', false),
         sidebarTab: {
             key: 'pdf2html-sidebar-tab',
             parse: function (raw) { return raw === 'thumbs' ? 'thumbs' : 'outline'; },

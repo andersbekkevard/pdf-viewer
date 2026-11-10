@@ -11,11 +11,26 @@ export function createPageCounter(core) {
     var isInputTarget = core.isInputTarget;
 
     var pill, cur, leftEl, rightEl, leftText, rightText;
+    // The first page-change event is the load itself, not a move.
+    var seenFirstPage = false;
+
+    var flashTimer = null;
 
     function applyVisibility() {
         var visible = prefs.get('pageCounterVisible');
         document.body.classList.toggle('pageno-hidden', !visible);
         if (visible) render();
+    }
+    // Brief mode: the hidden counter appears for a moment on a page change.
+    function flash() {
+        if (prefs.get('pageCounterVisible') || !prefs.get('pageCounterBrief')) return;
+        document.body.classList.add('pageno-flash');
+        render();
+        if (flashTimer) clearTimeout(flashTimer);
+        flashTimer = setTimeout(function () {
+            flashTimer = null;
+            document.body.classList.remove('pageno-flash');
+        }, 1400);
     }
 
     function render() {
@@ -83,6 +98,8 @@ export function createPageCounter(core) {
 
         document.addEventListener('pdf2html-page-change', function (e) {
             if (e.detail && e.detail.page) cur.textContent = String(e.detail.page);
+            if (seenFirstPage) flash();
+            seenFirstPage = true;
         });
         document.addEventListener('pdf2html-chapter-change', function (e) {
             renderChapter(e.detail && e.detail.entry);

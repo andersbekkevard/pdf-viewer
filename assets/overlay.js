@@ -30,6 +30,7 @@ import { createFocusRouting } from './overlay-focus.js';
 import { createSidebar } from './overlay-sidebar.js';
 import { createPageCounter } from './overlay-pageno.js';
 import { createCommandSurface } from './overlay-commands.js';
+import { createToast } from './overlay-toast.js';
 
 preparePdf2htmlEx({ document: document, window: window });
 
@@ -66,8 +67,13 @@ preparePdf2htmlEx({ document: document, window: window });
             documentModel: documentModel, followDestination: pdf2htmlex.followDestination,
         }));
         var scrollOff = createScrollOff(withBase({ performance: performance, prefs: prefs, documentModel: documentModel }));
+        var toast = createToast(base);
+        // The library is built below; the quote reference reads it late.
+        var library = null;
         var text = createTextInteraction(withBase({
             navigator: navigator, navigation: navigation, documentModel: documentModel, scrollOff: scrollOff,
+            location: location, notify: toast.show,
+            sourceRef: function () { return library ? library.currentSourceRef() : ''; },
         }));
         // Finger and search each yield to the other; the late binding keeps
         // construction order simple.
@@ -80,10 +86,15 @@ preparePdf2htmlEx({ document: document, window: window });
         finger = createFinger({
             closeSearch: search.close,
             visiblePages: documentModel.visiblePages,
-            writeClip: text.writeClip,
+            writeClip: function (value) {
+                return text.writeClip(value).then(function (ok) {
+                    toast.show(ok ? 'Copied ' + value : 'Could not copy to the clipboard', { error: !ok });
+                    return ok;
+                });
+            },
         });
-        var library = createLibrary({ document: document, location: location, history: history,
-            fetch: fetch.bind(window), entryHash: entryHash });
+        library = createLibrary({ document: document, location: location, history: history,
+            fetch: fetch.bind(window), entryHash: entryHash, notify: toast.show });
         var settings = createSettings({ document: document, prefs: prefs, zoom: zoom });
         var focus = createFocusRouting(base);
         var commands = null;
@@ -96,7 +107,15 @@ preparePdf2htmlEx({ document: document, window: window });
             documentModel: documentModel, isInputTarget: isInputTarget });
         commands = createCommandSurface({ document: document, window: window, location: location,
             prefs: prefs, zoom: zoom, navigation: navigation, text: text, library: library,
-            finger: finger, settings: settings, isInputTarget: isInputTarget });
+            finger: finger, settings: settings, isInputTarget: isInputTarget, notify: toast.show,
+            jumpBack: function () { jump(navigation.back, 'Back', 'Nothing to go back to'); },
+            jumpForward: function () { jump(navigation.forward, 'Forward', 'Nothing to go forward to'); } });
+        function jump(travel, word, empty) {
+            var position = travel();
+            toast.show(position ? word + ' to p. ' + position.page : empty, { error: !position });
+        }
+        registerJumpHistoryKeys(jump, navigation);
+        applyDarkPages(prefs);
 
         // Order matters where one mount measures what another builds: the
         // document adaptation runs before first paint, zoom before anything
@@ -163,6 +182,26 @@ preparePdf2htmlEx({ document: document, window: window });
         }, true);
     }
 
+    // ⌘Z undoes the last jump and ⌘⇧Z redoes it: an outline click, a link, a
+    // page number, gg/G, a find match. Text fields keep their own undo.
+    function registerJumpHistoryKeys(jump, navigation) {
+        document.addEventListener('keydown', function (e) {
+            if (!e.metaKey || e.ctrlKey || e.altKey) return;
+            if (e.key !== 'z' && e.key !== 'Z') return;
+            if (isInputTarget(e.target)) return;
+            e.preventDefault(); e.stopPropagation();
+            if (e.shiftKey) jump(navigation.forward, 'Forward', 'Nothing to go forward to');
+            else jump(navigation.back, 'Back', 'Nothing to go back to');
+        }, true);
+    }
+
+    // Dark pages: a class on <body>; overlay.css inverts the page frames.
+    function applyDarkPages(prefs) {
+        function apply() { document.body.classList.toggle('pdf2html-dark-pages', prefs.get('darkPages')); }
+        prefs.onChange('darkPages', apply);
+        apply();
+    }
+
     // ------------------------------------------------------------------------
     // The keys any PDF viewer answers to: ←/→ turn pages (the same motion as
     // q/e, so an active selection extends pagewise), ↑/↓ scroll, Space and
@@ -191,8 +230,10 @@ preparePdf2htmlEx({ document: document, window: window });
             e.preventDefault(); e.stopPropagation();
             if (paging) {
                 var screen = Math.max(ARROW_SCROLL_STEP, root.clientHeight * 0.9);
-                if (k === 'Home') root.scrollTo({ top: 0, behavior: 'instant' });
-                else if (k === 'End') root.scrollTo({ top: root.scrollHeight, behavior: 'instant' });
+                if (k === 'Home' || k === 'End') {
+                    navigation.remember();
+                    root.scrollTo({ top: k === 'Home' ? 0 : root.scrollHeight, behavior: 'instant' });
+                }
                 else root.scrollBy({ top: (k === 'PageUp' || (k === ' ' && e.shiftKey)) ? -screen : screen, behavior: 'smooth' });
             } else if (horizontal) {
                 var delta = k === 'ArrowRight' ? 1 : -1;

@@ -1569,6 +1569,57 @@ body.pdf2html-fingers-active #page-container .t * {
 #pdf2html-pageno .cur     { color: var(--fg); }
 #pdf2html-pageno .tot     { color: var(--fg-dim); }
 body.pageno-hidden #pdf2html-pageno { display: none; }
+/* Brief mode: the hidden counter shows for a moment on a page change. */
+body.pageno-hidden.pageno-flash #pdf2html-pageno { display: inline-flex; animation: pdf2html-pageno-flash 1400ms ease-out both; }
+@keyframes pdf2html-pageno-flash {
+    0% { opacity: 0; } 12% { opacity: 1; } 75% { opacity: 1; } 100% { opacity: 0; }
+}
+
+
+/* ============================================================================
+   Dark pages — invert the page frames (raster and, in converted entries,
+   painted text) and rotate hues back so figures keep their colours roughly.
+   0.9, not 1: pure black pages glare against the dark chrome.
+   ============================================================================ */
+body.pdf2html-dark-pages #page-container > .pf {
+    filter: invert(0.9) hue-rotate(180deg);
+    box-shadow: none;
+}
+body.pdf2html-dark-pages #pdf2html-thumbs .thumb-img {
+    filter: invert(0.9) hue-rotate(180deg);
+}
+
+
+/* ============================================================================
+   Toast — one line of feedback, bottom-centre, above the palette's row.
+   ============================================================================ */
+#pdf2html-toast {
+    position: fixed;
+    left: 50%;
+    bottom: 64px;
+    z-index: 2147483000;
+    max-width: min(560px, calc(100vw - 48px));
+    padding: 8px 14px;
+    border-radius: 10px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--hairline-strong);
+    box-shadow: var(--lift-soft);
+    color: var(--fg);
+    font: 400 13px/1.35 var(--font-sans);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    pointer-events: none;
+    opacity: 0;
+    transform: translate(-50%, 6px);
+    transition: opacity 140ms ease-out, transform 140ms ease-out;
+}
+#pdf2html-toast.shown { opacity: 1; transform: translate(-50%, 0); }
+#pdf2html-toast.error { border-color: rgba(255, 140, 120, 0.45); color: #ffd9d0; }
+@media (prefers-reduced-motion: reduce) {
+    #pdf2html-toast { transition: none; }
+    body.pageno-hidden.pageno-flash #pdf2html-pageno { animation: none; }
+}
 
 
 /* ============================================================================

@@ -7,6 +7,9 @@ export function createTextInteraction(core) {
     var navigation = core.navigation;
     var documentModel = core.documentModel;
     var scrollOff = core.scrollOff;
+    var notify = core.notify || function () {};
+    var sourceRef = core.sourceRef || function () { return ''; };
+    var location = core.location;
 
     // ---------------------------------------------------------------- selection
     function selectionPageSpan(sel) {
@@ -86,29 +89,75 @@ export function createTextInteraction(core) {
         return out.join('\n\n');
     }
 
+    // Copy, then say what was copied (or that nothing was).
+    function copy(value, what) {
+        if (!value) { notify('Nothing to copy', { error: true }); return; }
+        writeClip(value).then(function (ok) {
+            if (ok) notify('Copied ' + what);
+            else notify('Could not copy to the clipboard', { error: true });
+        });
+    }
+    function plural(n, word) { return n.toLocaleString() + ' ' + word + (n === 1 ? '' : 's'); }
+
+    // "Title, Chapter, p. 12" for a page, and the same with where the
+    // document came from, as the last line of a quote.
+    function reference(page) {
+        var entry = navigation.chapterAt(page);
+        var parts = [(document.title || 'Document').trim()];
+        if (entry && entry.label) parts.push(entry.label);
+        parts.push('p. ' + page);
+        return parts.join(', ');
+    }
     function yankRef() {
         var page = navigation.page();
         var chapter = navigation.chapterLabel();
-        writeClip((chapter ? chapter + ' · ' : '') + 'p. ' + page);
+        copy((chapter ? chapter + ' · ' : '') + 'p. ' + page, 'reference');
     }
     function yankPage() {
-        writeClip(documentModel.pageText(navigation.page()));
+        var page = navigation.page();
+        copy(documentModel.pageText(page), 'page ' + page);
     }
     function yankChapter() {
         var r = navigation.chapterRange(navigation.page());
-        if (!r) return;
-        writeClip((r.label ? r.label + '\n\n' : '') + pageRangeText(r.start, r.end));
+        if (!r) { notify('This document has no chapters', { error: true }); return; }
+        copy((r.label ? r.label + '\n\n' : '') + pageRangeText(r.start, r.end),
+            'chapter (' + plural(r.end - r.start, 'page') + ')');
     }
     function yankDocument() {
-        var body = pageRangeText(1, documentModel.totalPages() + 1);
-        if (!body) return;
-        writeClip((document.title || 'Document').trim() + '\n\n' + body);
+        var total = documentModel.totalPages();
+        var body = pageRangeText(1, total + 1);
+        copy(body ? (document.title || 'Document').trim() + '\n\n' + body : '', 'document (' + plural(total, 'page') + ')');
+    }
+    // The selection as a quote that says where it is from, for pasting into
+    // notes or a model's context:
+    //
+    //   > the selected text, lines rejoined
+    //
+    //   Title, Chapter, p. 12
+    //   <source path or URL>
+    //   <link that reopens the document at that page>
+    function yankQuote() {
+        var sel = window.getSelection();
+        var span = selectionPageSpan(sel);
+        var raw = sel ? sel.toString() : '';
+        if (!span || !raw.trim()) { notify('Select some text first', { error: true }); return; }
+        // A line break inside a paragraph is layout; a word hyphenated across
+        // it is one word.
+        var quote = raw.replace(/\r/g, '').replace(/([A-Za-z\u00C0-\u024F])-\n(?=[a-z\u00DF-\u024F])/g, '$1')
+            .replace(/\n{2,}/g, '\u0000').replace(/\s*\n\s*/g, ' ').replace(/\u0000/g, '\n\n').trim();
+        var pages = span.start === span.end ? 'p. ' + span.start : 'pp. ' + span.start + '–' + span.end;
+        var lines = ['> ' + quote.replace(/\n\n/g, '\n>\n> '), '', reference(span.start).replace(/p\. \d+$/, pages)];
+        var source = sourceRef();
+        if (source) lines.push(source);
+        if (location) lines.push(location.origin + location.pathname + '#page=' + span.start);
+        copy(lines.join('\n'), 'quote with reference (' + pages + ')');
     }
     function dispatchYank(kind) {
         var k = (kind || '').toLowerCase().trim();
         if (k === 'page') yankPage();
         else if (k === 'chapter' || k === 'ch') yankChapter();
         else if (k === 'document' || k === 'doc') yankDocument();
+        else if (k === 'quote' || k === 'q' || k === 'selection') yankQuote();
         else yankRef();
     }
 

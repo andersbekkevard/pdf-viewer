@@ -72,17 +72,71 @@ export function createNavigation(core) {
         return entry ? entry.label : '';
     }
 
+    // ------------------------------------------------------------------ history
+    // Where the reader was before each jump, so a jump can be undone (⌘Z)
+    // and redone (⌘⇧Z). A position is a page and how far into it, which
+    // survives a zoom change. Jumps made through this module are recorded
+    // by `remember`; jumps made elsewhere (Vimium gg/G, the browser's find,
+    // Home/End) are recognised in the tracker as a scroll of several screens
+    // in one event.
+    var HISTORY_MAX = 50;
+    var backStack = [];
+    var forwardStack = [];
+    var quietUntil = 0;
+
+    function here() {
+        var anchor = documentModel.viewAnchor();
+        var page = anchor && documentModel.pageNumber(anchor.page);
+        return page ? { page: page, y: anchor.y, x: anchor.x } : null;
+    }
+    function samePlace(a, b) {
+        return !!a && !!b && a.page === b.page && Math.abs(a.y - b.y) < 0.05;
+    }
+    // The scroll that follows is ours (or not a navigation): do not let the
+    // tracker record it a second time.
+    function quiet() { quietUntil = Date.now() + 250; }
+    function remember(position) {
+        position = position || here();
+        quiet();
+        if (!position || samePlace(backStack[backStack.length - 1], position)) return;
+        backStack.push(position);
+        if (backStack.length > HISTORY_MAX) backStack.shift();
+        forwardStack.length = 0;
+    }
+    function travel(from, to) {
+        var position = from.pop();
+        if (!position) return null;
+        var target = documentModel.page(position.page);
+        if (!target) return null;
+        var current = here();
+        if (current) to.push(current);
+        quiet();
+        documentModel.restoreViewAnchor({ page: target, y: position.y, x: position.x });
+        return position;
+    }
+    // Each returns the position it went to ({page, y, x}), or null.
+    function back() { return travel(backStack, forwardStack); }
+    function forward() { return travel(forwardStack, backStack); }
+
     // -------------------------------------------------------------------- jumps
-    function gotoPage(n, smooth) {
+    // landPage is the bare scroll; the public jumps record where they left.
+    function landPage(n, smooth) {
         var target = documentModel.page(n);
         if (!target) return false;
         documentModel.scrollToPage(target, PAGE_LEAD, smooth);
         return true;
     }
+    function gotoPage(n, smooth) {
+        if (!documentModel.page(n)) return false;
+        remember();
+        return landPage(n, smooth);
+    }
     function stepPage(delta) {
         var total = documentModel.totalPages();
         if (!total) return;
-        gotoPage(Math.min(total, Math.max(1, currentPage + delta)), false);
+        // A single page turn is reading, not a jump to come back from.
+        if (Math.abs(delta) > 1) remember();
+        landPage(Math.min(total, Math.max(1, currentPage + delta)), false);
     }
     // A reader outline entry names a point on its page; land the heading at
     // the same lead as a page top.
@@ -93,12 +147,14 @@ export function createNavigation(core) {
     // A reader link destination: `point` is {x, y} in the target page's px,
     // or null for the page top. Lands exactly as an outline jump does.
     function gotoDestination(page, point) {
-        return gotoPoint({ page: page, point: point }) || gotoPage(page, false);
+        remember();
+        return gotoPoint({ page: page, point: point }) || landPage(page, false);
     }
     function gotoEntry(entry) {
         if (!entry) return;
+        remember();
         pickedEntry = entry;
-        if (!followDestination(entry.link) && !gotoPoint(entry)) gotoPage(entry.page, false);
+        if (!followDestination(entry.link) && !gotoPoint(entry)) landPage(entry.page, false);
         updateChapter();
     }
     function gotoChapter(needle) {
@@ -148,18 +204,23 @@ export function createNavigation(core) {
         var match = String(value).trim().match(/^([a-zA-Z])/);
         return match ? match[1].toLowerCase() : null;
     }
+    // Each returns {letter, page} for what it acted on, or null.
     function setMark(value) {
-        var letter = markLetter(value); if (!letter) return;
+        var letter = markLetter(value); if (!letter) return null;
         var all = storedMarks(); all[letter] = { page: currentPage, label: chapterLabel(), ts: Date.now() }; saveMarks(all);
+        return { letter: letter, page: currentPage };
     }
     function gotoMark(value) {
         var letter = markLetter(value), mark = letter && marks()[letter];
-        if (mark && mark.page) gotoPage(mark.page, true);
+        if (!mark || !mark.page || !gotoPage(mark.page, true)) return null;
+        return { letter: letter, page: mark.page };
     }
     function clearMark(value) {
-        var letter = markLetter(value); if (!letter) return;
-        if (!marks()[letter]) return;
+        var letter = markLetter(value); if (!letter) return null;
+        var mark = marks()[letter];
+        if (!mark) return null;
         var all = storedMarks(); all[letter] = { deleted: true, ts: Date.now() }; saveMarks(all);
+        return { letter: letter, page: mark.page };
     }
 
     // ----------------------------------------------------------------- tracking
@@ -201,9 +262,25 @@ export function createNavigation(core) {
             sched();
         }, { root: container, rootMargin: '-20px 0px', threshold: 0 });
         pages.forEach(function (p) { observer.observe(p); });
-        container.addEventListener('scroll', sched, { passive: true });
+        // A scroll of several screens in one event is a jump made outside
+        // this module; record where it left from. `currentPage` is still the
+        // page before the jump here, because the tracker runs a frame later.
+        var lastTop = container.scrollTop;
+        container.addEventListener('scroll', function () {
+            var top = container.scrollTop;
+            if (Math.abs(top - lastTop) > 2.5 * container.clientHeight && Date.now() > quietUntil) {
+                var extent = documentModel.pageExtent(documentModel.page(currentPage));
+                if (extent && extent.height) {
+                    remember({ page: currentPage, y: (lastTop - extent.top) / extent.height, x: 0 });
+                    quietUntil = 0;
+                }
+            }
+            lastTop = top;
+            sched();
+        }, { passive: true });
         // Zoom and restores move content without a reliable scroll event.
         document.addEventListener('pdf2html-viewport-change', function () {
+            quiet();
             sched();
             setTimeout(sched, 80);
             setTimeout(sched, 250);
@@ -258,7 +335,8 @@ export function createNavigation(core) {
                 if (pf && pf.getBoundingClientRect().height > 0) {
                     landedPage = restoreTarget;
                     restoreTarget = null;
-                    gotoPage(landedPage, false);
+                    quiet();
+                    landPage(landedPage, false);
                     document.dispatchEvent(new CustomEvent('pdf2html-viewport-change'));
                     return;
                 }
@@ -341,6 +419,9 @@ export function createNavigation(core) {
         stepPage: stepPage,
         gotoEntry: gotoEntry,
         gotoDestination: gotoDestination,
+        back: back,
+        forward: forward,
+        remember: function () { remember(); },
         gotoChapter: gotoChapter,
         gotoChapterBy: gotoChapterBy,
         marks: marks,

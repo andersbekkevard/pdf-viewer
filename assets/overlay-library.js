@@ -5,6 +5,7 @@ export function createLibrary(core) {
     var fetch = core.fetch;
     var history = core.history;
     var entryHash = core.entryHash;
+    var notify = core.notify || function () {};
     var completionLimit = 30;
     var currentHash = entryHash();
     var entries = null;
@@ -91,10 +92,16 @@ export function createLibrary(core) {
         }).then(function (r) {
             return r.json().catch(function () { return null; }).then(function (body) {
                 if (r.ok) return body || {};
-                console.warn('[' + label + ']', body && body.detail ? String(body.detail) : 'HTTP ' + r.status);
+                var detail = body && body.detail ? String(body.detail) : 'HTTP ' + r.status;
+                console.warn('[' + label + ']', detail);
+                notify('Could not ' + label + ': ' + detail, { error: true });
                 return null;
             });
-        }).catch(function (e) { console.warn('[' + label + '] failed:', e); return null; });
+        }).catch(function (e) {
+            console.warn('[' + label + '] failed:', e);
+            notify('Could not ' + label + ': the daemon did not answer', { error: true });
+            return null;
+        });
     }
     function disableCurrent() {
         putEntry('/disabled', { disabled: true, current_url: location.href }, 'disable').then(function (info) {
@@ -113,6 +120,7 @@ export function createLibrary(core) {
         if (!name) return;
         putEntry('/name', { name: name }, 'rename').then(function (info) {
             if (!info) return;
+            notify(info.renamed === false ? 'Name unchanged' : 'Renamed to ' + (info.new_name || name));
             document.title = info.new_name || name;
             entries = null;
             load();
@@ -128,7 +136,10 @@ export function createLibrary(core) {
                 if (!src) { location.replace('about:blank'); return; }
                 if (src.charAt(0) === '/') src = 'file://' + encodeURI(src);
                 location.replace(src);
-            }).catch(function (e) { console.warn('[delete] failed:', e); });
+            }).catch(function (e) {
+                console.warn('[delete] failed:', e);
+                notify('Could not delete: the daemon did not answer', { error: true });
+            });
     }
     function all() { return entries || []; }
 

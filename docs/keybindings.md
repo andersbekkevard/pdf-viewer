@@ -24,6 +24,7 @@ For the rationale on the overall keyboard strategy, see
 | `e` / `q` / `E`        | Next / prev page; active text selection extends pagewise instead; `q` aliases `E`; count-prefixed (`10e` = +10, `10q` = `10E` = −10) |
 | `c` / `C`              | Next / prev chapter; active browser selection + `c` selects the whole chapter; count-prefixed (`3c` = +3, `3C` = −3)    |
 | `⌘+` / `⌘−` / `⌘0`     | Zoom in / out (manual, per document) / back to fit-width      |
+| `⌘Z` / `⌘⇧Z`           | Back to where you were before the last jump / forward again (outline, links, `:42`, `gg`/`G`, a find match, `Home`/`End`) |
 | `⌘⇧.`                  | Toggle page counter                                           |
 | `:`                    | Open command palette                                          |
 | `⌘K`                   | Quick-open: outline sections, other cached documents, commands |
@@ -40,6 +41,17 @@ Bare `Tab` is not a viewer command. On the PDF document surface it is
 intentionally ignored so browser focus traversal does not jump between pages;
 overlay inputs such as `:` and `⌘K` still use Tab for local completion/scope
 cycling.
+
+## Home page
+
+`localhost:7435/` is the library: every cached document, recent and frequent
+first, with a search field focused on load (same all-terms rule as `:open`).
+Pasting an http(s) URL or an absolute/`~` path offers to open it in the reader.
+In the field: `↓` / `↑` · `Ctrl-j` / `Ctrl-k` move, `Enter` opens, `⌘Enter`
+(or `Ctrl-Enter`) opens in a new tab, `Esc` clears, then blurs. Outside the
+field the page binds only `/` (focus search), the arrows, `Ctrl-j` / `Ctrl-k`
+and `Enter`; every row, copy button and "Original" link is a real element, so
+Vimium's `f` hints reach them. No overlay key leads here; use the address bar.
 
 ## Command palette
 
@@ -61,9 +73,11 @@ cycling.
 | `:case`                      | Toggle case-sensitive `/` search                                                 |
 | `:zoom N` / `:zoom auto`     | Manual page zoom for this document, or back to fit-width                         |
 | `:delete confirm`            | Wipe this PDF's cache entry and open the original                                |
-| `:yank <kind>` / `:y <kind>` | `ref` (default, "Chapter · p. N") · `page` · `chapter` · `document`              |
+| `:yank <kind>` / `:y <kind>` | `ref` (default, "Chapter · p. N") · `quote` (the selection with document, page, source and a link back) · `page` · `chapter` · `document` |
+| `:back` / `:forward`         | Undo / redo the last jump (`⌘Z` / `⌘⇧Z`)                                         |
+| `:dark`                      | Toggle dark pages (also in Settings)                                             |
 | `:finger` / `:f`             | Hint visible URL / DOI / ISBN / long-ID tokens; exact hint copies token          |
-| `:counter` / `:num`          | Toggle page counter                                                              |
+| `:counter` / `:num`          | Toggle page counter; `:counter brief` shows it for a moment on each page change while hidden |
 | `:set`                       | Open Settings modal                                                              |
 | `:help` / `:h`               | Open cheatsheet                                                                  |
 
@@ -88,6 +102,9 @@ Finger mode uses only keys already in the Vimium pass-through list:
 two or more letters from that same alphabet. `Backspace` edits the typed
 prefix; `Esc` exits without copying.
 
+Actions that change nothing visible (a copy, a mark, a rename, a jump back, a
+failure) confirm themselves with a one-line toast at the bottom of the page.
+
 ## Permanently rejected (Vimium conflicts)
 
 These keys are reserved by Vimium bindings we use daily. They must
@@ -110,7 +127,6 @@ That's the escape hatch.
 
 - `}` / `{` — next / previous chapter (outline walk). Currently in the
   palette as `:next` / `:prev`; the unshifted bracket keys are free.
-- `Ctrl-o` / `Ctrl-i` — doc-local jumplist.
 - `zz` — recenter selection on pin.
 
 ## Vimium setup

@@ -14,6 +14,7 @@ export function createCommandSurface(core) {
     var finger = core.finger;
     var settings = core.settings;
     var isInputTarget = core.isInputTarget;
+    var notify = core.notify || function () {};
 
     // ------------------------------------------------------------------------
     // Cheatsheet — `?` toggles, `:help` opens. Two columns: viewer keys on the
@@ -29,6 +30,8 @@ export function createCommandSurface(core) {
             [[['↓'], ['↑']], 'Scroll'],
             [[['c'], ['C']], 'Next / prev chapter (count prefix: 3c); a selection + c selects the chapter'],
             [[['⌘', '+'], ['⌘', '−'], ['⌘', '0']], 'Zoom in / out / back to fit-width'],
+            [[['⌘', 'Z'], ['⌘', '⇧', 'Z']], 'Back to before the last jump / forward again'],
+            [[['Space'], ['⇧', 'Space']], 'Scroll one screen down / up'],
             [[['⌘', '⇧', '.']], 'Toggle page counter'],
         ] },
         { title: 'Modes', rows: [
@@ -166,15 +169,21 @@ export function createCommandSurface(core) {
                   };
               });
           },
-          handler: function (a) { navigation.setMark(a); } },
+          handler: function (a) {
+              var mark = navigation.setMark(a);
+              notify(mark ? 'Mark ' + mark.letter + ' set on p. ' + mark.page : 'A mark is a letter a–z', { error: !mark });
+          } },
         { name: 'jump', aliases: [], usage: 'jump <a-z>', help: 'Jump to a bookmark',
           desc: 'jump to mark <letter>',
           argCompleter: function (tail) { return markRows('jump', tail); },
-          handler: function (a) { navigation.gotoMark(a); } },
+          handler: function (a) { if (!navigation.gotoMark(a)) notify('No such mark', { error: true }); } },
         { name: 'clear', aliases: [], usage: 'clear <a-z>', help: 'Delete a bookmark',
           desc: 'delete mark <letter>',
           argCompleter: function (tail) { return markRows('clear', tail); },
-          handler: function (a) { navigation.clearMark(a); } },
+          handler: function (a) {
+              var mark = navigation.clearMark(a);
+              notify(mark ? 'Mark ' + mark.letter + ' cleared' : 'No such mark', { error: !mark });
+          } },
         { name: 'pin', aliases: [], usage: 'pin', help: 'Toggle pin-to-center',
           desc: function () { return 'turn pin-to-center ' + onOff(prefs.get('pinned')); },
           handler: function () { prefs.toggle('pinned'); } },
@@ -185,13 +194,14 @@ export function createCommandSurface(core) {
               var n = parseInt(a, 10);
               if (!isNaN(n)) prefs.set('scrollOff', Math.max(0, Math.min(50, n)) / 100);
           } },
-        { name: 'yank', aliases: ['y'], usage: 'yank <kind>', help: 'Copy ref / page / chapter / document',
-          desc: 'copy content (ref/page/chapter/doc)',
+        { name: 'yank', aliases: ['y'], usage: 'yank <kind>', help: 'Copy ref / quote / page / chapter / document',
+          desc: 'copy content (ref/quote/page/chapter/doc)',
           argCompleter: function (tail) {
               // `page` (the narrowest, most frequent) sits last, nearest the
               // caret, so `:y<space><Enter>` yanks the current page.
               var options = [
                   { value: 'yank ref', display: 'ref', desc: 'chapter · p. N (meta)' },
+                  { value: 'yank quote', display: 'quote', desc: 'the selection, with document, page and source' },
                   { value: 'yank document', display: 'document', desc: 'full document text' },
                   { value: 'yank chapter', display: 'chapter', desc: 'current chapter text' },
                   { value: 'yank page', display: 'page', desc: 'current page text' },
@@ -203,9 +213,24 @@ export function createCommandSurface(core) {
         { name: 'finger', aliases: ['f'], usage: 'finger', help: 'Hint visible URL / DOI / ISBN / ID tokens',
           desc: 'hint visible URL/DOI/ISBN/ID tokens',
           handler: function () { finger.openFingerMode(); } },
-        { name: 'counter', aliases: ['num'], usage: 'counter', help: 'Toggle the page counter',
+        { name: 'counter', aliases: ['num'], usage: 'counter [brief]', help: 'Toggle the page counter; brief shows it on page change',
           desc: function () { return (prefs.get('pageCounterVisible') ? 'hide' : 'show') + ' page counter'; },
-          handler: function () { prefs.toggle('pageCounterVisible'); } },
+          handler: function (a) {
+              if ((a || '').toLowerCase().trim() === 'brief') {
+                  var brief = prefs.toggle('pageCounterBrief');
+                  if (brief) prefs.set('pageCounterVisible', false);
+                  notify('Page counter on page change: ' + (brief ? 'on' : 'off'));
+              } else prefs.toggle('pageCounterVisible');
+          } },
+        { name: 'dark', aliases: [], usage: 'dark', help: 'Toggle dark pages',
+          desc: function () { return 'turn dark pages ' + onOff(prefs.get('darkPages')); },
+          handler: function () { prefs.toggle('darkPages'); } },
+        { name: 'back', aliases: [], usage: 'back', help: 'Go back to before the last jump (⌘Z)',
+          desc: 'undo the last jump',
+          handler: function () { core.jumpBack(); } },
+        { name: 'forward', aliases: [], usage: 'forward', help: 'Redo a jump undone with back (⌘⇧Z)',
+          desc: 'redo the jump',
+          handler: function () { core.jumpForward(); } },
         { name: 'case', aliases: [], usage: 'case', help: 'Toggle case-sensitive / search',
           desc: function () { return 'turn case-sensitive search ' + onOff(prefs.get('searchCaseSensitive')); },
           handler: function () { prefs.toggle('searchCaseSensitive'); } },
@@ -244,7 +269,10 @@ export function createCommandSurface(core) {
           },
           handler: function () {
               var ref = library.currentSourceRef();
-              if (ref) text.writeClip(ref);
+              if (!ref) { notify('No source recorded for this document', { error: true }); return; }
+              text.writeClip(ref).then(function (ok) {
+                  notify(ok ? 'Copied ' + middleEllipsis(ref, 48) : 'Could not copy to the clipboard', { error: !ok });
+              });
           } },
         { name: 'disable', aliases: ['native'], usage: 'disable', help: 'Open the native PDF and stop redirecting this file',
           desc: 'open native PDF and disable viewer for this file',
@@ -291,9 +319,31 @@ export function createCommandSurface(core) {
         return !!(cmd && (cmd.argCompleter || cmd.requiresArg));
     }
 
-    function openPalette() {
+    // Focusing a command input takes the selection away from the document.
+    // Commands such as `:yank quote` act on what was selected, so remember
+    // it when a command surface opens and put it back before a command runs.
+    function saveSelection() {
+        var sel = window.getSelection();
+        var ranges = [];
+        if (sel && !sel.isCollapsed) {
+            for (var i = 0; i < sel.rangeCount; i++) ranges.push(sel.getRangeAt(i).cloneRange());
+        }
+        return ranges;
+    }
+    function restoreSelection(ranges) {
+        if (!ranges || !ranges.length) return;
+        var sel = window.getSelection();
+        if (!sel) return;
+        try {
+            sel.removeAllRanges();
+            ranges.forEach(function (r) { sel.addRange(r); });
+        } catch (_) {}
+    }
+
+    function openPalette(keptSelection) {
         var ex = document.getElementById('pdf2html-palette');
         if (ex) { removeOverlay(ex); return; }
+        var selection = keptSelection || saveSelection();
 
         var wrap = document.createElement('div');
         wrap.id = 'pdf2html-palette';
@@ -450,6 +500,7 @@ export function createCommandSurface(core) {
             // focus and selection rather than the palette's.
             var command = input.value;
             removeOverlay(wrap);
+            restoreSelection(selection);
             runCommand(command);
         }
 
@@ -620,7 +671,7 @@ export function createCommandSurface(core) {
 
     // Build the full flat-with-groups candidate list once per open. Each
     // candidate is { group, icon, label, meta, searchText, run }.
-    function buildFinderCandidates() {
+    function buildFinderCandidates(selection) {
         var out = [];
 
         // --- Outline (this document) ---
@@ -687,8 +738,9 @@ export function createCommandSurface(core) {
                 // commands run straight through.
                 run: (function (c) {
                     return function () {
+                        restoreSelection(selection);
                         if (commandTakesArg(c)) {
-                            openPalette();
+                            openPalette(selection);
                             var inp = document.getElementById('pdf2html-palette-input');
                             if (inp) {
                                 inp.value = c.name + ' ';
@@ -823,7 +875,8 @@ export function createCommandSurface(core) {
         });
         closeBtn.addEventListener('click', function () { closeFinder(); });
 
-        var allCandidates = buildFinderCandidates();
+        var finderSelection = saveSelection();
+        var allCandidates = buildFinderCandidates(finderSelection);
         var state = { visible: [], idx: 0 };
 
         // Expose the active element-lookup fn to scroll-into-view after render.
@@ -987,7 +1040,7 @@ export function createCommandSurface(core) {
                 if (library.all().length || retries++ > 20) {
                     clearInterval(poll);
                     if (!bg.isConnected) return;
-                    allCandidates = buildFinderCandidates();
+                    allCandidates = buildFinderCandidates(finderSelection);
                     render();
                 }
             }, 150);
