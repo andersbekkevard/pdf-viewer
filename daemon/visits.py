@@ -19,7 +19,7 @@ from typing import Iterator, Literal
 DB_PATH = pathlib.Path.home() / ".cache" / "pdf_viewer" / "visits.db"
 SESSION_WINDOW_SEC = 15 * 60
 
-VisitKind = Literal["url", "path", "boost"]
+VisitKind = Literal["url", "path", "reader", "boost"]
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS visits (
@@ -55,7 +55,7 @@ def init() -> None:
         conn.executescript(_SCHEMA)
 
 
-def record(hash_: str, kind: Literal["url", "path"]) -> None:
+def record(hash_: str, kind: Literal["url", "path", "reader"]) -> None:
     """Insert one visit row. Called from a BackgroundTask — must never raise."""
     try:
         with _connect() as conn:

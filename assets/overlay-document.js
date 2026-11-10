@@ -65,9 +65,20 @@ export function createDocumentModel(core) {
                 page: page,
                 label: (links[i].textContent || '').replace(/\s+/g, ' ').trim(),
                 dest: links[i].getAttribute('data-dest-detail'),
+                point: readerPoint(links[i]),
             });
         }
         return outlineCache;
+    }
+    // Reader shells (daemon/reader.py) carry a destination as page px from
+    // the page's top-left corner: `data-reader-dest='[page,"XYZ",x,y,null]'`.
+    function readerPoint(link) {
+        var raw = link.getAttribute('data-reader-dest');
+        if (!raw) return null;
+        try {
+            var dest = JSON.parse(raw);
+            return typeof dest[3] === 'number' ? { x: dest[2] || 0, y: dest[3] } : null;
+        } catch (_) { return null; }
     }
     function pageContent(pageOrNumber) {
         var pf = typeof pageOrNumber === 'number' ? page(pageOrNumber) : pageOrNumber;
@@ -133,6 +144,18 @@ export function createDocumentModel(core) {
         root.scrollTo({ top: Math.max(0, extent.top - (lead || 0)), behavior: smooth ? 'smooth' : 'instant' });
         return true;
     }
+    // Put a point `y` page px down the page `lead` px below the viewport top.
+    // Page px are the frame's own CSS px, so the page's rendered height over
+    // its declared height converts them to scroller px at any zoom.
+    function scrollToPagePoint(pf, y, lead) {
+        var root = container();
+        var extent = pageExtent(pf);
+        var declared = pf ? parseFloat(pf.style.height) : 0;
+        if (!root || !extent || !declared) return false;
+        var offset = Math.max(0, Math.min(declared, y)) * extent.height / declared;
+        root.scrollTo({ top: Math.max(0, extent.top + offset - (lead || 0)), behavior: 'instant' });
+        return true;
+    }
     // The page covering most of the viewport (one-based), or null.
     function mostVisiblePage(candidates) {
         var root = container();
@@ -182,6 +205,10 @@ export function createDocumentModel(core) {
         return document.querySelector('img.bi[data-pdf2html-src]') ? 'light-legacy' : 'canonical';
     }
     function isLight() { return representation().indexOf('light') === 0; }
+    // Reader shells: PDFium rasters under a transparent text layer.
+    function isReader() {
+        return !!html() && html().getAttribute('data-pdf2html-representation') === 'raster-v1';
+    }
     function textMode() {
         var root = html();
         if (!root) return 'canonical';
@@ -204,13 +231,40 @@ export function createDocumentModel(core) {
                 entry.page.dataset.pdf2htmlRasterState = state;
             }
         }
-        function sourceFor(img) { return img.getAttribute('data-pdf2html-src'); }
+        // A reader raster is rendered at the width asked for, so ask for the
+        // page's exact device width: declared CSS width × zoom × pixel ratio.
+        // Anything else has one fixed source.
+        function sourceFor(img) {
+            var base = img.getAttribute('data-reader-raster');
+            if (!base) return img.getAttribute('data-pdf2html-src');
+            var pf = img.closest('.pf');
+            var cssWidth = pf ? parseFloat(pf.style.width) : 0;
+            var zoom = parseFloat(root.style.getPropertyValue('--pdf2html-zoom')) || 1;
+            if (!cssWidth) return img.getAttribute('data-pdf2html-src');
+            return base + Math.max(64, Math.round(cssWidth * zoom * (window.devicePixelRatio || 1))) + '.png';
+        }
+        // After a zoom or resize: keep showing the old raster, scaled, until
+        // the one at the new width has loaded, then swap.
+        function retarget(entry) {
+            if (!entry.mounted) return;
+            entry.images.forEach(function (img) {
+                var want = sourceFor(img);
+                if (img.getAttribute('src') === want) return;
+                if (!img.complete || !img.naturalWidth) { img.setAttribute('src', want); return; }
+                var next = new window.Image();
+                next.onload = function () {
+                    if (entry.mounted && sourceFor(img) === want) img.setAttribute('src', want);
+                };
+                next.src = want;
+            });
+        }
         function updateState(entry) {
             // Completion of an old request must not revive an exited page.
             if (!entry.mounted) return;
             var ready = true, failed = false;
             entry.images.forEach(function (img) {
-                if (img.getAttribute('src') !== sourceFor(img) || !img.complete) ready = false;
+                var fixed = !img.getAttribute('data-reader-raster');
+                if ((fixed ? img.getAttribute('src') !== sourceFor(img) : !img.hasAttribute('src')) || !img.complete) ready = false;
                 else if (!img.naturalWidth) { ready = false; failed = true; }
             });
             setState(entry, failed ? 'error' : ready ? 'ready' : 'loading');
@@ -262,6 +316,20 @@ export function createDocumentModel(core) {
             });
         }, { root: root, rootMargin: '3500px 0px', threshold: 0 });
         entries.forEach(function (entry) { observer.observe(entry.page); });
+
+        if (!isReader()) return;
+        var timer = null;
+        function retargetAll() {
+            timer = null;
+            entries.forEach(retarget);
+        }
+        // Debounced: a zoom slider drag or window resize fires many changes.
+        function schedule() {
+            if (timer) window.clearTimeout(timer);
+            timer = window.setTimeout(retargetAll, 120);
+        }
+        document.addEventListener('pdf2html-viewport-change', schedule);
+        window.addEventListener('resize', schedule);
     }
 
     return {
@@ -280,11 +348,13 @@ export function createDocumentModel(core) {
         visiblePages: visiblePages,
         pageExtent: pageExtent,
         scrollToPage: scrollToPage,
+        scrollToPagePoint: scrollToPagePoint,
         mostVisiblePage: mostVisiblePage,
         viewAnchor: viewAnchor,
         restoreViewAnchor: restoreViewAnchor,
         representation: representation,
         isLight: isLight,
+        isReader: isReader,
         textMode: textMode,
         isTextFlattened: isTextFlattened,
         mountRasterLifecycle: mountRasterLifecycle,

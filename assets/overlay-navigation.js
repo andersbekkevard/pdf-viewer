@@ -84,10 +84,16 @@ export function createNavigation(core) {
         if (!total) return;
         gotoPage(Math.min(total, Math.max(1, currentPage + delta)), false);
     }
+    // A reader outline entry names a point on its page; land the heading at
+    // the same lead as a page top.
+    function gotoPoint(entry) {
+        var target = entry.point && documentModel.page(entry.page);
+        return !!target && documentModel.scrollToPagePoint(target, entry.point.y, PAGE_LEAD);
+    }
     function gotoEntry(entry) {
         if (!entry) return;
         pickedEntry = entry;
-        if (!followDestination(entry.link)) gotoPage(entry.page, false);
+        if (!followDestination(entry.link) && !gotoPoint(entry)) gotoPage(entry.page, false);
         updateChapter();
     }
     function gotoChapter(needle) {

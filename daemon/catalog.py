@@ -248,6 +248,30 @@ class CacheCatalog:
         matches = sorted(source_dir.glob("*.pdf")) if source_dir.is_dir() else []
         return matches[0] if matches else None
 
+    def source_pdf(self, hash_: str) -> Optional[pathlib.Path]:
+        """The PDF bytes behind an entry: the local original when it still
+        exists, else the cached download. None when neither is on disk."""
+        if not HASH_RE.fullmatch(hash_ or ""):
+            return None
+        source_ref = self.source_ref(hash_)
+        if source_ref and source_ref.startswith("/"):
+            path = pathlib.Path(source_ref)
+            if path.is_file():
+                return path
+        return self.cached_source(hash_)
+
+    def entry_name(self, hash_: str) -> str:
+        """Display name: the canonical HTML stem (what :rename changes), else
+        the mapping row's name, else the source file's stem."""
+        representation = self.locate_representation(hash_)
+        if representation is not None:
+            return representation.canonical.stem
+        mapping = self.mappings().get(hash_)
+        if mapping is not None:
+            return mapping.name
+        source = self.source_pdf(hash_)
+        return source.stem if source else hash_
+
     def native_source(self, hash_: str) -> NativeSource:
         self.require_representation(hash_)
         source_ref = self.source_ref(hash_)

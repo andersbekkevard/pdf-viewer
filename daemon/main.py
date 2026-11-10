@@ -50,6 +50,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import visits
+from reader import Reader
 from catalog import (
     CacheCatalog,
     EntryNotFound,
@@ -64,6 +65,7 @@ CACHE_DIR = pathlib.Path.home() / ".cache" / "pdf_viewer"
 REPO_DIR = pathlib.Path(__file__).resolve().parents[1]
 ASSETS_DIR = REPO_DIR / "assets"
 catalog = CacheCatalog(CACHE_DIR, visits)
+reader = Reader(CACHE_DIR)
 
 
 @contextlib.asynccontextmanager
@@ -485,6 +487,44 @@ def _view_url(url: str, background: BackgroundTasks, *, light: bool):
     # otherwise clicks on .pdf links would loop (ext redirects → daemon 307s
     # → ext redirects → ...) until Chromium ERR_TOO_MANY_REDIRECTS.
     return RedirectResponse(with_passthrough(url), status_code=307)
+
+
+# -----------------------------------------------------------------------------
+# Reader — PDFium rasters under a transparent text layer (daemon/reader.py).
+# Built on demand from the entry's source PDF; nothing is converted ahead.
+# -----------------------------------------------------------------------------
+
+def _reader_source(hash_: str) -> pathlib.Path:
+    pdf = catalog.source_pdf(hash_)
+    if pdf is None:
+        raise HTTPException(404, f"no source PDF on disk for hash {hash_}")
+    return pdf
+
+
+@app.get("/r/{hash_}/")
+def reader_shell(hash_: str, background: BackgroundTasks):
+    pdf = _reader_source(hash_)
+    try:
+        shell = reader.shell(hash_, pdf, catalog.entry_name(hash_))
+    except Exception as error:
+        raise HTTPException(502, f"could not read PDF: {error}") from error
+    background.add_task(visits.record, hash_, "reader")
+    return FileResponse(shell, media_type="text/html; charset=utf-8",
+                        headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/r/{hash_}/p/{page}/{width}.png")
+def reader_raster(hash_: str, page: int, width: int):
+    pdf = _reader_source(hash_)
+    try:
+        path = reader.raster(hash_, pdf, page, width)
+    except IndexError:
+        raise HTTPException(404, f"no page {page}")
+    except Exception as error:
+        raise HTTPException(502, f"could not render page {page}: {error}") from error
+    # Keyed by content hash, page and width, so the bytes never change.
+    return FileResponse(path, media_type="image/png",
+                        headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 
 def _require_cached_entry(hash_: str) -> pathlib.Path:
