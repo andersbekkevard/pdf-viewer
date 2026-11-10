@@ -38,6 +38,7 @@ preserving ADR 0004's accepted daemon/compute split.
 ├── mappings.tsv         pdf-source ↔ hash ↔ html-path index (grep-friendly)
 ├── disabled.json        per-hash custom-viewer disable list
 ├── visits.db            SQLite event log (hash, ts, kind) — see below
+├── state.db             per-document viewer state (position, marks, zoom) — see below
 ├── <hash>/              one dir per unique document
 │   ├── <stem>.html      canonical injected pdf2htmlEX HTML
 │   ├── <stem>.light.html
@@ -209,6 +210,40 @@ query time; personal-use volume keeps the events table tiny for years.
 
 Powers `/stats`, `/stats/recent`, and the visits-sorted library picker
 behind `⌘K` / `:open`.
+
+## Per-document state
+
+`daemon/state.py` keeps `state.db` (SQLite, WAL; `PDFV_STATE_DB` overrides
+the path): one row per `(hash, key)` for the keys `position`, `marks` and
+`zoom`, holding a JSON value (under 64 KB) and an updated-at `ts` in ms.
+`daemon/state_routes.py` serves it as `GET /entry/<hash>/state` and
+`PUT /entry/<hash>/state/<key>` with body `{"value": ..., "ts": ms}`;
+invalid input is a 400. `DELETE /entry/<hash>/state` clears a hash's rows
+(test-harness reset), and deleting an entry forgets them too.
+
+Merge rule: last writer wins by `ts`, and an older `ts` never overwrites a
+newer one (a tie keeps the stored row). `marks` merges per letter by each
+mark's own `ts`; clearing a mark stores a tombstone `{"deleted": true, "ts"}`
+so a stale browser cannot resurrect it.
+
+The overlay (`assets/overlay-state.js`) reads synchronously from a copy
+seeded from localStorage, so first paint and resume never wait on the
+network, then merges the daemon copy and pushes whatever the browser held
+that was newer. That push is the migration of pre-existing localStorage
+state, from either origin. A daemon position that arrives late moves the
+reader only if they have not scrolled and no `#pf` deep link was followed;
+a differing zoom is applied. Without the routes (an older daemon, detected
+through `/openapi.json` so no 404 reaches the console) or without a daemon,
+the overlay uses localStorage alone.
+
+Why the daemon and not localStorage: localStorage is per origin and per
+browser. The same document used to open on both `http://localhost:7435`
+(static rule, convert script, Vimium exclusion) and `http://127.0.0.1:7435`
+(the extension's dynamic redirects), and in both Chrome and Comet. The
+extension now redirects to `localhost` too (`VIEWER` in
+`extension/background.js`; its own fetches still use `127.0.0.1`), but only
+the daemon copy is shared across browsers. Global preferences
+(`overlay-prefs.js`) stay in localStorage.
 
 ## Find text
 

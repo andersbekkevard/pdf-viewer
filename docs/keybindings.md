@@ -45,7 +45,7 @@ cycling.
 | `:page 42` / `:p 42`         | Same as `:42`                                                                    |
 | `:chapter <name>`            | Jump to outline chapter; Tab completes against sidebar (case-insensitive substring) |
 | `:next` / `:prev`            | Next / previous chapter (or reset to current-chapter start if deep into it)      |
-| `:mark <a-z>`                | Persistent bookmark of current page (localStorage, per hash)                     |
+| `:mark <a-z>`                | Persistent bookmark of current page (stored by the daemon per document)                     |
 | `:jump <a-z>`                | Jump to a saved mark                                                             |
 | `:clear <a-z>`               | Delete a saved mark                                                              |
 | `:open <doc>` / `:o`         | Switch to another cached doc; completes against `/library` (visits-sorted)       |

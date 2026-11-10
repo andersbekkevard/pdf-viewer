@@ -23,7 +23,11 @@
 // Service workers in MV3 can be terminated, so we use chrome.alarms (survives
 // suspension) rather than setInterval.
 
+// The service worker talks to the daemon on 127.0.0.1; redirected documents
+// open on VIEWER, the origin the static rule, the convert script and the
+// Vimium exclusion use, so the viewer's localStorage is not split in two.
 const DAEMON = 'http://127.0.0.1:7435';
+const VIEWER = 'http://localhost:7435';
 const DYNAMIC_RULE_ID_BASE = 1000;
 const SYNC_ALARM = 'pdfviewer-sync';
 
@@ -114,7 +118,7 @@ async function _runSync() {
                     : {
                         type: 'redirect',
                         redirect: {
-                            url: `${DAEMON}/view?path=${encodeURIComponent(entry.path)}`
+                            url: `${VIEWER}/view?path=${encodeURIComponent(entry.path)}`
                         }
                     },
                 condition: {
@@ -143,7 +147,7 @@ async function _runSync() {
                     : {
                         type: 'redirect',
                         redirect: {
-                            regexSubstitution: `${DAEMON}/view-raw?\\0`
+                            regexSubstitution: `${VIEWER}/view-raw?\\0`
                         }
                     },
                 condition: {

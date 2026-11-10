@@ -13,6 +13,7 @@
 
 import { el, isInputTarget } from './overlay-dom.js';
 import { createPreferences } from './overlay-prefs.js';
+import { createDocumentState } from './overlay-state.js';
 import { createDocumentModel } from './overlay-document.js';
 import { createZoom } from './overlay-zoom.js';
 import { createPdf2htmlEx, preparePdf2htmlEx } from './overlay-pdf2htmlex.js';
@@ -20,6 +21,7 @@ import { createNavigation } from './overlay-navigation.js';
 import { createScrollOff } from './overlay-scrolloff.js';
 import { createTextInteraction } from './overlay-text.js';
 import { createTextFit } from './overlay-textfit.js';
+import { createLinks } from './overlay-links.js';
 import { createSearch } from './overlay-search.js';
 import { createFinger } from './overlay-finger.js';
 import { createLibrary } from './overlay-library.js';
@@ -53,11 +55,14 @@ preparePdf2htmlEx({ document: document, window: window });
         function withBase(extra) { return Object.assign({}, base, extra); }
 
         var prefs = createPreferences(localStorage);
+        var documentState = createDocumentState({ fetch: fetch.bind(window), storage: localStorage,
+            entryHash: entryHash, window: window });
         var documentModel = createDocumentModel(base);
-        var zoom = createZoom(withBase({ storage: localStorage, entryHash: entryHash, documentModel: documentModel }));
+        var zoom = createZoom(withBase({ storage: localStorage, documentState: documentState, entryHash: entryHash,
+            documentModel: documentModel }));
         var pdf2htmlex = createPdf2htmlEx(withBase({ documentModel: documentModel, zoom: zoom }));
         var navigation = createNavigation(withBase({
-            location: location, history: history, storage: localStorage, entryHash: entryHash,
+            location: location, history: history, documentState: documentState, entryHash: entryHash,
             documentModel: documentModel, followDestination: pdf2htmlex.followDestination,
         }));
         var scrollOff = createScrollOff(withBase({ performance: performance, prefs: prefs, documentModel: documentModel }));
@@ -100,6 +105,7 @@ preparePdf2htmlEx({ document: document, window: window });
         zoom.mount();
         pdf2htmlex.adaptRuntime();
         createTextFit(withBase({ documentModel: documentModel })).mount();
+        createLinks(withBase({ documentModel: documentModel, navigation: navigation })).mount();
         documentModel.mountRasterLifecycle();
         scrollOff.mount();
         search.mount();

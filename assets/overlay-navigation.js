@@ -14,7 +14,7 @@ export function createNavigation(core) {
     var window = core.window;
     var location = core.location;
     var history = core.history;
-    var storage = core.storage;
+    var documentState = core.documentState;
     var entryHash = core.entryHash;
     var documentModel = core.documentModel;
     var followDestination = core.followDestination;
@@ -90,6 +90,11 @@ export function createNavigation(core) {
         var target = entry.point && documentModel.page(entry.page);
         return !!target && documentModel.scrollToPagePoint(target, entry.point.y, PAGE_LEAD);
     }
+    // A reader link destination: `point` is {x, y} in the target page's px,
+    // or null for the page top. Lands exactly as an outline jump does.
+    function gotoDestination(page, point) {
+        return gotoPoint({ page: page, point: point }) || gotoPage(page, false);
+    }
     function gotoEntry(entry) {
         if (!entry) return;
         pickedEntry = entry;
@@ -125,12 +130,19 @@ export function createNavigation(core) {
     }
 
     // -------------------------------------------------------------------- marks
-    function marksKey() { var hash = entryHash(); return hash ? 'pdf2html-marks:' + hash : null; }
-    function marks() {
-        var key = marksKey(); if (!key) return {};
-        try { return JSON.parse(storage.getItem(key) || '{}') || {}; } catch (_) { return {}; }
+    // Stored through the document state (overlay-state.js) with per-letter
+    // ts; a cleared mark stays as a {deleted, ts} tombstone so another
+    // browser's stale copy cannot bring it back. marks() hides tombstones.
+    function storedMarks() {
+        var all = documentState.get('marks');
+        return all && typeof all === 'object' ? Object.assign({}, all) : {};
     }
-    function saveMarks(value) { var key = marksKey(); if (key) try { storage.setItem(key, JSON.stringify(value)); } catch (_) {} }
+    function marks() {
+        var all = storedMarks(), live = {};
+        for (var l in all) if (all[l] && !all[l].deleted && all[l].page) live[l] = all[l];
+        return live;
+    }
+    function saveMarks(value) { if (entryHash()) documentState.set('marks', value); }
     function markLetter(value) {
         if (!value) return null;
         var match = String(value).trim().match(/^([a-zA-Z])/);
@@ -138,7 +150,7 @@ export function createNavigation(core) {
     }
     function setMark(value) {
         var letter = markLetter(value); if (!letter) return;
-        var all = marks(); all[letter] = { page: currentPage, label: chapterLabel(), ts: Date.now() }; saveMarks(all);
+        var all = storedMarks(); all[letter] = { page: currentPage, label: chapterLabel(), ts: Date.now() }; saveMarks(all);
     }
     function gotoMark(value) {
         var letter = markLetter(value), mark = letter && marks()[letter];
@@ -146,7 +158,8 @@ export function createNavigation(core) {
     }
     function clearMark(value) {
         var letter = markLetter(value); if (!letter) return;
-        var all = marks(); if (!all[letter]) return; delete all[letter]; saveMarks(all);
+        if (!marks()[letter]) return;
+        var all = storedMarks(); all[letter] = { deleted: true, ts: Date.now() }; saveMarks(all);
     }
 
     // ----------------------------------------------------------------- tracking
@@ -201,8 +214,15 @@ export function createNavigation(core) {
     // ------------------------------------------------------------------- resume
     // Jump back to the last-visited page on reopen.
     //
-    // Key: `pdf2html-position:<hash>` → JSON {page, ts}. Written on every
-    // page change (debounced 400ms); read once at init.
+    // Stored through the document state as `position` → {page}: the local
+    // copy (`pdf2html-position:<hash>`) is read at init, the daemon copy may
+    // arrive a moment later. Written on every page change (debounced 400ms),
+    // but only once the daemon read has merged, so a fresh browser's page-1
+    // start cannot outrank the position another browser saved.
+    //
+    // A daemon position that arrives after load moves the reader only while
+    // the page is still where it opened: not after a `#pf` deep link, and
+    // not once the reader has scrolled.
     //
     // The URL hash and the saved position must not fight each other:
     //   - A `#pfXX` deep link (outline/bookmark) wins on load, but native
@@ -219,44 +239,67 @@ export function createNavigation(core) {
     function mountResume() {
         var hash = entryHash();
         if (!hash) return;
-        var key = 'pdf2html-position:' + hash;
 
         function stripHash() {
             try { history.replaceState(null, '', location.pathname + location.search); } catch (_) {}
         }
         // Wait a frame so the zoom and layout have settled, then land the page.
+        // A restore in flight can be retargeted; `landedPage` is where the
+        // document opened (1 when nothing was restored).
+        var restoreTarget = null;
+        var landedPage = 1;
         function restore(page) {
+            var running = restoreTarget != null;
+            restoreTarget = page;
+            if (running) return;
             var tries = 0;
-            (function go() {
-                var pf = documentModel.page(page);
+            requestAnimationFrame(function go() {
+                var pf = documentModel.page(restoreTarget);
                 if (pf && pf.getBoundingClientRect().height > 0) {
-                    gotoPage(page, false);
+                    landedPage = restoreTarget;
+                    restoreTarget = null;
+                    gotoPage(landedPage, false);
                     document.dispatchEvent(new CustomEvent('pdf2html-viewport-change'));
                     return;
                 }
                 if (tries++ < 60) requestAnimationFrame(go);
-            })();
+                else restoreTarget = null;
+            });
+        }
+        function savedPage() {
+            var saved = documentState.get('position');
+            return saved && saved.page > 1 ? saved.page : null;
         }
 
         var hashPage = documentModel.pageNumberFromHash(location.hash);
         if (hashPage) {
-            requestAnimationFrame(function () { restore(hashPage); });
+            restore(hashPage);
         } else {
             if (location.hash) stripHash();
-            var saved = null;
-            try { saved = JSON.parse(storage.getItem(key) || 'null'); } catch (_) {}
-            if (saved && saved.page > 1) requestAnimationFrame(function () { restore(saved.page); });
+            if (savedPage()) restore(savedPage());
         }
+        documentState.onChange('position', function () {
+            if (hashPage) return;
+            var page = savedPage();
+            if (!page) return;
+            if (restoreTarget != null) { restoreTarget = page; return; }
+            var now = documentModel.mostVisiblePage(documentModel.pages());
+            if (now && now !== landedPage) return;
+            if (page !== now) restore(page);
+        });
 
         var writeTimer = null;
         var lastWritten = null;
         var pendingPage = null;
-        function flush() {
+        function flush(force) {
             if (writeTimer) { clearTimeout(writeTimer); writeTimer = null; }
             if (pendingPage == null) return;
+            // Mid-restore pages are transit, not reading; the landing fires
+            // its own page change.
+            if (!force && restoreTarget != null) return;
             var p = pendingPage;
             pendingPage = null;
-            try { storage.setItem(key, JSON.stringify({ page: p, ts: Date.now() })); } catch (_) {}
+            documentState.set('position', { page: p });
             lastWritten = p;
             // Keep the URL hash honest: a stale `#pfXX` would re-anchor on the
             // next reload and skip the saved-position restore.
@@ -268,12 +311,15 @@ export function createNavigation(core) {
             if (!p || p < 1) return;
             pendingPage = p;
             if (writeTimer) clearTimeout(writeTimer);
-            writeTimer = setTimeout(flush, 400);
+            writeTimer = setTimeout(function () {
+                writeTimer = null;
+                documentState.ready.then(function () { flush(false); });
+            }, 400);
         });
         // A reload/close inside the debounce window would lose the last
         // movement; flush synchronously on pagehide.
         window.addEventListener('pagehide', function () {
-            if (pendingPage != null && pendingPage !== lastWritten) flush();
+            if (pendingPage != null && pendingPage !== lastWritten) flush(true);
         });
     }
 
@@ -294,6 +340,7 @@ export function createNavigation(core) {
         gotoPage: gotoPage,
         stepPage: stepPage,
         gotoEntry: gotoEntry,
+        gotoDestination: gotoDestination,
         gotoChapter: gotoChapter,
         gotoChapterBy: gotoChapterBy,
         marks: marks,

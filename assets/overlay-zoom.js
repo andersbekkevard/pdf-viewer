@@ -12,13 +12,16 @@
 // itself: a zoomed scroller measures scrollTop/scrollBy/clientHeight in its
 // own unzoomed units, which multiplies every Vimium j/d step by the zoom.
 //
-// Persistence is per-document, mirroring mountResumePosition:
-//   pdf2html-zoom:<hash>  — this doc's setting (preferred)
-//   pdf2html-zoom         — global fallback / no-hash docs
+// Persistence is per-document, through the document state (overlay-state.js,
+// localStorage `pdf2html-zoom:<hash>` plus the daemon copy):
+//   zoom (per document)   — this doc's setting (preferred)
+//   pdf2html-zoom         — global fallback / no-hash docs (localStorage only)
+// A daemon copy that arrives after load and differs is applied.
 export function createZoom(core) {
     var document = core.document;
     var window = core.window;
     var storage = core.storage;
+    var documentState = core.documentState;
     var entryHash = core.entryHash;
     var documentModel = core.documentModel;
     var requestAnimationFrame = core.requestAnimationFrame;
@@ -30,19 +33,14 @@ export function createZoom(core) {
     var zoom = 1.0;
     var pageWidth = 0;
 
-    function key() {
-        var hash = entryHash();
-        return hash ? GLOBAL_KEY + ':' + hash : null;
-    }
     function readPref() {
-        try {
-            var k = key();
-            var v = k ? storage.getItem(k) : null;
-            return v !== null ? v : storage.getItem(GLOBAL_KEY);
-        } catch (e) { return null; }
+        var v = entryHash() ? documentState.get('zoom') : null;
+        if (v !== null && v !== undefined) return String(v);
+        try { return storage.getItem(GLOBAL_KEY); } catch (e) { return null; }
     }
     function writePref(value) {
-        try { storage.setItem(key() || GLOBAL_KEY, value); } catch (e) {}
+        if (entryHash()) { documentState.set('zoom', value); return; }
+        try { storage.setItem(GLOBAL_KEY, value); } catch (e) {}
     }
 
     function autoFit() {
@@ -84,6 +82,14 @@ export function createZoom(core) {
         set(Math.min(MAX_MANUAL, Math.max(MIN_MANUAL, Math.round(zoom * factor * 1000) / 1000)));
     }
 
+    // Apply a stored preference without writing it back.
+    function applyPref(raw) {
+        var initial = raw === null || raw === 'auto' ? NaN : parseFloat(raw);
+        if (isFinite(initial) && initial >= MIN_MANUAL && initial <= MAX_MANUAL) mode = 'manual';
+        else { mode = 'auto'; initial = autoFit(); }
+        apply(initial);
+    }
+
     function current() { return zoom; }
     function isAuto() { return mode === 'auto'; }
 
@@ -92,11 +98,9 @@ export function createZoom(core) {
         var first = documentModel.page(1);
         pageWidth = first ? first.getBoundingClientRect().width : 0;
 
-        var raw = readPref();
-        var initial = raw === null || raw === 'auto' ? NaN : parseFloat(raw);
-        if (isFinite(initial) && initial >= MIN_MANUAL && initial <= MAX_MANUAL) mode = 'manual';
-        else { mode = 'auto'; initial = autoFit(); }
-        apply(initial);
+        applyPref(readPref());
+        // Another origin or browser saved a different zoom for this document.
+        documentState.onChange('zoom', function () { applyPref(readPref()); });
 
         // Re-fit on viewport resize in auto mode, rAF-throttled so a drag
         // resize doesn't trigger a storm of zoom writes.

@@ -24,7 +24,8 @@ Routes:
     POST   /signal/fetch        ask the extension to fetch a source PDF with browser cookies
     PUT    /fetch/<id>          extension upload of those bytes (memory only)
     GET    /fetch/<id>          convert-script collection of those bytes
-    DELETE /mapping/<hash>      drop the mapping row, rmtree the dir, forget visits
+    GET    /entry/<hash>/state  per-document position, marks and zoom (PUT .../state/<key>)
+    DELETE /mapping/<hash>      drop the mapping row, rmtree the dir, forget visits and state
     PUT    /entry/<hash>/name   rename a cache entry's HTML file (changes search name)
 
 The daemon never invokes Docker — conversion stays in the Raycast scripts
@@ -53,8 +54,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import sources
+import state
 import visits
 from reader import Reader
+from state_routes import router as state_router
 from catalog import (
     CacheCatalog,
     EntryNotFound,
@@ -79,6 +82,9 @@ async def _lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="pdf_viewer", version="0.1.0", lifespan=_lifespan)
+# Per-document position, marks and zoom (daemon/state.py). Included before
+# the static mounts at the end of this file, which catch every other path.
+app.include_router(state_router)
 
 
 def _prefer_reader() -> bool:
@@ -745,6 +751,7 @@ def delete_mapping(hash_: str):
         raise HTTPException(400, str(error)) from error
     except EntryNotFound as error:
         raise HTTPException(404, str(error)) from error
+    result["state_deleted"] = state.forget(hash_)
     if was_disabled:
         _queue_extension_sync_signal(hash_, "mapping-delete")
     return result

@@ -138,6 +138,10 @@ async function main() {
   async function load({ reset = false, prefs = {} } = {}) {
     total = 0;
     if (reset) {
+      // Position, marks and zoom also live in the daemon (daemon/state.py);
+      // a daemon without those routes answers 404/405, which is fine.
+      const entry = /^\/(?:r\/)?([a-f0-9]{6,32})\//.exec(new globalThis.URL(URL).pathname);
+      if (entry) await context.request.delete(`${BASE}/entry/${entry[1]}/state`).catch(() => {});
       await page.goto(BASE + '/healthz');
       await page.evaluate((p) => {
         localStorage.clear();
