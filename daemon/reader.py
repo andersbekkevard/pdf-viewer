@@ -251,12 +251,28 @@ class Reader:
             for future in link_futures:
                 links.extend(future.result())
             document = build_shell(hash_, title, sizes, outline, texts, links)
+            self._ensure_meta(hash_, pdf)
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(".tmp")
             tmp.write_text(document, encoding="utf-8")
             tmp.replace(path)
             stamp_path.write_text(stamp, encoding="utf-8")
             return path
+
+    def _ensure_meta(self, hash_: str, pdf: pathlib.Path) -> None:
+        """The sidebar header reads `<hash>/meta.json`. Converted entries get
+        it from pdfinfo; an entry opened on demand gets PDFium's copy."""
+        path = self.root / hash_ / "meta.json"
+        if path.exists():
+            return
+        try:
+            meta = self._run(pdfium_doc.metadata, str(pdf))
+            meta["file_size"] = pdf.stat().st_size
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            tmp.replace(path)
+        except Exception:
+            pass  # the header falls back to the document title
 
     # --------------------------------------------------------------- rasters
     def raster(self, hash_: str, pdf: pathlib.Path, page: int, width: int) -> pathlib.Path:

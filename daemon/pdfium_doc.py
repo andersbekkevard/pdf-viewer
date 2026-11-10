@@ -52,6 +52,25 @@ def page_sizes(path: str) -> list[tuple[float, float]]:
     return [pdf.get_page_size(i) for i in range(len(pdf))]
 
 
+def metadata(path: str) -> dict:
+    """Document information in meta.json's keys (see scripts/extract-meta.py):
+    title, author, subject, keywords, producer, creator and pages. Empty
+    fields are left out."""
+    pdf = open_document(path)
+    out: dict = {}
+    try:
+        info = pdf.get_metadata_dict(skip_empty=True)
+    except Exception:
+        info = {}
+    for source, key in (("Title", "title"), ("Author", "author"), ("Subject", "subject"),
+                        ("Keywords", "keywords"), ("Producer", "producer"), ("Creator", "creator")):
+        value = str(info.get(source, "")).strip()
+        if value:
+            out[key] = value
+    out["pages"] = len(pdf)
+    return out
+
+
 def outline(path: str) -> list[dict]:
     """Bookmarks in document order: {level, title, page (1-based), x, y}.
 
