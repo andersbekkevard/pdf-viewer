@@ -25,6 +25,8 @@ export function createCommandSurface(core) {
             [[['Ctrl', 'J'], ['Ctrl', 'K'], ['↓'], ['↑']], 'Sidebar: move Outline / Pages selector; Enter jumps'],
             [[['←', 'h'], ['→', 'l']], 'Sidebar: Outline / Pages tab (when open)'],
             [[['e'], ['q'], ['E']], 'Next / prev page (count prefix: 10e); a selection extends pagewise'],
+            [[['→'], ['←']], 'Next / prev page (sidebar closed)'],
+            [[['↓'], ['↑']], 'Scroll'],
             [[['c'], ['C']], 'Next / prev chapter (count prefix: 3c); a selection + c selects the chapter'],
             [[['⌘', '+'], ['⌘', '−'], ['⌘', '0']], 'Zoom in / out / back to fit-width'],
             [[['⌘', '⇧', '.']], 'Toggle page counter'],

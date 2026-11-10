@@ -324,6 +324,7 @@ the migration window.
 | `Ctrl-f` | Finger visible URL / DOI / ISBN / long-ID tokens |
 | `/` / `s` | Find in visible pages                       |
 | `e` / `q` / `E` | Next / prev page; active text selection extends pagewise |
+| `→` / `←` · `↓` / `↑` | Next / prev page · scroll (sidebar closed) |
 | `c` / `C` | Next / prev chapter                        |
 | `⌘+` / `⌘−` / `⌘0` | Zoom in / out / fit-width        |
 | `⌘⇧.`    | Toggle page counter                          |

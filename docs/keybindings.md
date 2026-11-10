@@ -17,6 +17,8 @@ For the rationale on the overall keyboard strategy, see
 | `Ctrl-f`               | Finger visible URL / DOI / ISBN / long-ID tokens              |
 | `/` · `s`              | Find in visible pages (Enter jump, `n` / `N` cycle)           |
 | `←` / `→` · `h` / `l`  | Switch sidebar tab (Outline / Pages) — only when sidebar open |
+| `→` / `←`              | Next / prev page, like `e` / `q` (when the sidebar is closed; with it open they switch its tab) |
+| `↓` / `↑`              | Scroll the document by 60 px (the sidebar selector when the sidebar has focus) |
 | `e` / `q` / `E`        | Next / prev page; active text selection extends pagewise instead; `q` aliases `E`; count-prefixed (`10e` = +10, `10q` = `10E` = −10) |
 | `c` / `C`              | Next / prev chapter; active browser selection + `c` selects the whole chapter; count-prefixed (`3c` = +3, `3C` = −3)    |
 | `⌘+` / `⌘−` / `⌘0`     | Zoom in / out (manual, per document) / back to fit-width      |

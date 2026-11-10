@@ -117,6 +117,7 @@ preparePdf2htmlEx({ document: document, window: window });
         registerEscapeHandler(commands, finger, settings, sidebar, prefs);
         registerDocumentTabGuard();
         registerCountedMotions(navigation, text);
+        registerArrowKeys(navigation, text, documentModel, sidebar, focus, finger);
         library.load();
     }
 
@@ -158,6 +159,38 @@ preparePdf2htmlEx({ document: document, window: window });
                 || (t && t.closest && t.closest('#page-container'))) {
                 e.preventDefault();
                 e.stopPropagation();
+            }
+        }, true);
+    }
+
+    // ------------------------------------------------------------------------
+    // Arrow keys on the document, as in any PDF viewer: ←/→ turn pages (the
+    // same motion as q/e, so an active selection extends pagewise), ↑/↓
+    // scroll. The scroller rarely has focus, so the browser's own arrow
+    // scrolling cannot be relied on. Left alone: arrows with a modifier
+    // (Shift extends a selection, ⌘ jumps to the ends), text fields, any open
+    // overlay, and the sidebar, which uses ←/→ for its tabs and ↑/↓ for its
+    // selector.
+    // ------------------------------------------------------------------------
+    var ARROW_SCROLL_STEP = 60;
+    function registerArrowKeys(navigation, text, documentModel, sidebar, focus, finger) {
+        document.addEventListener('keydown', function (e) {
+            var k = e.key;
+            if (k !== 'ArrowLeft' && k !== 'ArrowRight' && k !== 'ArrowUp' && k !== 'ArrowDown') return;
+            if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+            if (isInputTarget(e.target) || finger.isActive()) return;
+            if (document.querySelector('#pdf2html-palette, #pdf2html-finder, #pdf2html-settings, '
+                + '#pdf2html-cheatsheet, #pdf2html-search')) return;
+            var horizontal = k === 'ArrowLeft' || k === 'ArrowRight';
+            if (horizontal ? sidebar.isShown() : (sidebar.isShown() && focus.isSidebarScope())) return;
+            var root = documentModel.container();
+            if (!root) return;
+            e.preventDefault(); e.stopPropagation();
+            if (horizontal) {
+                var delta = k === 'ArrowRight' ? 1 : -1;
+                if (!text.extendSelectionByPage(delta)) navigation.stepPage(delta);
+            } else {
+                root.scrollBy({ top: k === 'ArrowDown' ? ARROW_SCROLL_STEP : -ARROW_SCROLL_STEP, behavior: 'instant' });
             }
         }, true);
     }
