@@ -83,6 +83,14 @@ position restore, …).
 
 ## Current state
 
+**Two engines.** The newer one, the **reader**, opens a PDF directly: PDFium
+page rasters at device resolution under a transparent text layer, built on
+demand with no conversion step ([`docs/reader.md`](docs/reader.md), ADR 0014).
+`/read?path=` and `/read?url=` open any PDF in it today. Start the daemon with
+`PDF_VIEWER_ENGINE=reader` to make it the engine for every PDF the extension
+redirects, including uncached, sign-in-gated and `file://` ones. Without that
+variable the pdf2htmlEX path described below is the default and the rollback.
+
 All core phases done (1 → 7). What works end-to-end today:
 
 - **Conversion** — `scripts/pdf2html-convert.sh` handles both `file://`
@@ -112,6 +120,8 @@ All core phases done (1 → 7). What works end-to-end today:
   `GET /view-light?path=` / `GET /view-light?url=` /
   `GET /view-light-raw?<url>` / `GET /<hash>/<file>` /
   `GET /view-canonical?path=` / `GET /view-canonical?url=` /
+  `GET /read?path=|url=` / `GET /r/<hash>/` (reader) /
+  `GET /entry/<hash>/state` (position, marks, zoom) /
   `GET /_assets/*` / `GET /healthz` / `GET /stats` /
   `GET /stats/recent` / `GET /library`. Cache lookup ≈ 1–3 ms.
 - **launchd autostart** — `launchd/com.anders.pdf_viewer.plist`, installed
@@ -185,6 +195,10 @@ pdf_viewer/
 │   └── pdf-viewer-index-folder.sh
 ├── daemon/                      # FastAPI read-only service (uv project)
 │   ├── main.py                  # thin HTTP adapter + extension signals
+│   ├── reader.py                # reader shell + raster cache (PDFium worker pool)
+│   ├── pdfium_doc.py            # every PDFium call: text, links, outline, rendering
+│   ├── sources.py               # downloading a remote PDF
+│   ├── state.py                 # per-document position, marks and zoom
 │   ├── catalog.py               # cache identity, discovery, and safe mutations
 │   ├── tests/test_catalog.py    # temp-directory cache contract suite
 │   └── visits.py
@@ -200,6 +214,7 @@ pdf_viewer/
 │   ├── keybindings.md           # full key + palette registry
 │   ├── non-goals.md             # explicit scope boundaries
 │   ├── pdf2htmlex-dom.md        # DOM conventions of converted HTML
+│   ├── reader.md                # the reader: routes, DOM contract, text model
 │   └── verification.md          # browser/daemon/manual verification loops
 └── CLAUDE.md                    # guidance for future Claude sessions
 ```
@@ -376,5 +391,6 @@ with an ETag and a short `max-age` that forces revalidation.
 - [`docs/non-goals.md`](docs/non-goals.md) — explicit scope boundaries
 - [`docs/pdf2htmlex-dom.md`](docs/pdf2htmlex-dom.md) — DOM conventions
   of converted HTML
-- [`docs/adr/`](docs/adr/) — architectural decisions 0001–0013; the
+- [`docs/reader.md`](docs/reader.md) — the reader engine
+- [`docs/adr/`](docs/adr/) — architectural decisions 0001–0014; the
   index with each one's status is [`docs/adr/README.md`](docs/adr/README.md)

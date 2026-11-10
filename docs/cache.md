@@ -47,9 +47,27 @@ preserving ADR 0004's accepted daemon/compute split.
 │   ├── <stem>.outline.js + fonts/images/...  pdf2htmlEX output assets
 │   ├── _source/         downloaded source PDF (remote) or none (local)
 │   │   └── document.pdf
+│   ├── entry.json       name and source of an entry opened on demand (see below)
+│   ├── reader/          derived reader artifacts, safe to delete (docs/reader.md)
+│   │   ├── shell.html   page frames, text lines, links, outline
+│   │   └── px/<width>/<page>.png   rasters by device width, size-limited
 │   └── meta.json        pdfinfo fields + conversion provenance (see below)
 └── ...
 ```
+
+## Entries opened on demand
+
+The reader opens a PDF without converting it (`/read`, or `/view*` with
+`PDF_VIEWER_ENGINE=reader`). Such an entry has no `mappings.tsv` row: its
+identity is `<hash>/entry.json`, `{"name": ..., "source_ref": ...}`, written
+by `CacheCatalog.register`. `mappings()` returns the TSV rows plus every
+manifest, and a TSV row wins for a hash that has both. `:rename` on an entry
+with no converted HTML changes the manifest's name. The daemon is the only
+writer of manifests; the conversion scripts keep writing `mappings.tsv`.
+
+The daemon is no longer read-only with respect to the cache: it downloads
+sources into `_source/`, writes `entry.json`, `meta.json` (when missing) and
+everything under `reader/` (ADR 0014).
 
 `_assets/` being a symlink back into the repo is what lets overlay edits
 go live on ⌘⇧R without reconverting anything.

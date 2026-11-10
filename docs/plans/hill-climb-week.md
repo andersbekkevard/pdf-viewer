@@ -1,7 +1,11 @@
 # Plan: one week of hill-climbing the viewer
 
-**Status**: Scope accepted, not started. The raster-plus-transparent-text
-rewrite (§4) is in scope for the whole week, subject to the day-2 gate.
+**Status**: In progress (2026-11-10). The raster-plus-transparent-text design
+(§4) is built behind `/read` and `/r/<hash>/` and passed the §4 proofs in
+headless Chromium; see ADR 0014 and `bench/reader/`. Not done: the
+native-viewer baseline, latency and memory axes (A4, A5), the Vimium journeys
+(A9), and the switch of the default engine, which waits for Anders' check in
+Comet.
 **Date**: 2026-10-20
 **Audience**: Anders, and the autonomous agent that runs the week
 

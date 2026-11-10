@@ -1,13 +1,17 @@
 # PDF viewer instructions
 
 Read [README.md](README.md) for the conversion, cache, daemon, overlay and extension boundaries.
-The product is converted HTML for keyboard-native Vimium use. The daemon serves cached output;
-conversion and indexing remain explicit script operations.
+The product is PDFs as HTML for keyboard-native Vimium use, from two engines. The reader
+(`daemon/reader.py`, ADR 0014) builds pages from the PDF on demand with PDFium; all PDFium calls
+stay in `daemon/pdfium_doc.py` and run in worker processes. pdf2htmlEX conversion is the default
+and rollback path until `PDF_VIEWER_ENGINE=reader` is made the default; its conversion and
+indexing remain explicit script operations.
 
 ## Route before changing
 
 - Overlay controls or keys: `docs/keybindings.md`; check Vimium conflicts before adding a binding.
 - Converted-page selectors: `docs/pdf2htmlex-dom.md`.
+- Reader (PDFium rasters, transparent text, on-demand opening): `docs/reader.md` and ADR 0014.
 - Cache identity, routing or injection: `docs/cache.md`.
 - Multi-step work and tracking: `docs/ai-production.md` and the installed `beads` skill.
 - Verification or closeout: `docs/verification.md`; choose proof for the affected surface.
@@ -47,12 +51,19 @@ The retired comparison script and its separate port/cache stay untouched.
   screen px and Vimium's j/d steps are exact (ADR 0012). Get page positions from the document
   model's rect geometry; a page's `offset*` values are page-local units. Don't cache offsets.
 - Interactive controls must be semantic elements or carry role and tabindex so Vimium can hint them.
+- Reader text is transparent and must never get a colour: highlights tint the raster (see
+  `docs/reader.md`, "Rules for overlay code"). Bump `SHELL_VERSION` when reader markup changes.
+- Per-document position, marks and zoom go through `overlay-state.js` (daemon `state.db`), not
+  straight to localStorage.
 
 Overlay cache versions hash every `assets/overlay*.js` module plus `assets/overlay.css`.
 Use `uv run scripts/inject-overlay.py --print-version`; injection/cache-upgrade procedures live
 in README. A hard reload sees symlink-served overlay edits without reconversion.
 
 ## Completion
+
+Reader and extension checks: `bench/reader/` (scorecard against PDFium) and
+`scripts/verify-extension.sh` (unpacked extension in Chromium against a scratch daemon).
 
 Use Beads for active work; `TODO.md` is legacy intake. Follow the owning verification document,
 record the exact command/browser result on the bead, then close and flush it. Existing automated

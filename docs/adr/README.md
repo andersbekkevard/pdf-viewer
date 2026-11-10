@@ -68,3 +68,4 @@ it's probably two decisions in one file.
 | 0011 | [Native arm64 pdf2htmlEX (no Docker for conversion)](0011-native-arm64-pdf2htmlex.md) | Accepted (supersedes Docker-compute half of 0004; zero-patch clause superseded by 0013) |
 | 0012 | [Page zoom lives on the pages, not the scroller](0012-page-zoom-off-the-scroller.md) | Accepted |
 | 0013 | [Patch pdf2htmlEX for text-layer fidelity](0013-patched-pdf2htmlex-text-fidelity.md) | Accepted |
+| 0014 | [Reader: PDFium rasters under a transparent text layer](0014-reader-pdfium-rasters-transparent-text.md) | Accepted for the reader routes; default engine pending a Comet check |

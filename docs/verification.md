@@ -106,9 +106,17 @@ Use the smallest proof that exercises the changed behavior:
   cached PDF. If conversion itself is exercised, the native pdf2htmlEX binary
   must already be installed (`scripts/install-native-pdf2htmlex.sh`, ADR 0011);
   scripts must not auto-install or auto-build it.
-- **Extension redirect behavior**: verify in Comet with the unpacked extension
-  loaded. Check both cache hit and passthrough/cache-miss paths when redirects
-  change.
+- **Extension redirect behavior**: run `scripts/verify-extension.sh`, which
+  loads a patched copy of the extension in Chromium against a scratch daemon,
+  cache and web origin (open PDF, sign-in-gated PDF, `file://`, disabled
+  entries). Then verify in Comet with the unpacked extension loaded: the
+  script cannot prove the real profile, Vimium or a real sign-in host.
+- **Reader (`daemon/reader.py`, `daemon/pdfium_doc.py`, reader overlay
+  modules)**: `uv run --directory daemon python -m unittest discover -s tests`,
+  then `uv run bench/reader/run.py --tier t1 --out <json>` and
+  `python3 bench/reader/compare.py <json>` against a daemon started with
+  `PDF_VIEWER_ENGINE=reader` on a spare port. A change may not lower find
+  recall, copy similarity or highlight IoU, or add a failure class.
 - **Memory/performance work**: define the measurement first, run it before and
   after on the same document, and record the numbers in the bead comment.
 - **LLM context work**: verify in Comet's LLM sidebar with the exact prompt or
