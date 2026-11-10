@@ -26,7 +26,7 @@ import threading
 import pdfium_doc
 
 # Bump when the shell markup changes, so cached shells are rebuilt.
-SHELL_VERSION = 2
+SHELL_VERSION = 3
 REPRESENTATION = "raster-v1"
 MIN_RASTER_WIDTH = 64
 MAX_RASTER_WIDTH = 6000
@@ -50,6 +50,9 @@ html,body{margin:0;padding:0;height:100%}
 font-family:sans-serif;font-kerning:none;font-variant-ligatures:none;cursor:text}
 .t .g{font-size:0}
 .t::selection,.t *::selection{color:transparent;background:rgba(0,100,163,.4)}
+.pc>a.l{position:absolute;display:block;margin:0;padding:0;border:0;background:transparent;cursor:pointer;
+-webkit-user-drag:none;user-select:none}
+#page-container.pdf2html-link-pass .pc>a.l{pointer-events:none}
 @media print{#sidebar{display:none}#page-container{position:static;overflow:visible}.pf{margin:0;box-shadow:none;page-break-after:always}}
 """
 
@@ -104,6 +107,21 @@ def _outline_html(entries: list[dict]) -> str:
     return "".join(out)
 
 
+def _link_html(link: dict) -> str:
+    """One link annotation as a positioned, empty anchor over the raster."""
+    style = (f"left:{_num(link['x'])}px;top:{_num(link['y'])}px;"
+             f"width:{_num(link['w'])}px;height:{_num(link['h'])}px")
+    dest = link.get("dest")
+    if dest is not None:
+        page = int(dest["page"])
+        detail = json.dumps([page, "XYZ", dest.get("x"), dest.get("y"), None])
+        return (f'<a class="l" href="#pf{page:x}" style="{style}" aria-label="Page {page}" '
+                f"data-reader-dest='{html.escape(detail, quote=True)}'></a>")
+    uri = html.escape(link["uri"], quote=True)
+    return (f'<a class="l" href="{uri}" style="{style}" target="_blank" '
+            f'rel="noopener noreferrer" title="{uri}" aria-label="{uri}"></a>')
+
+
 def raster_width(page_width: float, requested: int, page_height: float) -> int:
     """Clamp a requested device width to what one page may cost."""
     width = max(MIN_RASTER_WIDTH, min(MAX_RASTER_WIDTH, int(requested)))
@@ -114,7 +132,8 @@ def raster_width(page_width: float, requested: int, page_height: float) -> int:
 
 
 def build_shell(hash_: str, title: str, sizes: list[tuple[float, float]],
-                outline: list[dict], texts: list[list[dict]]) -> str:
+                outline: list[dict], texts: list[list[dict]],
+                links: list[list[dict]] | None = None) -> str:
     parts = [
         "<!DOCTYPE html>\n"
         f'<html data-pdf2html-representation="{REPRESENTATION}" data-pdf2html-text-mode="transparent">'
@@ -132,6 +151,7 @@ def build_shell(hash_: str, title: str, sizes: list[tuple[float, float]],
     for index, (width, height) in enumerate(sizes):
         number = index + 1
         lines = texts[index] if index < len(texts) else []
+        page_links = links[index] if links and index < len(links) else []
         base = f"/r/{hash_}/p/{number}/"
         first = raster_width(width, round(width * SHELL_RASTER_SCALE), height)
         parts.append(
@@ -140,6 +160,7 @@ def build_shell(hash_: str, title: str, sizes: list[tuple[float, float]],
             f'<div class="pc"><img class="bi" alt="" data-pdf2html-src="{base}{first}.png" '
             f'data-reader-raster="{base}">'
             + "".join(_line_html(line) for line in lines)
+            + "".join(_link_html(link) for link in page_links)
             + "</div></div>"
         )
     parts.append("</div></body></html>\n")
@@ -220,11 +241,16 @@ class Reader:
             chunk = max(4, -(-count // (self.workers * 2)))
             futures = [pool.submit(pdfium_doc.pages_text, str(pdf), start, min(count, start + chunk))
                        for start in range(0, count, chunk)]
+            link_futures = [pool.submit(pdfium_doc.pages_links, str(pdf), start, min(count, start + chunk))
+                            for start in range(0, count, chunk)]
             outline = self._run(pdfium_doc.outline, str(pdf))
             texts: list[list[dict]] = []
             for future in futures:
                 texts.extend(future.result())
-            document = build_shell(hash_, title, sizes, outline, texts)
+            links: list[list[dict]] = []
+            for future in link_futures:
+                links.extend(future.result())
+            document = build_shell(hash_, title, sizes, outline, texts, links)
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(".tmp")
             tmp.write_text(document, encoding="utf-8")

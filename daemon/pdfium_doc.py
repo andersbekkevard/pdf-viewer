@@ -294,6 +294,149 @@ def pages_text(path: str, start: int, stop: int) -> list[list[dict]]:
 
 
 # ----------------------------------------------------------------------------
+# Links
+# ----------------------------------------------------------------------------
+
+# External link schemes the shell may emit. Anything else (javascript:,
+# file:, data:, launch and remote-goto actions) is dropped.
+LINK_SCHEMES = ("http", "https", "mailto")
+_URI_MAX = 8192
+
+
+def safe_uri(uri: str | None) -> str | None:
+    """The URI when its scheme is allowed and it has no control characters."""
+    if not uri:
+        return None
+    uri = uri.strip()
+    if not uri or len(uri) > _URI_MAX or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in uri):
+        return None
+    scheme, sep, rest = uri.partition(":")
+    if not sep or not rest or scheme.lower() not in LINK_SCHEMES:
+        return None
+    return uri
+
+
+def _box(affine, left: float, bottom: float, right: float, top: float) -> tuple[float, float, float, float]:
+    """A page-space rectangle → its page px bounding box (x, y, w, h)."""
+    a, b, c, d, e, f = affine
+    xs, ys = [], []
+    for px, py in ((left, bottom), (left, top), (right, bottom), (right, top)):
+        xs.append(a * px + c * py + e)
+        ys.append(b * px + d * py + f)
+    return min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)
+
+
+def _dest_target(pdf: pdfium.PdfDocument, dest, affines: dict) -> dict | None:
+    """A destination → {page (1-based), x, y} in the target page's px."""
+    index = raw.FPDFDest_GetDestPageIndex(pdf, dest)
+    if index < 0 or index >= len(pdf):
+        return None
+    has_x, has_y, has_zoom = ctypes.c_int(), ctypes.c_int(), ctypes.c_int()
+    x, y, zoom = ctypes.c_float(), ctypes.c_float(), ctypes.c_float()
+    out = {"page": index + 1, "x": None, "y": None}
+    if not raw.FPDFDest_GetLocationInPage(dest, has_x, has_y, has_zoom, x, y, zoom):
+        return out
+    if not (has_x.value or has_y.value):
+        return out
+    if index not in affines:
+        target = pdf[index]
+        try:
+            affines[index] = _device_affine(target, *target.get_size())
+        finally:
+            target.close()
+    a, b, c, d, e, f = affines[index]
+    # A missing coordinate keeps the page edge it names: left or top.
+    px = float(x.value) if has_x.value and math.isfinite(x.value) else None
+    py = float(y.value) if has_y.value and math.isfinite(y.value) else None
+    # The target page's own transform, so rotation and crop box apply as they
+    # do to the text; for an upright page this is (x, height − y).
+    if px is not None:
+        dx = a * px + c * (py if py is not None else 0.0) + e
+        out["x"] = max(0.0, dx)
+    if py is not None:
+        dy = b * (px if px is not None else 0.0) + d * py + f
+        out["y"] = max(0.0, dy)
+    return out
+
+
+def _uri(pdf: pdfium.PdfDocument, action) -> str | None:
+    size = raw.FPDFAction_GetURIPath(pdf, action, None, 0)
+    if size <= 1 or size > _URI_MAX:
+        return None
+    buffer = ctypes.create_string_buffer(size)
+    raw.FPDFAction_GetURIPath(pdf, action, buffer, size)
+    return buffer.value.decode("latin-1")
+
+
+def page_links(path: str, index: int) -> list[dict]:
+    """Link annotations of one page: {x, y, w, h} in page px plus a target.
+
+    The target is either "dest": {page (1-based), x, y} (page px of the
+    target page, None when the destination names no position) or "uri". Links with any
+    other action, a disallowed scheme or no usable rectangle are skipped.
+    """
+    pdf = open_document(path)
+    page = pdf[index]
+    try:
+        width, height = page.get_size()
+        affine = _device_affine(page, width, height)
+        affines: dict[int, tuple] = {index: affine}
+        out: list[dict] = []
+        pos = ctypes.c_int(0)
+        link = raw.FPDF_LINK()
+        rect = raw.FS_RECTF()
+        while raw.FPDFLink_Enumerate(page, pos, link):
+            try:
+                if not raw.FPDFLink_GetAnnotRect(link, rect):
+                    continue
+                x, y, w, h = _box(affine, rect.left, rect.bottom, rect.right, rect.top)
+                if not (w > 0.5 and h > 0.5) or not all(map(math.isfinite, (x, y, w, h))):
+                    continue
+                item: dict = {"x": x, "y": y, "w": w, "h": h}
+                dest = raw.FPDFLink_GetDest(pdf, link)
+                if dest:
+                    target = _dest_target(pdf, dest, affines)
+                    if target is None:
+                        continue
+                    item["dest"] = target
+                else:
+                    action = raw.FPDFLink_GetAction(link)
+                    if not action:
+                        continue
+                    kind = raw.FPDFAction_GetType(action)
+                    if kind == raw.PDFACTION_GOTO:
+                        dest = raw.FPDFAction_GetDest(pdf, action)
+                        target = _dest_target(pdf, dest, affines) if dest else None
+                        if target is None:
+                            continue
+                        item["dest"] = target
+                    elif kind == raw.PDFACTION_URI:
+                        uri = safe_uri(_uri(pdf, action))
+                        if uri is None:
+                            continue
+                        item["uri"] = uri
+                    else:
+                        continue
+                out.append(item)
+            except Exception:
+                continue
+        return out
+    finally:
+        page.close()
+
+
+def pages_links(path: str, start: int, stop: int) -> list[list[dict]]:
+    """Links of pages [start, stop). A page that fails yields an empty list."""
+    out = []
+    for index in range(start, stop):
+        try:
+            out.append(page_links(path, index))
+        except Exception:
+            out.append([])
+    return out
+
+
+# ----------------------------------------------------------------------------
 # Rasters
 # ----------------------------------------------------------------------------
 
