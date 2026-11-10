@@ -10,15 +10,7 @@ if ! curl -fsS http://localhost:7435/healthz >/dev/null; then
     exit 2
 fi
 
-PW_NODE_PATH="$HOME/.npm/_npx/705bc6b22212b352/node_modules"
-if ! NODE_PATH="$PW_NODE_PATH" node -e "require.resolve('playwright')" >/dev/null 2>&1; then
-    FOUND=$(find "$HOME/.npm/_npx" "$HOME/Library/Caches" -maxdepth 6 \
-        -type d -name playwright -path '*/node_modules/playwright' 2>/dev/null | head -1)
-    if [[ -z "$FOUND" ]]; then
-        echo "verify-light-parity.sh: no local Playwright found; do not install it for this check" >&2
-        exit 2
-    fi
-    PW_NODE_PATH="$(dirname "$FOUND")"
-fi
+source "$(cd "$(dirname "$0")" && pwd)/lib/playwright.sh"
+resolve_playwright || exit 2
 
 exec env NODE_PATH="$PW_NODE_PATH" node "$HARNESS" "$@"

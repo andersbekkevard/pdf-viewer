@@ -80,15 +80,8 @@ printf '{"title":"basic_text","pages":1}\n' > "$OUT_DIR/meta.json"
 # --- 3. resolve Playwright + run assertions ---------------------------------
 # Local npx module cache (playwright 1.60 / chromium 1223). Verify it resolves;
 # fall back to a filesystem search if the pinned dir moved. No installs.
-PW_NODE_PATH="$HOME/.npm/_npx/705bc6b22212b352/node_modules"
-if ! NODE_PATH="$PW_NODE_PATH" node -e "require.resolve('playwright')" >/dev/null 2>&1; then
-    FOUND=$(find "$HOME/.npm/_npx" "$HOME/Library/Caches" -maxdepth 6 \
-              -type d -name playwright -path '*/node_modules/playwright' 2>/dev/null | head -1)
-    [[ -n "$FOUND" ]] || err "no local Playwright found — do not install globally; locate or restore the npx cache"
-    PW_NODE_PATH="$(dirname "$FOUND")"
-    NODE_PATH="$PW_NODE_PATH" node -e "require.resolve('playwright')" >/dev/null 2>&1 \
-        || err "located Playwright at $PW_NODE_PATH but it does not resolve"
-fi
+source "$(cd "$(dirname "$0")" && pwd)/lib/playwright.sh"
+resolve_playwright || exit 1
 
 VIEW_URL="http://localhost:${PORT}/${SMOKE_HASH}/basic_text.html"
 echo "smoke-viewer.sh: asserting against $VIEW_URL"
