@@ -131,8 +131,20 @@ That's the escape hatch.
 
 ## Vimium setup
 
-Add `localhost:7435` to Vimium's "Keys to pass through" with the keys
-`? s / n N h l e q E c C <c-f> 0 1 2 3 4 5 6 7 8 9`. Without this, Vimium
+In Vimium's options, add an exclusion rule with the pattern
+`https?://localhost:7435/*` and the keys
+`? s / n N h l e q E c C 0 1 2 3 4 5 6 7 8 9`. Without this, Vimium
 swallows them before the overlay's handlers see them — in particular,
-Vimium's own count buffer eats the digits in `10e` / `10q`. One-time
-setup in the Vimium options page.
+Vimium's own count buffer eats the digits in `10e` / `10q`.
+
+Two details that `scripts/verify-vimium.sh` checks with the real extension:
+
+- The pattern needs the scheme and the trailing `/*`. Vimium matches the
+  whole URL, so a bare `localhost:7435` matches nothing.
+- Do not list `<c-f>`. Vimium reads the keys as single characters, so
+  `<c-f>` passes `<`, `c`, `-`, `f` and `>` through, and plain `f` stops
+  opening link hints. Vimium does not bind Ctrl-f, so the overlay's finger
+  mode gets it without a rule.
+
+Vimium's own marks (`m` / `'`) do nothing here: they store the window's scroll
+position, and the viewer scrolls `#page-container`. Use `:mark` / `:jump`.

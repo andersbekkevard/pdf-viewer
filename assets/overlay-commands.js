@@ -118,6 +118,15 @@ export function createCommandSurface(core) {
         var lt = String(tail || '').toLowerCase();
         return list.filter(function (a) { return String(a).toLowerCase().indexOf(lt) === 0; });
     }
+    // Presets for a numeric argument, plus the number as typed. Enter runs
+    // the last row, so a typed `2` must be there itself: without it `:zoom 2`
+    // would run the preset `2.5` and `:so 2` the preset `25`.
+    function numericChoices(presets, tail) {
+        var typed = String(tail || '').trim();
+        var out = prefixFilter(presets, typed);
+        if (typed && isFinite(Number(typed)) && out.indexOf(typed) === -1) out.push(typed);
+        return out;
+    }
     function onOff(on) { return on ? 'OFF' : 'ON'; }
     function markRows(command, tail) {
         // Most recently set mark last (bottom = closest to the caret).
@@ -189,7 +198,7 @@ export function createCommandSurface(core) {
           handler: function () { prefs.toggle('pinned'); } },
         { name: 'scrolloff', aliases: ['so'], usage: 'scrolloff N', help: 'Scrolloff band at N% (0–50)',
           desc: 'scrolloff N% (0-50)',
-          argCompleter: function (tail) { return prefixFilter(['0', '10', '25', '33', '50'], tail); },
+          argCompleter: function (tail) { return numericChoices(['0', '10', '25', '33', '50'], tail); },
           handler: function (a) {
               var n = parseInt(a, 10);
               if (!isNaN(n)) prefs.set('scrollOff', Math.max(0, Math.min(50, n)) / 100);
@@ -246,7 +255,7 @@ export function createCommandSurface(core) {
           handler: function () { navigation.gotoChapterBy(-1); } },
         { name: 'zoom', aliases: [], usage: 'zoom N | auto', help: 'Set page zoom (auto = fit to width)',
           desc: 'set zoom N (or auto)',
-          argCompleter: function (tail) { return prefixFilter(['auto', '1.0', '1.2', '1.4', '1.6', '1.8', '2.0', '2.5'], tail); },
+          argCompleter: function (tail) { return numericChoices(['auto', '1.0', '1.2', '1.4', '1.6', '1.8', '2.0', '2.5'], tail); },
           handler: function (a) { if (a) zoom.set(a === 'auto' ? 'auto' : parseFloat(a)); } },
         { name: 'open', aliases: ['o'], usage: 'open <doc>', help: 'Open another cached document',
           desc: 'open another cached doc',
@@ -338,6 +347,22 @@ export function createCommandSurface(core) {
             sel.removeAllRanges();
             ranges.forEach(function (r) { sel.addRange(r); });
         } catch (_) {}
+    }
+
+    // With Vimium installed, Escape in a text field never reaches the page:
+    // Vimium's insert mode takes it and only blurs the field, so closing a
+    // command surface took two presses. Losing focus to the page while the
+    // window is still focused means the reader pressed Escape or clicked
+    // away; close then. Switching to another app (the window loses focus)
+    // leaves it open.
+    function closeWhenFocusLeaves(input, overlay) {
+        input.addEventListener('blur', function () {
+            window.setTimeout(function () {
+                if (!overlay.isConnected || !document.hasFocus()) return;
+                if (document.activeElement === input || overlay.contains(document.activeElement)) return;
+                removeOverlay(overlay);
+            }, 0);
+        });
     }
 
     function openPalette(keptSelection) {
@@ -522,6 +547,7 @@ export function createCommandSurface(core) {
         }
 
         input.focus();
+        closeWhenFocusLeaves(input, wrap);
         input.addEventListener('input', function () { computeMatches(); renderMatches(); });
         input.addEventListener('keydown', function (ev) {
             if (ev.key === 'Escape') {
@@ -1047,6 +1073,7 @@ export function createCommandSurface(core) {
         }
 
         inputEl.focus();
+        closeWhenFocusLeaves(inputEl, bg);
         render();
     }
 

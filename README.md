@@ -116,6 +116,7 @@ All core phases done (1 → 7). What works end-to-end today:
   content-hashes every PDF and converts uncached ones. Raycast wrapper
   takes a folder argument.
 - **FastAPI daemon** (`daemon/main.py`, uv project) — read-only. Routes:
+  `GET /` (home page: the library, searchable; `assets/home.*`) /
   `GET /view?path=` / `GET /view?url=` / `GET /view-raw?<url>` /
   `GET /view-light?path=` / `GET /view-light?url=` /
   `GET /view-light-raw?<url>` / `GET /<hash>/<file>` /
@@ -294,9 +295,10 @@ next open re-converts.
 
 ### 5. Vimium exclusion rule
 
-Add `localhost:7435` to Vimium's "Keys to pass through" with the keys
-`? s / n N h l e q E c C <c-f> 0 1 2 3 4 5 6 7 8 9`, otherwise Vimium swallows them before the overlay's
-handlers see them. One-time setup in the Vimium options page.
+In Vimium's options, add an exclusion rule with the pattern `https?://localhost:7435/*` and the
+keys `? s / n N h l e q E c C 0 1 2 3 4 5 6 7 8 9`, otherwise Vimium swallows them before the
+overlay's handlers see them. Do not add `<c-f>`: it disables `f` link hints
+([`docs/keybindings.md`](docs/keybindings.md), "Vimium setup").
 
 ### 6. Native pdf2htmlEX toolchain
 

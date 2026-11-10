@@ -192,6 +192,16 @@ export function createSearch(core) {
         ]);
         document.body.appendChild(wrap);
         input.focus();
+        // Under Vimium, Escape in the field only blurs it (see the palette's
+        // closeWhenFocusLeaves). Before Enter that means "close"; after
+        // Enter the bar is already gone and the hits stay.
+        input.addEventListener('blur', function () {
+            window.setTimeout(function () {
+                if (!wrap.isConnected || !document.hasFocus()) return;
+                if (document.activeElement === input || searchState.entered) return;
+                closeSearch();
+            }, 0);
+        });
 
         // Live-update on typing. Enter / Esc / n / N are all handled by the
         // document capture-phase listener in mountSearch so they fire even
