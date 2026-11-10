@@ -26,7 +26,7 @@ import threading
 import pdfium_doc
 
 # Bump when the shell markup changes, so cached shells are rebuilt.
-SHELL_VERSION = 3
+SHELL_VERSION = 4
 REPRESENTATION = "raster-v1"
 MIN_RASTER_WIDTH = 64
 MAX_RASTER_WIDTH = 6000
@@ -48,6 +48,7 @@ html,body{margin:0;padding:0;height:100%}
 .bi{position:absolute;top:0;left:0;width:100%;height:100%;border:0;margin:0;user-select:none}
 .t{position:absolute;white-space:pre;line-height:1;transform-origin:0 0;color:transparent;
 font-family:sans-serif;font-kerning:none;font-variant-ligatures:none;cursor:text}
+.t.fs{font-family:serif}.t.fm{font-family:monospace}.t.fb{font-weight:bold}.t.fi{font-style:italic}
 .t .g{font-size:0}
 .t::selection,.t *::selection{color:transparent;background:rgba(0,100,163,.4)}
 .pc>a.l{position:absolute;display:block;margin:0;padding:0;border:0;background:transparent;cursor:pointer;
@@ -70,19 +71,21 @@ def _line_html(line: dict) -> str:
     if rotation:
         style += f";transform:{rotation}"
     segments = line["segs"]
+    # Fallback family and style (pdfium_doc.font_style): fs, fm, fb, fi.
+    classes = "t" + "".join(f" f{letter}" for letter in line.get("f", ""))
     attrs = ""
     if line.get("rtl"):
         attrs = ' dir="rtl"'
     if len(segments) == 1:
         seg = segments[0]
-        return f'<div class="t" style="{style}"{attrs} data-w="{_num(seg["w"])}">{html.escape(seg["t"], quote=False)}<br></div>'
+        return f'<div class="{classes}" style="{style}"{attrs} data-w="{_num(seg["w"])}">{html.escape(seg["t"], quote=False)}<br></div>'
     parts = []
     for i, seg in enumerate(segments):
         if i:
             space = " " if seg["sp"] else ""
             parts.append(f'<span class="g" style="padding-left:{_num(max(0.0, seg["gap"]))}px">{space}</span>')
         parts.append(f'<span data-w="{_num(seg["w"])}">{html.escape(seg["t"], quote=False)}</span>')
-    return f'<div class="t" style="{style}"{attrs}>{"".join(parts)}<br></div>'
+    return f'<div class="{classes}" style="{style}"{attrs}>{"".join(parts)}<br></div>'
 
 
 def _outline_html(entries: list[dict]) -> str:

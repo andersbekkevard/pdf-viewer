@@ -32,7 +32,11 @@ export function createTextFit(core) {
             var line = node.classList.contains('t') ? node : node.closest('.t');
             var size = line ? parseFloat(line.style.fontSize) : 0;
             if (!(size > 0)) continue;
-            var wanted = size + 'px sans-serif';
+            // The line's fallback family and style, as its classes set them
+            // in the page (fs serif, fm monospace, fb bold, fi italic).
+            var cls = line.classList;
+            var wanted = (cls.contains('fi') ? 'italic ' : '') + (cls.contains('fb') ? 'bold ' : '') + size + 'px '
+                + (cls.contains('fm') ? 'monospace' : cls.contains('fs') ? 'serif' : 'sans-serif');
             if (wanted !== font) { font = wanted; context.font = font; }
             // Measured with 1px of spacing, as laid out: non-zero spacing
             // turns ligatures off in both the canvas and the page.

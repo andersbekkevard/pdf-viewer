@@ -309,6 +309,18 @@ html[data-pdf2html-representation="raster-v1"] ::highlight(pdf2html-finger-id) {
     color: transparent;
     background-color: rgba(205, 172, 8, 0.35);
 }
+/* The browser's own find (Cmd-F) paints its matches with an opaque text
+   colour by default, which would draw the fallback font over the page. */
+html[data-pdf2html-representation="raster-v1"] #page-container .t::search-text,
+html[data-pdf2html-representation="raster-v1"] #page-container .t *::search-text {
+    color: transparent;
+    background-color: rgba(255, 255, 4, 0.45);
+}
+html[data-pdf2html-representation="raster-v1"] #page-container .t::search-text:current,
+html[data-pdf2html-representation="raster-v1"] #page-container .t *::search-text:current {
+    color: transparent;
+    background-color: rgba(255, 150, 50, 0.55);
+}
 html[data-pdf2html-representation="raster-v1"] #page-container .pc > img.bi {
     pointer-events: none;
 }

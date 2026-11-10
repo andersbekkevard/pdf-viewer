@@ -18,6 +18,7 @@ import ctypes
 import functools
 import io
 import math
+import re
 import statistics
 import unicodedata
 
@@ -31,7 +32,37 @@ SEGMENT_GAP_EM = 1.0
 # Characters whose centre leaves the line by more than this many line heights
 # belong to another line, even when PDFium reports no line break.
 LINE_DRIFT_EM = 0.7
-TEXT_LAYER_VERSION = 3
+TEXT_LAYER_VERSION = 4
+
+# The text layer is laid out in a fallback font and fitted to each segment's
+# width. The closer the fallback's proportions are to the document's font, the
+# closer a highlight sits to the glyphs inside a line, so each line names a
+# generic family and style. PDF font flags are unreliable (TeX fonts rarely
+# set "serif"), so the font's name decides first.
+_MONO_RE = re.compile(r"mono|courier|cmtt|sftt|lmtt|consol|menlo|typewriter|inconsolata|firacode|sourcecode", re.I)
+_SERIF_RE = re.compile(
+    r"times|nimbusrom|cmr\d|cmbx|cmti|cmsl|cmmi|cmsy|cmex|sfrm|sfbx|sfti|sfrb|sfsl|lmroman|lmr\d|serif|georgia|garamond"
+    r"|minion|palatin|bookman|charter|utopia|cambria|caslon|baskerv|libertine|stix|century|didot|bodoni|mtsy|mtmi", re.I)
+_SANS_RE = re.compile(r"sans|helvet|arial|myriad|calibri|verdana|tahoma|gothic|grotesk|roboto|inter\b|cmss|sfss|lmsans", re.I)
+_BOLD_RE = re.compile(r"bold|black|heavy|cmbx|sfbx|sfrb|demi|medi$", re.I)
+_ITALIC_RE = re.compile(r"ital|obli|cmti|cmsl|cmmi|sfti|sfsl|-it$", re.I)
+
+
+def font_style(name: str, flags: int, weight: int) -> str:
+    """Fallback font for a PDF font: letters from "m" (monospace), "s" (serif),
+    "b" (bold) and "i" (italic); the empty string is upright sans-serif."""
+    out = ""
+    if _MONO_RE.search(name) or flags & 1:
+        out += "m"
+    elif _SANS_RE.search(name):
+        pass
+    elif _SERIF_RE.search(name) or flags & 2:
+        out += "s"
+    if weight >= 600 or _BOLD_RE.search(name):
+        out += "b"
+    if flags & 64 or _ITALIC_RE.search(name):
+        out += "i"
+    return out
 
 
 @functools.lru_cache(maxsize=6)
@@ -143,7 +174,9 @@ def _direction(boxed: list[tuple]) -> int:
     if len(boxed) < 2:
         return 0
     votes = [0, 0, 0, 0]
-    for (_, ax0, ay0, ax1, ay1), (_, bx0, by0, bx1, by1) in zip(boxed, boxed[1:]):
+    for a, b in zip(boxed, boxed[1:]):
+        ax0, ay0, ax1, ay1 = a[1:5]
+        bx0, by0, bx1, by1 = b[1:5]
         dx = (bx0 + bx1) / 2 - (ax0 + ax1) / 2
         dy = (by0 + by1) / 2 - (ay0 + ay1) / 2
         if abs(dx) >= abs(dy):
@@ -191,8 +224,10 @@ def _build_line(chars: list[tuple]) -> list[dict]:
     heights: list[float] = []
     tops: list[float] = []
 
+    indices: list[int] = []
+
     def flush_line() -> None:
-        nonlocal segments, current, heights, tops, pending_space
+        nonlocal segments, current, heights, tops, pending_space, indices
         if current is not None:
             segments.append(current)
             current = None
@@ -203,9 +238,13 @@ def _build_line(chars: list[tuple]) -> list[dict]:
             ox, oy = _from_local(direction, x0, top)
             out.append({
                 "x": ox, "y": oy, "h": height, "dir": direction,
+                # The middle character names the line's font: a line often
+                # starts with a variable or a bullet in another one.
+                "i": indices[len(indices) // 2],
                 "segs": [{"t": s["t"], "w": s["x1"] - s["x0"], "gap": s["gap"], "sp": s["sp"]} for s in segments],
             })
         segments, heights, tops, pending_space = [], [], [], False
+        indices = []
 
     if rtl:
         # Logical order with decreasing x: fit the whole line as one segment.
@@ -213,7 +252,7 @@ def _build_line(chars: list[tuple]) -> list[dict]:
         x1 = max(c[3] for c in boxed)
         y0 = statistics.median(c[2] for c in boxed)
         height = statistics.median(c[4] - c[2] for c in boxed)
-        return [{"x": x0, "y": y0, "h": height, "dir": 0, "rtl": True,
+        return [{"x": x0, "y": y0, "h": height, "dir": 0, "rtl": True, "i": boxed[len(boxed) // 2][5],
                  "segs": [{"t": text_all.strip(), "w": x1 - x0, "gap": 0.0, "sp": False}]}]
 
     last_x0 = last_x1 = 0.0
@@ -254,6 +293,7 @@ def _build_line(chars: list[tuple]) -> list[dict]:
         last_x0, last_x1 = lx0, max(lx1, last_x1) if lx0 < last_x1 else lx1
         heights.append(h)
         tops.append(ly0)
+        indices.append(ch[5])
     flush_line()
     return out
 
@@ -303,9 +343,25 @@ def page_text(path: str, index: int) -> list[dict]:
                     continue
                 xs = (a * rect.left + c * rect.bottom + e, a * rect.right + c * rect.top + e)
                 ys = (b * rect.left + d * rect.bottom + f, b * rect.right + d * rect.top + f)
-                chars.append((ch, min(xs), min(ys), max(xs), max(ys)))
+                chars.append((ch, min(xs), min(ys), max(xs), max(ys), i))
             if chars:
                 lines.extend(_build_line(chars))
+            # One font lookup per line.
+            name = ctypes.create_string_buffer(256)
+            flags = ctypes.c_int()
+            styles: dict[tuple, str] = {}
+            for line in lines:
+                index = line.pop("i", -1)
+                if index < 0:
+                    continue
+                flags.value = 0
+                name.value = b""
+                raw.FPDFText_GetFontInfo(textpage, index, name, 256, flags)
+                key = (name.value, flags.value, raw.FPDFText_GetFontWeight(textpage, index))
+                if key not in styles:
+                    styles[key] = font_style(key[0].decode("utf-8", "replace"), key[1], key[2])
+                if styles[key]:
+                    line["f"] = styles[key]
             return lines
         finally:
             textpage.close()

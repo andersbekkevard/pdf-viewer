@@ -63,6 +63,11 @@
         <string>/Users/andersbekkevard/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
         <key>HOME</key>
         <string>/Users/andersbekkevard</string>
+        <!-- Engine for every PDF the extension redirects: "reader" (PDFium
+             rasters built on demand, ADR 0014) or "pdf2htmlex" (converted
+             HTML; the rollback). -->
+        <key>PDF_VIEWER_ENGINE</key>
+        <string>reader</string>
     </dict>
 
     <key>ProcessType</key>
