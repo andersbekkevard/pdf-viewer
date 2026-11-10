@@ -6,6 +6,9 @@ Routes:
     GET    /view-raw?<remote>   same as /view?url=, but preserves raw query strings
     GET    /view-canonical?...  canonical HTML rollback route (also -raw)
     GET    /view-light?...      explicit light HTML, canonical fallback (also -raw)
+    GET    /read?...            open any PDF in the reader, no conversion (also -raw)
+    GET    /r/<hash>/           reader shell: PDFium rasters under transparent text
+    GET    /r/<hash>/p/<n>/<w>.png  one page rendered at a device width
     GET    /native?...          the original PDF for a hash, path or url
     GET    /library             cached docs by frecency (overlay :open, ⌘K)
     GET    /cache-urls          redirect rules for the browser extension
@@ -49,6 +52,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import sources
 import visits
 from reader import Reader
 from catalog import (
@@ -75,6 +79,14 @@ async def _lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="pdf_viewer", version="0.1.0", lifespan=_lifespan)
+
+
+def _prefer_reader() -> bool:
+    """Whether documents open in the reader (PDFium rasters, built on demand)
+    instead of pdf2htmlEX's converted HTML. PDF_VIEWER_ENGINE=pdf2htmlex is
+    the rollback: converted entries then keep serving their HTML and a cache
+    miss falls back to the browser's own viewer."""
+    return os.environ.get("PDF_VIEWER_ENGINE", "pdf2htmlex").strip().lower() == "reader"
 
 
 def _prefer_light_from_environment() -> bool:
@@ -367,12 +379,13 @@ def healthz():
 # each reachable as `?path=`/`?url=` or as a raw query string. The routes only
 # pick the representation; _view_query and _raw_url hold the shared rules.
 
-def _view_query(path: Optional[str], url: Optional[str], background: BackgroundTasks, *, light: bool):
+def _view_query(path: Optional[str], url: Optional[str], background: BackgroundTasks, *,
+                light: bool, reader_first: bool = False):
     if (path is None) == (url is None):
         raise HTTPException(400, "provide exactly one of: path, url")
     if path is not None:
-        return _view_path(path, background, light=light)
-    return _view_url(url, background, light=light)
+        return _view_path(path, background, light=light, reader_first=reader_first)
+    return _view_url(url, background, light=light, reader_first=reader_first)
 
 
 def _raw_url(request: Request) -> str:
@@ -401,7 +414,24 @@ def view(
     path: Optional[str] = Query(None, description="absolute local path"),
     url: Optional[str] = Query(None, description="http(s) URL"),
 ):
-    return _view_query(path, url, background, light=_prefer_light_from_environment())
+    return _view_query(path, url, background, light=_prefer_light_from_environment(),
+                       reader_first=_prefer_reader())
+
+
+@app.get("/read")
+def read(
+    background: BackgroundTasks,
+    path: Optional[str] = Query(None, description="absolute local path"),
+    url: Optional[str] = Query(None, description="http(s) URL"),
+):
+    """Open any PDF in the reader, converted or not: a local file is read in
+    place, a remote one is downloaded once into its entry."""
+    return _view_query(path, url, background, light=True, reader_first=True)
+
+
+@app.get("/read-raw")
+def read_raw(request: Request, background: BackgroundTasks):
+    return _view_url(_raw_url(request), background, light=True, reader_first=True)
 
 
 @app.get("/view-light")
@@ -425,7 +455,8 @@ def view_canonical(
 @app.get("/view-raw")
 def view_raw(request: Request, background: BackgroundTasks):
     """Remote URL view route for extension redirects."""
-    return _view_url(_raw_url(request), background, light=_prefer_light_from_environment())
+    return _view_url(_raw_url(request), background, light=_prefer_light_from_environment(),
+                     reader_first=_prefer_reader())
 
 
 @app.get("/view-light-raw")
@@ -438,7 +469,13 @@ def view_canonical_raw(request: Request, background: BackgroundTasks):
     return _view_url(_raw_url(request), background, light=False)
 
 
-def _view_path(path: str, background: BackgroundTasks, *, light: bool):
+def _open_local_in_reader(pdf: pathlib.Path, hash_: str):
+    """Register a local PDF (no conversion) and send the tab to its reader."""
+    catalog.register(hash_, str(pdf), pdf.stem)
+    return RedirectResponse(f"/r/{hash_}/", status_code=307)
+
+
+def _view_path(path: str, background: BackgroundTasks, *, light: bool, reader_first: bool = False):
     try:
         p = pathlib.Path(path).expanduser().resolve(strict=True)
     except FileNotFoundError:
@@ -447,6 +484,8 @@ def _view_path(path: str, background: BackgroundTasks, *, light: bool):
         raise HTTPException(400, f"not a regular file: {path}")
 
     resolved = catalog.resolve_source(p, prefer_light=light)
+    if reader_first and resolved.hash and not resolved.disabled:
+        return _open_local_in_reader(p, resolved.hash)
     if resolved.representation is not None:
         if resolved.disabled:
             return FileResponse(
@@ -469,11 +508,25 @@ def _view_path(path: str, background: BackgroundTasks, *, light: bool):
     )
 
 
-def _view_url(url: str, background: BackgroundTasks, *, light: bool):
+def _view_url(url: str, background: BackgroundTasks, *, light: bool, reader_first: bool = False):
     try:
         resolved = catalog.resolve_source(url, prefer_light=light)
     except InvalidCatalogInput as error:
         raise HTTPException(400, str(error)) from error
+    if reader_first and not resolved.disabled:
+        if catalog.source_pdf(resolved.hash) is None:
+            try:
+                name = sources.download(url, CACHE_DIR / resolved.hash / "_source")
+            except sources.SourceError as error:
+                # No bytes (sign-in page, network): the browser's own viewer
+                # still opens the original URL.
+                print(f"reader: download failed for {resolved.source_ref}: {error}", flush=True)
+                return RedirectResponse(with_passthrough(url), status_code=307)
+            catalog.register(resolved.hash, resolved.source_ref, pathlib.PurePath(name).stem)
+        elif resolved.hash not in catalog.mappings():
+            cached = catalog.source_pdf(resolved.hash)
+            catalog.register(resolved.hash, resolved.source_ref, cached.stem if cached else resolved.hash)
+        return RedirectResponse(f"/r/{resolved.hash}/", status_code=307)
     if resolved.representation is not None:
         if resolved.disabled:
             return RedirectResponse(
@@ -527,13 +580,16 @@ def reader_raster(hash_: str, page: int, width: int):
                         headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 
-def _require_cached_entry(hash_: str) -> pathlib.Path:
+def _require_cached_entry(hash_: str) -> str:
+    """The entry's viewer path, or 400/404."""
     try:
-        return catalog.require_representation(hash_).selected
+        catalog.validate_hash(hash_)
     except InvalidCatalogInput as error:
         raise HTTPException(400, str(error)) from error
-    except EntryNotFound as error:
-        raise HTTPException(404, str(error)) from error
+    href = catalog.viewer_href(hash_, prefer_reader=_prefer_reader())
+    if href is None:
+        raise HTTPException(404, f"no cached PDF viewer entry for hash {hash_}")
+    return href
 
 
 def _base_url(request: Request) -> str:
@@ -541,8 +597,7 @@ def _base_url(request: Request) -> str:
 
 
 def _viewer_url_for_hash(hash_: str, request: Request) -> str:
-    html = _require_cached_entry(hash_)
-    return f"{_base_url(request)}/{hash_}/{urllib.parse.quote(html.name)}"
+    return f"{_base_url(request)}{urllib.parse.quote(_require_cached_entry(hash_))}"
 
 
 def _file_url_for_path(path: str) -> str:
@@ -727,7 +782,7 @@ def library():
     visit-derived frecency metrics. Entries whose on-disk dir is gone are
     dropped.
     """
-    return catalog.list_entries()
+    return catalog.list_entries(prefer_reader=_prefer_reader())
 
 
 @app.get("/stats")

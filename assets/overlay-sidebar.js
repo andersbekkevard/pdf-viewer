@@ -230,7 +230,11 @@ export function createSidebar(core) {
         var pages = documentModel.pages();
         if (!host || !pages.length) return null;
         var hash = entryHash();
-        var thumbBase = hash ? '/' + hash + '/thumbs/' : null;
+        // Converted entries have pre-extracted JPEGs; the reader renders a
+        // small raster of the page on demand.
+        var reader = documentModel.isReader();
+        var thumbBase = !hash ? null : reader ? '/r/' + hash + '/p/' : '/' + hash + '/thumbs/';
+        var thumbSuffix = reader ? '/240.png' : '.jpg';
         var cards = [];
 
         pages.forEach(function (pf, idx) {
@@ -252,7 +256,7 @@ export function createSidebar(core) {
                 img.decoding = 'async';
                 img.alt = 'Page ' + pageNum;
                 img.addEventListener('load', function () { inner.classList.add('has-img'); });
-                img.src = thumbBase + pageNum + '.jpg';
+                img.src = thumbBase + pageNum + thumbSuffix;
                 inner.appendChild(img);
             }
             var card = el('button', {

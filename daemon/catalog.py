@@ -18,6 +18,7 @@ from typing import Optional, Protocol
 
 
 LIGHT_HTML_SUFFIX = ".light.html"
+ENTRY_MANIFEST = "entry.json"
 PASSTHROUGH_MARKER = "_pdfvw=passthrough"
 HASH_RE = re.compile(r"^[a-f0-9]{6,32}$")
 NAME_MAX_LEN = 200
@@ -126,6 +127,8 @@ class CacheCatalog:
         self.root = root
         self.activity = activity or NullActivity()
         self._content_hashes: dict[tuple[str, int, int], str] = {}
+        self._manifests: Optional[dict[str, dict]] = None
+        self._manifests_stamp: Optional[int] = None
 
     @property
     def mappings_path(self) -> pathlib.Path:
@@ -140,7 +143,7 @@ class CacheCatalog:
             raise InvalidCatalogInput("invalid hash")
         return hash_
 
-    def mappings(self) -> dict[str, Mapping]:
+    def _tsv_mappings(self) -> dict[str, Mapping]:
         out: dict[str, Mapping] = {}
         if not self.mappings_path.is_file():
             return out
@@ -153,6 +156,71 @@ class CacheCatalog:
                 path = pathlib.Path(html_path) if html_path else self.root / hash_ / f"{hash_}.html"
                 out[hash_] = Mapping(hash_, source_ref, path.stem, path)
         return out
+
+    def mappings(self) -> dict[str, Mapping]:
+        """Every known entry: mappings.tsv rows (written by the conversion
+        scripts) plus the entries registered on demand, which carry their
+        identity in `<hash>/entry.json` instead of a row."""
+        out = self._tsv_mappings()
+        for hash_, manifest in self.manifests().items():
+            if hash_ in out:
+                continue
+            name = manifest.get("name") or hash_
+            out[hash_] = Mapping(hash_, manifest.get("source_ref", ""), name,
+                                 self.root / hash_ / f"{name}.html")
+        return out
+
+    # ------------------------------------------------------------ manifests
+    def manifests(self) -> dict[str, dict]:
+        """`<hash>/entry.json` of every entry that has one. Entry directories
+        coming and going change the root's mtime, which refreshes the scan;
+        this process's own writes update the cached copy directly."""
+        try:
+            stamp = self.root.stat().st_mtime_ns
+        except OSError:
+            return {}
+        if self._manifests is None or stamp != self._manifests_stamp:
+            found: dict[str, dict] = {}
+            for path in self.root.glob(f"*/{ENTRY_MANIFEST}"):
+                if not HASH_RE.fullmatch(path.parent.name):
+                    continue
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if isinstance(data, dict):
+                    found[path.parent.name] = data
+            self._manifests, self._manifests_stamp = found, stamp
+        return self._manifests
+
+    def _write_manifest(self, hash_: str, manifest: dict) -> None:
+        entry_dir = self.root / hash_
+        entry_dir.mkdir(parents=True, exist_ok=True)
+        path = entry_dir / ENTRY_MANIFEST
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(path)
+        self.manifests()[hash_] = manifest
+        try:
+            self._manifests_stamp = self.root.stat().st_mtime_ns
+        except OSError:
+            pass
+
+    def register(self, hash_: str, source_ref: str, name: str) -> dict:
+        """Record an entry opened on demand. Keeps an existing name (the
+        reader may have renamed it) and refreshes the source reference, so
+        a moved file or a re-signed URL stays reachable."""
+        self.validate_hash(hash_)
+        current = self.manifests().get(hash_)
+        manifest = dict(current) if current else {"name": self._sanitize_name(name) or hash_}
+        source_ref = strip_passthrough(source_ref)
+        if source_ref.startswith("/"):
+            # Stored resolved, as lookups compare resolved paths.
+            source_ref = str(pathlib.Path(source_ref).expanduser().resolve())
+        manifest["source_ref"] = source_ref
+        if manifest != current:
+            self._write_manifest(hash_, manifest)
+        return manifest
 
     def _content_hash(self, path: pathlib.Path) -> str:
         stat = path.stat()
@@ -266,14 +334,33 @@ class CacheCatalog:
         representation = self.locate_representation(hash_)
         if representation is not None:
             return representation.canonical.stem
+        manifest = self.manifests().get(hash_)
+        if manifest and manifest.get("name"):
+            return str(manifest["name"])
         mapping = self.mappings().get(hash_)
         if mapping is not None:
             return mapping.name
         source = self.source_pdf(hash_)
         return source.stem if source else hash_
 
+    def viewer_href(self, hash_: str, *, prefer_reader: bool = False,
+                    prefer_light: bool = True) -> Optional[str]:
+        """Where an entry is read, as an unquoted daemon path: the reader when
+        preferred or when it is all the entry has, else its converted HTML.
+        None for no entry."""
+        if not HASH_RE.fullmatch(hash_ or ""):
+            return None
+        representation = self.locate_representation(hash_, prefer_light=prefer_light)
+        has_source = self.source_pdf(hash_) is not None
+        if has_source and (prefer_reader or representation is None):
+            return f"/r/{hash_}/"
+        if representation is not None:
+            return f"/{hash_}/{representation.selected.name}"
+        return None
+
     def native_source(self, hash_: str) -> NativeSource:
-        self.require_representation(hash_)
+        if self.viewer_href(hash_) is None:
+            raise EntryNotFound(f"no cached PDF viewer entry for hash {hash_}")
         source_ref = self.source_ref(hash_)
         if source_ref and source_ref.startswith("/"):
             path = pathlib.Path(source_ref).expanduser()
@@ -313,7 +400,7 @@ class CacheCatalog:
     def extension_entries(self) -> list[dict]:
         out = []
         for hash_, mapping in self.mappings().items():
-            if self.locate_representation(hash_) is None:
+            if self.viewer_href(hash_) is None:
                 continue
             source_ref = mapping.source_ref
             if source_ref.startswith(("http://", "https://")):
@@ -338,21 +425,24 @@ class CacheCatalog:
         text = urllib.parse.unquote(" ".join(parts))
         return re.sub(r"\s+", " ", text.casefold()).strip()
 
-    def list_entries(self) -> list[dict]:
+    def list_entries(self, *, prefer_reader: bool = False) -> list[dict]:
         scores = self.activity.all_frecency()
         out = []
         for hash_, mapping in self.mappings().items():
-            representation = self.locate_representation(hash_, prefer_light=True)
-            if representation is None:
+            href = self.viewer_href(hash_, prefer_reader=prefer_reader)
+            if href is None:
                 continue
+            representation = self.locate_representation(hash_, prefer_light=True)
             score = scores.get(hash_, {"raw_count": 0, "rank": 0, "last_seen": None,
                                        "age_multiplier": 0.0, "frecency_score": 0.0})
-            canonical = representation.canonical
-            out.append({"hash": hash_, "name": canonical.stem, "source_ref": mapping.source_ref,
-                        "search_text": self._search_text(canonical.stem, mapping.source_ref),
-                        "href": f"/{hash_}/{representation.selected.name}",
-                        "canonical_href": f"/{hash_}/{canonical.name}",
-                        "light_href": f"/{hash_}/{representation.light.name}" if representation.light else None,
+            canonical = representation.canonical if representation else None
+            name = self.entry_name(hash_)
+            out.append({"hash": hash_, "name": name, "source_ref": mapping.source_ref,
+                        "search_text": self._search_text(name, mapping.source_ref),
+                        "href": href,
+                        "reader_href": f"/r/{hash_}/" if self.source_pdf(hash_) is not None else None,
+                        "canonical_href": f"/{hash_}/{canonical.name}" if canonical else None,
+                        "light_href": f"/{hash_}/{representation.light.name}" if representation and representation.light else None,
                         "count": score["raw_count"], "rank": score["rank"],
                         "last_seen": score["last_seen"], "age_multiplier": score["age_multiplier"],
                         "frecency_score": score["frecency_score"]})
@@ -371,10 +461,24 @@ class CacheCatalog:
         return re.sub(r"[\x00-\x1f/\\]+", "-", value).lstrip(".").strip()[:NAME_MAX_LEN]
 
     def rename(self, hash_: str, raw_name: str) -> dict:
-        representation = self.require_representation(hash_, prefer_light=False)
+        self.validate_hash(hash_)
         name = self._sanitize_name(raw_name)
         if not name:
             raise InvalidCatalogInput("name is empty after sanitization")
+        manifest = self.manifests().get(hash_)
+        if self.locate_representation(hash_) is None:
+            # An entry with no converted HTML keeps its name in entry.json.
+            if manifest is None or self.source_pdf(hash_) is None:
+                raise EntryNotFound(f"no cached PDF viewer entry for hash {hash_}")
+            old_name = str(manifest.get("name") or hash_)
+            if old_name != name:
+                self._write_manifest(hash_, {**manifest, "name": name})
+            result = {"hash": hash_, "old_name": old_name, "new_name": name, "renamed": old_name != name,
+                      "href": f"/r/{hash_}/", "canonical_href": None, "light_href": None}
+            if old_name != name:
+                result.update(light_renamed=False, frecency_boosted=self.activity.boost(hash_, n=3))
+            return result
+        representation = self.require_representation(hash_, prefer_light=False)
         old = representation.canonical
         if old.stem == name:
             return self._rename_result(hash_, old.stem, name, False, representation, 0)
@@ -443,6 +547,9 @@ class CacheCatalog:
                         kept.append(line if line.endswith("\n") else line + "\n")
             if dropped:
                 self._atomic_lines(self.mappings_path, kept)
+        manifest = self.manifests().pop(hash_, None)
+        if manifest is not None and source_ref is None:
+            source_ref = manifest.get("source_ref") or None
         entry_dir = self.root / hash_
         removed = False
         if entry_dir.is_dir():
@@ -475,18 +582,18 @@ class CacheCatalog:
         except ValueError:
             daemon = False
         if daemon:
-            match = re.match(r"^/([a-f0-9]{6,32})(?:/|$)", parsed.path)
+            match = re.match(r"^(?:/r)?/([a-f0-9]{6,32})(?:/|$)", parsed.path)
             if match:
                 return match.group(1)
             query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
             if parsed.path == "/native" and query.get("hash") and HASH_RE.fullmatch(query["hash"][0]):
                 return query["hash"][0]
-            if parsed.path in {"/view", "/view-light", "/view-canonical", "/native"}:
+            if parsed.path in {"/view", "/view-light", "/view-canonical", "/native", "/read"}:
                 if query.get("path"):
                     return self._hash_for_local_path(pathlib.Path(query["path"][0]))
                 if query.get("url"):
                     return url_hash(strip_passthrough(query["url"][0]))
-            if parsed.path in {"/view-raw", "/view-light-raw", "/view-canonical-raw"} and parsed.query:
+            if parsed.path in {"/view-raw", "/view-light-raw", "/view-canonical-raw", "/read-raw"} and parsed.query:
                 return url_hash(strip_passthrough(parsed.query))
         if parsed.scheme == "file":
             return self._hash_for_local_path(pathlib.Path(urllib.parse.unquote(parsed.path)))
