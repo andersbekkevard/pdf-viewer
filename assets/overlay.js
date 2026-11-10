@@ -164,20 +164,23 @@ preparePdf2htmlEx({ document: document, window: window });
     }
 
     // ------------------------------------------------------------------------
-    // Arrow keys on the document, as in any PDF viewer: ←/→ turn pages (the
-    // same motion as q/e, so an active selection extends pagewise), ↑/↓
-    // scroll. The scroller rarely has focus, so the browser's own arrow
-    // scrolling cannot be relied on. Left alone: arrows with a modifier
-    // (Shift extends a selection, ⌘ jumps to the ends), text fields, any open
-    // overlay, and the sidebar, which uses ←/→ for its tabs and ↑/↓ for its
-    // selector.
+    // The keys any PDF viewer answers to: ←/→ turn pages (the same motion as
+    // q/e, so an active selection extends pagewise), ↑/↓ scroll, Space and
+    // Shift-Space or PageDown/PageUp move a screen, Home/End go to the ends.
+    // The scroller rarely has focus, so the browser's own key scrolling
+    // cannot be relied on. Left alone: arrows with a modifier (Shift extends
+    // a selection, ⌘ jumps to the ends), text fields, any open overlay, and
+    // the sidebar, which uses ←/→ for its tabs and ↑/↓ for its selector.
     // ------------------------------------------------------------------------
     var ARROW_SCROLL_STEP = 60;
     function registerArrowKeys(navigation, text, documentModel, sidebar, focus, finger) {
         document.addEventListener('keydown', function (e) {
             var k = e.key;
-            if (k !== 'ArrowLeft' && k !== 'ArrowRight' && k !== 'ArrowUp' && k !== 'ArrowDown') return;
-            if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+            var paging = k === ' ' || k === 'PageDown' || k === 'PageUp' || k === 'Home' || k === 'End';
+            if (!paging && k !== 'ArrowLeft' && k !== 'ArrowRight' && k !== 'ArrowUp' && k !== 'ArrowDown') return;
+            if (e.metaKey || e.ctrlKey || e.altKey || (e.shiftKey && k !== ' ')) return;
+            // A focused button or link takes Space itself.
+            if (k === ' ' && e.target && e.target.closest && e.target.closest('button, a[href], [role="button"]')) return;
             if (isInputTarget(e.target) || finger.isActive()) return;
             if (document.querySelector('#pdf2html-palette, #pdf2html-finder, #pdf2html-settings, '
                 + '#pdf2html-cheatsheet, #pdf2html-search')) return;
@@ -186,7 +189,12 @@ preparePdf2htmlEx({ document: document, window: window });
             var root = documentModel.container();
             if (!root) return;
             e.preventDefault(); e.stopPropagation();
-            if (horizontal) {
+            if (paging) {
+                var screen = Math.max(ARROW_SCROLL_STEP, root.clientHeight * 0.9);
+                if (k === 'Home') root.scrollTo({ top: 0, behavior: 'instant' });
+                else if (k === 'End') root.scrollTo({ top: root.scrollHeight, behavior: 'instant' });
+                else root.scrollBy({ top: (k === 'PageUp' || (k === ' ' && e.shiftKey)) ? -screen : screen, behavior: 'smooth' });
+            } else if (horizontal) {
                 var delta = k === 'ArrowRight' ? 1 : -1;
                 if (!text.extendSelectionByPage(delta)) navigation.stepPage(delta);
             } else {
