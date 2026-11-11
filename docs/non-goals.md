@@ -21,5 +21,10 @@ Explicitly out of scope. Revisit carefully before adding any of these.
   arm64 pdf2htmlEX binary (ADR 0011); scripts fail fast with "native
   pdf2htmlEX not installed" rather than building or fetching it. (Docker
   is no longer involved in conversion at all.)
+- **Cloud OCR, OCR of born-digital pages, and writing recognized text back
+  into the PDF.** Scanned pages are recognized on this Mac only (Apple
+  Vision, `daemon/ocr.py`); pages that already have text, including a
+  producer's invisible OCR layer, are never re-recognized, and the source
+  PDF is never modified. Text drawn as vector outlines is not recognized.
 - **Integrating `marker` into the daemon.** Kept as a standalone
   parallel tool until a compelling in-viewer use case appears.

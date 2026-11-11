@@ -23,10 +23,11 @@ import os
 import pathlib
 import threading
 
+import ocr
 import pdfium_doc
 
 # Bump when the shell markup changes, so cached shells are rebuilt.
-SHELL_VERSION = 4
+SHELL_VERSION = 5
 REPRESENTATION = "raster-v1"
 MIN_RASTER_WIDTH = 64
 MAX_RASTER_WIDTH = 6000
@@ -73,6 +74,8 @@ def _line_html(line: dict) -> str:
     segments = line["segs"]
     # Fallback family and style (pdfium_doc.font_style): fs, fm, fb, fi.
     classes = "t" + "".join(f" f{letter}" for letter in line.get("f", ""))
+    if line.get("ocr"):
+        classes += " ocr"  # recognized from the page image (ocr.py)
     attrs = ""
     if line.get("rtl"):
         attrs = ' dir="rtl"'
@@ -136,7 +139,10 @@ def raster_width(page_width: float, requested: int, page_height: float) -> int:
 
 def build_shell(hash_: str, title: str, sizes: list[tuple[float, float]],
                 outline: list[dict], texts: list[list[dict]],
-                links: list[list[dict]] | None = None) -> str:
+                links: list[list[dict]] | None = None, ocr_pages: set[int] | frozenset = frozenset()) -> str:
+    """The shell document. `ocr_pages` holds 1-based pages without a usable
+    text layer; their frames carry data-reader-ocr="pending" and the overlay
+    fetches their recognized text (overlay-ocr.js)."""
     parts = [
         "<!DOCTYPE html>\n"
         f'<html data-pdf2html-representation="{REPRESENTATION}" data-pdf2html-text-mode="transparent">'
@@ -157,8 +163,9 @@ def build_shell(hash_: str, title: str, sizes: list[tuple[float, float]],
         page_links = links[index] if links and index < len(links) else []
         base = f"/r/{hash_}/p/{number}/"
         first = raster_width(width, round(width * SHELL_RASTER_SCALE), height)
+        marker = ' data-reader-ocr="pending"' if number in ocr_pages else ""
         parts.append(
-            f'<div id="pf{number:x}" class="pf" data-page-no="{number:x}" '
+            f'<div id="pf{number:x}" class="pf" data-page-no="{number:x}"{marker} '
             f'style="width:{_num(width)}px;height:{_num(height)}px">'
             f'<div class="pc"><img class="bi" alt="" data-pdf2html-src="{base}{first}.png" '
             f'data-reader-raster="{base}">'
@@ -168,6 +175,15 @@ def build_shell(hash_: str, title: str, sizes: list[tuple[float, float]],
         )
     parts.append("</div></body></html>\n")
     return "".join(parts)
+
+
+def ocr_workers() -> int:
+    """Pages recognized at once. Vision spreads one page over several cores
+    and the Neural Engine, so two keep it busy without starving rendering."""
+    try:
+        return max(1, int(os.environ.get("PDF_VIEWER_OCR_WORKERS", "2")))
+    except ValueError:
+        return 2
 
 
 class Reader:
@@ -185,6 +201,11 @@ class Reader:
         self._building: dict[str, threading.Lock] = {}
         self._sizes: dict[tuple[str, int, int], list[tuple[float, float]]] = {}
         self._writes = 0
+        # Recognition of scanned pages (ocr.py): which document each queued
+        # key reads, and which documents have their background pass queued.
+        self._ocr_queue: ocr.OcrQueue | None = None
+        self._ocr_sources: dict[str, pathlib.Path] = {}
+        self._ocr_started: set[str] = set()
 
     # ------------------------------------------------------------- plumbing
     def pool(self) -> concurrent.futures.ProcessPoolExecutor:
@@ -227,14 +248,14 @@ class Reader:
         stat = pdf.stat()
         return json.dumps([SHELL_VERSION, pdfium_doc.TEXT_LAYER_VERSION, str(pdf), stat.st_mtime_ns, stat.st_size, title])
 
-    def shell(self, hash_: str, pdf: pathlib.Path, title: str) -> pathlib.Path:
+    def shell(self, hash_: str, pdf: pathlib.Path, title: str, *, force: bool = False) -> pathlib.Path:
         """The reader shell for an entry, built when missing or stale."""
         path = self.shell_path(hash_)
         stamp_path = path.with_suffix(".stamp")
         stamp = self._shell_stamp(pdf, title)
         with self._key_lock("shell:" + hash_):
             try:
-                if path.is_file() and stamp_path.read_text(encoding="utf-8") == stamp:
+                if not force and path.is_file() and stamp_path.read_text(encoding="utf-8") == stamp:
                     return path
             except OSError:
                 pass
@@ -253,14 +274,138 @@ class Reader:
             links: list[list[dict]] = []
             for future in link_futures:
                 links.extend(future.result())
-            document = build_shell(hash_, title, sizes, outline, texts, links)
+            ocr_pages = self._scanned_pages(pdf, sizes, texts)
+            document = build_shell(hash_, title, sizes, outline, texts, links, ocr_pages)
             self._ensure_meta(hash_, pdf)
+            index_path = self._ocr_index_path(hash_)
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            index_path.write_text(json.dumps({"stamp": stamp, "pages": sorted(ocr_pages)}), encoding="utf-8")
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(".tmp")
             tmp.write_text(document, encoding="utf-8")
             tmp.replace(path)
             stamp_path.write_text(stamp, encoding="utf-8")
             return path
+
+    def _scanned_pages(self, pdf: pathlib.Path, sizes: list[tuple[float, float]],
+                       texts: list[list[dict]]) -> set[int]:
+        """1-based pages that are scans without a text layer (ocr.needs_ocr).
+        Image coverage is looked up only for pages with too little text."""
+        candidates = [i for i, (w, h) in enumerate(sizes)
+                      if ocr.may_need_ocr(texts[i] if i < len(texts) else [], w, h)]
+        if not candidates:
+            return set()
+        pool = self.pool()
+        chunk = max(8, -(-len(candidates) // (self.workers * 2)))
+        groups = [candidates[k:k + chunk] for k in range(0, len(candidates), chunk)]
+        futures = [pool.submit(pdfium_doc.pages_image_coverage, str(pdf), group) for group in groups]
+        out = set()
+        for group, future in zip(groups, futures):
+            for index, coverage in zip(group, future.result()):
+                w, h = sizes[index]
+                if ocr.needs_ocr(texts[index] if index < len(texts) else [], w, h, coverage):
+                    out.add(index + 1)
+        return out
+
+    # ------------------------------------------------------------------- ocr
+    def _ocr_index_path(self, hash_: str) -> pathlib.Path:
+        return self.entry_dir(hash_) / "ocr" / "pages.json"
+
+    def ocr_store(self, hash_: str) -> ocr.OcrStore:
+        return ocr.OcrStore(self.entry_dir(hash_))
+
+    def ocr_pages(self, hash_: str, pdf: pathlib.Path, title: str) -> list[int]:
+        """1-based pages the shell marked for recognition. Recorded when the
+        shell is built; rebuilt with it when missing."""
+        stamp = self._shell_stamp(pdf, title)
+        for attempt in range(2):
+            try:
+                index = json.loads(self._ocr_index_path(hash_).read_text(encoding="utf-8"))
+                if index.get("stamp") == stamp:
+                    return [int(p) for p in index.get("pages", [])]
+            except (OSError, ValueError):
+                pass
+            if attempt == 0:
+                self.shell(hash_, pdf, title, force=True)
+        return []
+
+    def _ocr(self) -> ocr.OcrQueue:
+        with self._lock:
+            if self._ocr_queue is None:
+                self._ocr_queue = ocr.OcrQueue(self._ocr_page, workers=ocr_workers())
+            return self._ocr_queue
+
+    def _ocr_page(self, hash_: str, page: int, background: bool) -> None:
+        """Recognize one 1-based page and store it (an OcrQueue job)."""
+        store = self.ocr_store(hash_)
+        if store.has(page):
+            return
+        pdf = self._ocr_sources[hash_]
+        tool = ocr.tool_path()
+        if tool is None:
+            raise RuntimeError(ocr.unavailable_reason())
+        width, height = self.sizes(pdf)[page - 1]
+
+        def render(*args):
+            return self._run(pdfium_doc.render_for_ocr, *args)
+
+        result = ocr.recognize_page(str(pdf), page - 1, width, height, tool=tool, render=render,
+                                    background=background)
+        if not (self.root / hash_).is_dir():
+            raise FileNotFoundError(hash_)  # deleted meanwhile: do not bring it back
+        result["version"] = ocr.OCR_VERSION
+        store.put(page, result)
+
+    def ocr_status(self, hash_: str, pdf: pathlib.Path, title: str, pages: list[int],
+                   wait: float) -> dict:
+        """Recognized text for 1-based pages, as the OCR route answers it.
+
+        The first call for a document queues all its marked pages in the
+        background; pages asked for with `wait` > 0 go to the front and are
+        waited for up to `wait` seconds. Each page answers with a state:
+        "done" (with the lines' markup in "html"), "pending", "failed", "none" (not a scanned
+        page) or "unavailable"."""
+        marked = set(self.ocr_pages(hash_, pdf, title))
+        store = self.ocr_store(hash_)
+        reason = ocr.unavailable_reason() if marked else None
+        out: dict = {"version": ocr.OCR_VERSION, "available": reason is None, "total": len(marked)}
+        if reason is not None:
+            out["reason"] = reason
+        wanted = [p for p in pages if p in marked]
+        if reason is None and marked:
+            queue = self._ocr()
+            self._ocr_sources[hash_] = pdf
+            missing = [p for p in sorted(marked) if not store.has(p)]
+            if hash_ not in self._ocr_started:
+                self._ocr_started.add(hash_)
+                queue.submit(hash_, missing, ocr.BACKGROUND)
+            todo = [p for p in wanted if not store.has(p)]
+            if todo and wait > 0:
+                queue.submit(hash_, todo, ocr.VISIBLE)
+                queue.wait(hash_, todo, wait)
+        states: dict = {}
+        for page in pages:
+            if page not in marked:
+                states[str(page)] = {"state": "none"}
+                continue
+            result = store.get(page)
+            if result is not None:
+                lines = result.get("lines", [])
+                states[str(page)] = {"state": "done", "lines": len(lines),
+                                     "html": "".join(_line_html(line) for line in lines)}
+            elif reason is not None:
+                states[str(page)] = {"state": "unavailable"}
+            else:
+                state = self._ocr().state(hash_, page)
+                states[str(page)] = {"state": "failed" if state == "failed" else "pending"}
+        out["pages"] = states
+        out["done"] = sum(1 for p in marked if store.has(p)) if marked else 0
+        return out
+
+    def ocr_forget(self, hash_: str) -> None:
+        self._ocr_started.discard(hash_)
+        if self._ocr_queue is not None:
+            self._ocr_queue.forget(hash_)
 
     def _ensure_meta(self, hash_: str, pdf: pathlib.Path) -> None:
         """The sidebar header reads `<hash>/meta.json`. Converted entries get

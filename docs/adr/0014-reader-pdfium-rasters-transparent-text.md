@@ -106,8 +106,9 @@ scripts, and the manual step on a cache miss.
   match, as before.
 - **Text order is PDFium's.** It is usually reading order; it is not
   guaranteed for multi-column layouts.
-- **Scanned PDFs have no text.** The page still shows; a text source such as
-  OCR could feed the same text-layer format later.
+- **Scanned PDFs have no PDFium text.** On-device OCR (Apple Vision) now
+  feeds the same text-layer format after the shell is served
+  (`docs/reader.md`, "Scanned pages").
 - **The daemon needs `pypdfium2` and Pillow** (wheels, no local build).
 - **Rasters cost CPU on first view** and disk afterwards
   (`PDF_VIEWER_RASTER_CACHE_MB`, default 1500).

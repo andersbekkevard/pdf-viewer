@@ -524,6 +524,85 @@ def pages_links(path: str, start: int, stop: int) -> list[list[dict]]:
 
 
 # ----------------------------------------------------------------------------
+# Images (for the scanned-page rule in ocr.py)
+# ----------------------------------------------------------------------------
+
+def _has_image(page: pdfium.PdfPage, form) -> bool:
+    for _ in page.get_objects(filter=(raw.FPDF_PAGEOBJ_IMAGE,), form=form, max_depth=4):
+        return True
+    return False
+
+
+def page_image_coverage(path: str, index: int) -> float:
+    """Share of the page area covered by images, 0–1.
+
+    Top-level image objects count by their bounds; a form XObject that
+    contains an image counts by the form's bounds (a scan is often wrapped in
+    one). Overlaps are summed, so the result is capped at 1."""
+    pdf = open_document(path)
+    page = pdf[index]
+    try:
+        width, height = page.get_size()
+        if width <= 0 or height <= 0:
+            return 0.0
+        affine = _device_affine(page, width, height)
+        covered = 0.0
+        for obj in page.get_objects(filter=(raw.FPDF_PAGEOBJ_IMAGE, raw.FPDF_PAGEOBJ_FORM), max_depth=0):
+            if obj.type == raw.FPDF_PAGEOBJ_FORM and not _has_image(page, obj):
+                continue
+            try:
+                left, bottom, right, top = obj.get_bounds()
+            except Exception:
+                continue
+            x, y, w, h = _box(affine, left, bottom, right, top)
+            x0, y0 = max(0.0, x), max(0.0, y)
+            x1, y1 = min(width, x + w), min(height, y + h)
+            if x1 > x0 and y1 > y0:
+                covered += (x1 - x0) * (y1 - y0)
+        return min(1.0, covered / (width * height))
+    finally:
+        page.close()
+
+
+def pages_image_coverage(path: str, indices: list[int]) -> list[float]:
+    """Image coverage of the given 0-based pages. A page that fails yields 0."""
+    out = []
+    for index in indices:
+        try:
+            out.append(page_image_coverage(path, index))
+        except Exception:
+            out.append(0.0)
+    return out
+
+
+# ----------------------------------------------------------------------------
+# Rasters
+# ----------------------------------------------------------------------------
+
+def render_for_ocr(path: str, index: int, scale: float, rotation: int, out_path: str) -> dict:
+    """Write one page as a grayscale PNG for text recognition.
+
+    `scale` is device px per page px; `rotation` (0, 90, 180, 270) turns the
+    image clockwise, for text that reads sideways on the page. Annotations are drawn, forms are not. Returns
+    the page size in page px and, for rotation 0, the page's own text lines
+    (ocr.py drops recognized lines that repeat them)."""
+    pdf = open_document(path)
+    page = pdf[index]
+    try:
+        page_width, page_height = page.get_size()
+        bitmap = page.render(scale=scale, rotation=rotation, grayscale=True,
+                             may_draw_forms=False)
+        try:
+            bitmap.to_pil().save(out_path, format="PNG", compress_level=1)
+        finally:
+            bitmap.close()
+    finally:
+        page.close()
+    return {"w": page_width, "h": page_height,
+            "lines": page_text(path, index) if rotation == 0 else None}
+
+
+# ----------------------------------------------------------------------------
 # Rasters
 # ----------------------------------------------------------------------------
 
