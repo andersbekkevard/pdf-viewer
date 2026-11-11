@@ -31,6 +31,7 @@ import { createFinger } from './overlay-finger.js';
 import { createLibrary } from './overlay-library.js';
 import { createSettings } from './overlay-settings.js';
 import { createFocusRouting } from './overlay-focus.js';
+import { createPins } from './overlay-pins.js';
 import { createSidebar } from './overlay-sidebar.js';
 import { createPageCounter } from './overlay-pageno.js';
 import { createCommandSurface } from './overlay-commands.js';
@@ -104,9 +105,11 @@ preparePdf2htmlEx({ document: document, window: window });
             fetch: fetch.bind(window), entryHash: entryHash, notify: toast.show });
         var settings = createSettings({ document: document, prefs: prefs, zoom: zoom });
         var focus = createFocusRouting(base);
+        var pins = createPins(withBase({ documentState: documentState, documentModel: documentModel,
+            navigation: navigation, notify: toast.show }));
         var commands = null;
         var sidebar = createSidebar(withBase({
-            fetch: fetch.bind(window), prefs: prefs, focus: focus, navigation: navigation,
+            fetch: fetch.bind(window), prefs: prefs, focus: focus, navigation: navigation, pins: pins, documentState: documentState,
             documentModel: documentModel, entryHash: entryHash, openSettings: settings.toggle,
             toggleCheatsheet: function () { commands.toggleCheatsheet(); },
         }));
@@ -114,6 +117,7 @@ preparePdf2htmlEx({ document: document, window: window });
             documentModel: documentModel, isInputTarget: isInputTarget });
         commands = createCommandSurface({ document: document, window: window, location: location,
             prefs: prefs, zoom: zoom, navigation: navigation, text: text, library: library,
+            pins: pins, showPins: function () { sidebar.showPins(); },
             finger: finger, settings: settings, isInputTarget: isInputTarget, notify: toast.show,
             jumpBack: function () { jump(navigation.back, 'Back', 'Nothing to go back to'); },
             jumpForward: function () { jump(navigation.forward, 'Forward', 'Nothing to go forward to'); } });
@@ -140,6 +144,7 @@ preparePdf2htmlEx({ document: document, window: window });
             entryHash: entryHash })).mount();
         scrollOff.mount();
         search.mount();
+        pins.mount();
         sidebar.mount();
         pageCounter.mount();
         navigation.init();

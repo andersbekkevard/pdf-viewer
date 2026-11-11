@@ -487,7 +487,7 @@ async function main() {
     await page.waitForTimeout(500);
     const hasOutline = (await probe(() => window.__probe.outlineLinks().length)) > 2;
     // Outline tab: Ctrl-j twice, Enter.
-    await page.keyboard.press('h');
+    await page.locator('[data-tab=outline]').click();
     await page.keyboard.press('Control+j');
     await page.keyboard.press('Control+j');
     const selected = await probe(() => {
@@ -512,7 +512,7 @@ async function main() {
     }
 
     // Thumbnails tab: from the current page, Ctrl-j twice, Enter.
-    await page.keyboard.press('l');
+    await page.keyboard.press('Control+ArrowRight');
     await page.waitForTimeout(200);
     const start = await probe(() => window.__probe.mostVisible());
     await page.keyboard.press('Control+j');
@@ -544,12 +544,12 @@ async function main() {
   // ===================================================================== commands
   if (run('commands')) {
     await load({ reset: true });
-    await palette('pin');
+    await palette('cursorpin');
     const pin = await probe(() => ({
       stored: localStorage.getItem('pdf2html-pinned'),
       css: document.getElementById('page-container').style.getPropertyValue('--pdf2html-scrolloff'),
     }));
-    record(':pin toggles pin-to-center off', pin.stored === '0' && pin.css.trim() === '25%', JSON.stringify(pin));
+    record(':cursorpin toggles pin-to-center off', pin.stored === '0' && pin.css.trim() === '25%', JSON.stringify(pin));
     await palette('so 10');
     const so = await probe(() => ({
       stored: localStorage.getItem('pdf2html-scrolloff'),
@@ -639,6 +639,86 @@ async function main() {
     });
     record('n moves to another hit', count.entered && count.text.toLowerCase() === word.toLowerCase(), JSON.stringify(count));
     await page.keyboard.press('Escape');
+  }
+
+  if (run('pins')) {
+    await load({reset:true});
+    await page.keyboard.press('Control+Shift+P');
+    record('pin chord drops a numbered pin and toast', await page.locator('.pdf2html-pin-marker').count() === 1 && /Pin 1/.test(await page.locator('#pdf2html-toast').innerText()));
+    const quote = await probe(() => {const t=document.querySelector('#pf1 .t'),r=document.createRange();r.selectNodeContents(t);getSelection().removeAllRanges();getSelection().addRange(r);return t.textContent.trim();});
+    await page.keyboard.press('Control+Shift+P');
+    await palette('pins');
+    record('selection supplies a single-line pin title', (await page.locator('.pdf2html-pin-copy strong').nth(1).innerText()).includes(quote));
+    await page.keyboard.press('Control+j'); await page.keyboard.press('Enter');
+    record('Pins keyboard selector commits the second row', await page.locator('.pdf2html-pin-row').count()===2);
+    await palette('unpin 2'); await page.keyboard.press('Escape');
+    const before = await probe(() => window.__probe.anchor());
+    await palette('page 8');
+    await page.keyboard.press('Control+Shift+O'); await settle();
+    const after = await probe(() => window.__probe.anchor());
+    record('latest-pin chord restores exact anchor', before.id===after.id && near(before.frac,after.frac,.005));
+    await page.keyboard.press('Meta+z'); await settle();
+    record('pin jump records a single undo', await probe(() => window.__probe.mostVisible())===8);
+    await palette('pins');
+    record('Pins third tab shows thumbnail and remove control', await page.locator('.pdf2html-pin-jump img').count()===1 && await page.locator('.pdf2html-pin-remove').count()===1);
+    if (process.env.PDFV_SCREENSHOTS) { await page.locator('.pdf2html-pin-jump').click(); await settle(); await page.waitForTimeout(500); await page.screenshot({path:process.env.PDFV_SCREENSHOTS+'/pins.png'}); }
+    await page.locator('.pdf2html-pin-remove').click();
+    record('remove leaves an explanatory empty state', /:pin/.test(await page.locator('#pdf2html-pins').innerText()));
+    if (process.env.PDFV_SCREENSHOTS) await page.screenshot({path:process.env.PDFV_SCREENSHOTS+'/pins-empty.png'});
+    await page.keyboard.press('Escape');
+    await palette('page 1'); await page.keyboard.press('Control+Shift+P');
+    await page.waitForTimeout(1100);
+    await probe(() => localStorage.clear());
+    await page.reload(); await page.waitForSelector('.pdf2html-pin-marker');
+    record('daemon restores pin after clearing localStorage', await page.locator('.pdf2html-pin-marker').count()===1);
+    if (process.env.PDFV_SCREENSHOTS) await page.screenshot({path:process.env.PDFV_SCREENSHOTS+'/pin-marker.png'});
+  }
+  if (run('hierarchy') && reader) {
+    // Generated shell only: replace its outline before the model reads it.
+    await page.route(URL, async route => {
+      const r = await route.fetch(); let html = await r.text();
+      const children = Array.from({length:1998}, (_,i)=>'<li><a href="#pf8">Detail '+i+'</a></li>').join('');
+      html = html.replace(/<div id="outline">[\s\S]*?<\/div>/, '<div id="outline"><ul><li><a href="#pf1">Chapter</a><ul><li><a href="#pf4">Section</a><ul>'+children+'</ul></li></ul></li></ul></div>');
+      await route.fulfill({response:r,body:html});
+    });
+    async function keyboardCost() {
+      return probe(() => {
+        const times=[];
+        for(let i=0;i<10;i++) {
+          const t=performance.now();
+          document.getElementById('pdf2html-sidebar-body').dispatchEvent(new KeyboardEvent('keydown',{key:'j',ctrlKey:true,bubbles:true}));
+          void document.getElementById('outline').offsetHeight;
+          times.push(performance.now()-t);
+        }
+        return times.sort((a,b)=>a-b)[5];
+      });
+    }
+    if (process.env.PDFV_BASELINE_SIDEBAR) {
+      await page.route('**/overlay-sidebar.js*', route=>route.fulfill({contentType:'text/javascript',body:require('fs').readFileSync(process.env.PDFV_BASELINE_SIDEBAR,'utf8')}));
+      await load({reset:true}); await page.keyboard.press('Meta+b'); await page.waitForTimeout(300);
+      record('2000-entry baseline keyboard median',true,(await keyboardCost()).toFixed(2)+' ms');
+      await page.unroute('**/overlay-sidebar.js*');
+    }
+    const start = Date.now(); await load({reset:true});
+    await page.keyboard.press('Meta+b'); await page.waitForTimeout(300);
+    record('2000-entry tree starts below level two collapsed', await page.locator('#outline a').count()===2000 && await page.locator('#outline ul[hidden]').count()===1, 'load through mounted sidebar '+(Date.now()-start)+' ms (includes network/raster)');
+    if (process.env.PDFV_SCREENSHOTS) await page.screenshot({path:process.env.PDFV_SCREENSHOTS+'/outline-collapsed.png'});
+    await page.keyboard.press('h');
+    record('h collapses selected outline branch', await page.locator('#outline > ul > li > ul[hidden]').count()===1);
+    await page.keyboard.press('l');
+    record('l expands selected outline branch', await page.locator('#outline > ul > li > ul[hidden]').count()===0);
+    record('2000-entry tree keyboard median',true,(await keyboardCost()).toFixed(2)+' ms');
+    const timing = await probe(() => { const b=document.querySelectorAll('.pdf2html-disclosure')[1], t=performance.now(); b.click(); return performance.now()-t; });
+    record('2000-entry disclosure stays below 100 ms', timing<100, timing.toFixed(2)+' ms');
+    if (process.env.PDFV_SCREENSHOTS) await page.screenshot({path:process.env.PDFV_SCREENSHOTS+'/outline-expanded.png'});
+    await page.locator('.pdf2html-disclosure').nth(1).click();
+    await page.waitForTimeout(1100); await page.reload(); await page.waitForSelector('.pdf2html-disclosure', {state:'attached'}); await page.evaluate(installProbe);
+    record('collapsed state persists', await page.locator('#outline ul[hidden]').count()===1);
+    await palette('page 8');
+    record('current branch opens automatically', await page.locator('#outline ul[hidden]').count()===0);
+    await palette('counter');
+    record('counter prefers top-level chapter with deep hover', await page.locator('#pdf2html-pageno').innerText().then(t=>t.includes('Chapter')&&!t.includes('Detail')) && await page.locator('#pdf2html-pageno').getAttribute('title').then(t=>t.includes('Detail')));
+    await page.unroute(URL);
   }
 
   record('no failed asset requests', failedAssets.length===0, failedAssets.join(' | '));

@@ -16,8 +16,8 @@ For the rationale on the overall keyboard strategy, see
 | `Ctrl-j` / `Ctrl-k` · `↓` / `↑` | When the sidebar Outline or Pages tab is open, move the temporary selector; `Enter` jumps to it |
 | `Ctrl-f`               | Finger visible URL / DOI / ISBN / long-ID tokens              |
 | `/` · `s`              | Find in visible pages (Enter jump, `n` / `N` cycle)           |
-| `←` / `→` · `h` / `l`  | Switch sidebar tab (Outline / Pages) — only when sidebar open |
-| `→` / `←`              | Next / prev page, like `e` / `q` (when the sidebar is closed; with it open they switch its tab) |
+| `←` / `→` · `h` / `l`  | Outline: collapse / expand branch; Ctrl-arrows cycle tabs |
+| `→` / `←`              | Next / prev page, like `e` / `q` (when the sidebar is closed; with it open they navigate the outline tree) |
 | `↓` / `↑`              | Scroll the document by 60 px (the sidebar selector when the sidebar has focus) |
 | `Space` / `Shift-Space` · `PageDown` / `PageUp` | Scroll one screen down / up |
 | `Home` / `End`         | Top / bottom of the document |
@@ -68,7 +68,7 @@ Vimium's `f` hints reach them. No overlay key leads here; use the address bar.
 | `:rename <name>` / `:rn`     | Rename this PDF (changes the search name used by `:open` / ⌘K). Tab fills current |
 | `:path`                      | Copy this PDF's source path / URL (from `mappings.tsv`) to clipboard             |
 | `:disable` / `:native`       | Open this PDF in the native browser PDF viewer and disable custom-viewer redirects for this entry |
-| `:pin`                       | Toggle pin-to-center                                                             |
+| `:cursorpin`                 | Toggle cursor pin-to-center                                                             |
 | `:scrolloff 25` / `:so 25`   | Set scrolloff band to 25 % (0–50)                                                |
 | `:case`                      | Toggle case-sensitive `/` search                                                 |
 | `:zoom N` / `:zoom auto`     | Manual page zoom for this document, or back to fit-width                         |
@@ -155,3 +155,19 @@ position, and the viewer scrolls `#page-container`. Use `:mark` / `:jump`.
 `:livereload off` set it explicitly. This is a global overlay preference
 (default on), stored through `overlay-prefs.js`. It introduces no direct key
 binding and does not claim any Vimium key.
+
+## Persistent return pins and outline hierarchy
+
+`Ctrl-Shift-P` drops a return pin; `Ctrl-Shift-O` jumps to the newest remaining
+pin. Neither needs an extra Vimium pass key. `:pin` drops, `:pin N` jumps,
+`:unpin N` removes and `:pins` opens the Pins tab. See [pins.md](pins.md).
+The old cursor-centering toggle is `:cursorpin` (also in Settings).
+
+In Outline, `h`/`l` or `←`/`→` collapse/expand the selected branch. Left on a
+closed branch selects its parent; right on an open branch selects its first
+child. `Ctrl-←`/`Ctrl-→` cycle Outline, Pages and Pins; their tab buttons are
+also clickable/hintable. All three panels use Ctrl-J/Ctrl-K or ↑/↓ and Enter.
+Below the second level starts collapsed, the current entry's ancestors open
+automatically, and disclosure choices are remembered per document in state.db.
+The counter shows the top-level chapter; hover reveals the deeper section.
+Clicking the counter opens Pages.

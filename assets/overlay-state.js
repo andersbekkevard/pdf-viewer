@@ -49,6 +49,8 @@ export function createDocumentState(core) {
         return ts;
     }
     var codecs = {
+        pins: jsonCodec('pins'),
+        outline: jsonCodec('outline'),
         position: {
             load: function () {
                 var v = readJSON('pdf2html-position:' + hash);
@@ -77,6 +79,12 @@ export function createDocumentState(core) {
             },
         },
     };
+    function jsonCodec(key) {
+        return {
+            load: function () { return readJSON('pdf2html-' + key + ':' + hash); },
+            save: function (row) { storage.setItem('pdf2html-' + key + ':' + hash, JSON.stringify(row)); },
+        };
+    }
     function save(key, row) { try { codecs[key].save(row); } catch (_) {} }
     if (hash) {
         Object.keys(codecs).forEach(function (key) {

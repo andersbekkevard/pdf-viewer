@@ -38,7 +38,7 @@ export function createPreferences(storage) {
         darkPages: flag('pdf2html-dark-pages', false),
         sidebarTab: {
             key: 'pdf2html-sidebar-tab',
-            parse: function (raw) { return raw === 'thumbs' ? 'thumbs' : 'outline'; },
+            parse: function (raw) { return raw === 'thumbs' || raw === 'pins' ? raw : 'outline'; },
             format: String,
         },
     };

@@ -7,7 +7,7 @@ start_overlay_scratch() {
     local port
     port=$(python3 - "${PDFV_PORT:-0}" <<'PY'
 import socket,sys
-s=socket.socket(); s.bind(('127.0.0.1',int(sys.argv[1]))); print(s.getsockname()[1]); s.close()
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(('127.0.0.1',int(sys.argv[1]))); print(s.getsockname()[1]); s.close()
 PY
     )
     export PDFV_BASE="http://127.0.0.1:$port"
