@@ -1,46 +1,39 @@
 # Pins
 
-Pins are the proposed first-class replacement for ad hoc PDF marks. A pin is a
-fast, persistent return point in the current document: drop it, continue
-reading, and jump back with very little friction.
+A pin is a persistent return point in one document: page, normalized viewport
+anchor (including horizontal position), title, section and creation time. Pins
+live through `overlay-state.js` in the daemon's `state.db`. Rewritten local
+files inherit pins with page numbers clamped to the new page count.
 
-## User intent
+`:pin` or **Ctrl-Shift-P** drops a pin. Selected text supplies the title, folded
+to one line and capped at 160 characters. Otherwise the current section and the
+first twelve words of the first visible text line supply it. A toast confirms
+its number and title. Nine pins fit in a document; when full, remove one first.
+Numbers use the lowest free slot 1–9. Existing pins never renumber; the overview
+stays in creation order. There are no named sets or letter pins.
 
-- Dropping a pin should take as few keystrokes as possible.
-- Jumping back to the most recent or active pin should be one quick command.
-- The same visible pin should keep the same key until the user changes it.
-- There should be a nimble overview of all pins in the document.
-- The overview should make position recognizable: page number, chapter if
-  available, quote/title, and possibly a page thumbnail from the sidebar.
-- If no chapter context exists, a selected quote can become the pin title.
-- Recency matters: a simple "mark here, go work, jump back" flow is more
-  important than a heavyweight bookmark manager.
+`:pin 3` jumps to pin 3; **Ctrl-Shift-O** returns to the most recently created
+remaining pin. These chords avoid Vimium's unmodified letter commands and need
+no exclusion-rule change. Each jump records the old viewport once, so ⌘Z returns.
+`:unpin 3` removes a pin. Existing `:mark a` / `:jump a` remain independent.
 
-## Open product questions
+`:pins` opens the third sidebar tab. Rows show number, title, section, page and
+same-source page thumbnail, plus a remove button. Ctrl-J/Ctrl-K or ↑/↓ select;
+Enter jumps. Numbered buttons in the page's outside margin also jump and are
+Vimium-hintable. Pins never paint over the PDF text layer.
 
-- Should pins be keyed by letters, numerical order, recency, or explicit names?
-- Should one document support multiple pin sets or "tabs" of pins, or is that
-  too much state for the first version?
-- Should pins integrate with Vimium marks, replace them, or intentionally avoid
-  them because current Vimium marks are unreliable in this viewer?
-- Should the first implementation persist pins across sessions, or start with
-  in-tab state to prove the interaction model?
+The previous `:pin` cursor-centering preference is now `:cursorpin`; Settings
+still exposes it. Pins do not change that preference.
 
-## MVP constraints
+## Module contract
 
-- Do not add new global keybindings before checking `docs/keybindings.md`.
-- Prefer palette commands if a key conflict is likely.
-- Pin controls must be semantic buttons or otherwise Vimium-hintable.
-- The first implementation should be easy to throw away if the interaction
-  model feels wrong.
-- Do not couple pins to a future pdf2htmlEX or Vimium fork. Those are later
-  architectural tracks.
+`createPins` in `assets/overlay-pins.js` exposes `list()`, `drop()`, `jump(n)`,
+`remove(n)`, `onChange(fn)` (plus composition-only `mount()`). `list()` returns
+copies in creation order. Omit `n` to jump to the newest remaining pin. The
+composition root passes `pins` to the command surface for quick-open consumers.
 
-## Candidate first slice
+## Remaining questions
 
-1. A command drops a pin at the current page and viewport anchor.
-2. If text is selected, the selected text becomes the default title.
-3. A command jumps back to the most recent pin.
-4. A palette/menu lists pins with page number, chapter, and title.
-5. The list supports keyboard navigation and selection.
-
+Should pins support editing titles, exporting, or cross-document lists? These
+remain future decisions. Multi-browser simultaneous edits currently use the
+state store's last-writer-wins rule for the complete pins list.

@@ -278,3 +278,23 @@ one reader attempt plus a timing sample via `/stats`; test a failed open too.
 The owner-cache smoke script is unsuitable for isolated worktree checks because
 it writes the production cache. See `bench/history/README.md` for the isolated
 history replay and its coverage limits.
+
+### Pins, hierarchy and control audit
+
+The overlay harness includes `pins` and `hierarchy` groups. The latter injects a
+2,000-entry synthetic tree before initialization, checks collapse persistence,
+current-branch expansion and top-level counter context, and measures disclosure
+DOM update cost. `PDFV_SCREENSHOTS=/tmp/<existing-directory>` retains generated
+Pins, empty-state, marker and expanded/collapsed outline screenshots. To compare
+keyboard latency against the same generated tree before this change, extract the
+previous sidebar module to a temporary file and set `PDFV_BASELINE_SIDEBAR` to
+that path. The harness reports the median of ten Ctrl-J dispatches with a forced
+outline layout; record host load alongside results.
+
+The real-Vimium harness also sends Ctrl-Shift-P/O with the documented exclusion
+rule, hints and activates pin rows, removal, markers, tabs, thumbnails, disclosure,
+counter, cheatsheet close and Settings controls. Range controls enter Vimium's
+insert mode; blur them before requesting the next hint. OCR notices and current
+toasts carry passive status messages and have no actions to hint; they stay out
+of the hint list. PDF internal/external links retain the existing real-extension
+checks. These proofs use generated PDFs and a disposable browser profile.

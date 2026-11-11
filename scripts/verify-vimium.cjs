@@ -125,7 +125,7 @@ function copyExtension(dir, port) {
     recursive: true,
     filter: (src) => !src.includes(`${path.sep}_metadata`),
   });
-  for (const [file, count] of [['background.js', 2], ['rules.json', 1]]) {
+  for (const [file, count] of [['background.js', 2], ['rules.json', 2]]) {
     const target = path.join(dir, file);
     const text = fs.readFileSync(target, 'utf8');
     const replaced = (text.match(/(127\.0\.0\.1|localhost):7435/g) || []).length;
@@ -142,6 +142,7 @@ function portFree(port, host = '127.0.0.1') {
   });
 }
 async function pickPort() {
+  if (process.env.PDFV_PORT) { const port = Number(process.env.PDFV_PORT); if (await portFree(port)) return port; throw new Error('requested port occupied'); }
   for (let port = 7470; port <= 7479; port++) {
     if (await portFree(port) && await portFree(port, '::1')) return port;
   }
@@ -180,6 +181,11 @@ for n in range(1, 15):
     if n in CHAPTERS:
         number += 1
         c.addOutlineEntry("%d %s" % (number, CHAPTERS[n]), key, level=0)
+    if n == 12:
+        c.bookmarkPage("discussion-section", fit="XYZ", top=H - 60)
+        c.addOutlineEntry("Discussion section", "discussion-section", level=1)
+        c.bookmarkPage("discussion-detail", fit="XYZ", top=H - 60)
+        c.addOutlineEntry("Discussion detail", "discussion-detail", level=2)
     c.setFont("Helvetica-Bold", 18)
     c.drawString(72, H - 80, "Page %d heading" % n + (": " + CHAPTERS[n] if n in CHAPTERS else ""))
     c.setFont("Helvetica", 11)
@@ -925,6 +931,48 @@ async function runEngine(ctx, spec) {
       `${fmtChain} | reselect ${reselected.sel ? 'T' : '-'} → Esc ${last.sel ? 'T' : '-'} (S cheatsheet, B sidebar, T selection)`);
   }
 
+  // Return pins use trusted keys with Vimium active, no extra pass keys.
+  {
+    await clearSelection(); await blur();
+    if ((await state()).sidebar) await press('Meta+b');
+    await probe(() => window.__vp.scrollToPage(1,0.25)); await settle();
+    await press('Control+Shift+P'); await page.waitForTimeout(300);
+    check('pins drop chord reaches the page under Vimium', await page.locator('.pdf2html-pin-marker').count()===1);
+    await probe(() => window.__vp.scrollToPage(8,0.2)); await settle();
+    await press('Control+Shift+O'); await settle();
+    check('pins latest chord reaches page and restores position', (await state()).page===1);
+    async function activateHint(selector, name) {
+      await blur();
+      await probe(s=>{const e=document.querySelector(s);if(e){e.dataset.hintActivated='0';e.addEventListener('click',()=>e.dataset.hintActivated='1',{once:true});}},selector);
+      const m=await hintMode();
+      const hint=await probe(([s,m])=>{ const e=document.querySelector(s); return e && window.__vp.markerFor(e,m); },[selector,m]);
+      check(name+' receives f hint', !!hint);
+      if(hint) { await page.keyboard.type(hint.hint,{delay:30}); await page.waitForTimeout(200); }
+      else await exitHints();
+    }
+    await activateHint('.pdf2html-pin-marker','pin margin marker');
+    await palette('pins'); await blur();
+    await activateHint('[data-tab="pins"]','Pins tab');
+    await activateHint('.pdf2html-pin-jump','pin row');
+    await activateHint('.pdf2html-pin-remove','pin remove');
+    await activateHint('[data-tab="thumbs"]','Pages tab');
+    await activateHint('.pdf2html-thumb','thumbnail');
+    await activateHint('[data-tab="outline"]','Outline tab');
+    await activateHint('.pdf2html-disclosure','outline disclosure');
+    await activateHint('.pdf2html-sidebar-close','sidebar close');
+    await palette('counter'); await blur();
+    await activateHint('#pdf2html-pageno','page counter');
+    await activateHint('.pdf2html-sidebar-footer-btn.icon-only','Help footer');
+    await activateHint('#pdf2html-cheatsheet .close','cheatsheet close');
+    await activateHint('.pdf2html-sidebar-footer-btn:not(.icon-only)','Settings footer');
+    const controls = await probe(() => Array.from(document.querySelectorAll('#pdf2html-settings .pdf2html-switch, #pdf2html-settings input:not(:disabled)')).map((e,i)=>{ e.dataset.auditControl=i; return i; }));
+    for (const i of controls) await activateHint('[data-audit-control="'+i+'"]','settings control '+i);
+    await activateHint('#pdf2html-settings .close','settings close');
+    if ((await state()).sidebar) await press('Meta+b');
+    await activateHint('#pdf2html-toggle','sidebar toggle');
+    if ((await state()).sidebar) await press('Meta+b');
+  }
+
   // ------------------------------------------------------ 6. sidebar scope
   {
     await clearSelection();
@@ -933,20 +981,21 @@ async function runEngine(ctx, spec) {
     await blur();
     await press('Meta+b');
     await page.waitForTimeout(600);
+    await page.locator('[data-tab=outline]').click();
     const tab0 = await probe(() => document.body.getAttribute('data-sidebar-tab'));
     const left0 = (await state()).left;
-    await press('l'); // Pages tab: 14 thumbnails, so the body scrolls
+    await press('Control+ArrowRight'); // Pages tab: 14 thumbnails, so the body scrolls
     await page.waitForTimeout(700);
     const s0 = await state();
     const tab1 = await probe(() => document.body.getAttribute('data-sidebar-tab'));
-    await press('h');
+    await press('Control+ArrowLeft');
     await page.waitForTimeout(200);
     const tab2 = await probe(() => document.body.getAttribute('data-sidebar-tab'));
     const left2 = (await state()).left;
-    check('6 h / l switch sidebar tabs without a Vimium horizontal scroll',
+    check('6 Ctrl-arrows switch sidebar tabs without a Vimium horizontal scroll',
       tab1 === 'thumbs' && tab2 === 'outline' && left0 === s0.left && left2 === left0,
       `tab ${tab0} → l ${tab1} → h ${tab2}, scrollLeft ${left0}/${s0.left}/${left2}`);
-    await press('l');
+    await press('Control+ArrowRight');
     await page.waitForTimeout(500);
     if (!s0.sidebar || !(s0.sidebarScrollable > STEP)) {
       check('6 sidebar body is open and scrollable', false, JSON.stringify(s0));
