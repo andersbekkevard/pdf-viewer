@@ -208,7 +208,7 @@ pdf_viewer/
 │   └── visits.py
 ├── extension/                   # Comet MV3 redirect extension
 │   ├── manifest.json
-│   ├── rules.json               # static *.pdf redirect + passthrough allow
+│   ├── rules.json               # static redirects (*.pdf URLs, application/pdf responses) + passthrough allow
 │   └── background.js            # per-entry dynamic rules, daemon signals, toolbar toggle
 ├── launchd/                     # LaunchAgent plist
 ├── docs/

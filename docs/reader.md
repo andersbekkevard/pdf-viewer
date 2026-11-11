@@ -27,6 +27,11 @@ An entry opened on demand has no `mappings.tsv` row. Its name and source live in
 
 ## Sign-in-gated sources
 
+The extension sends a navigation to the daemon when its URL ends in `.pdf` or when the
+response is `application/pdf` (URLs such as arXiv's `/pdf/<id>` say nothing in the path);
+a PDF sent as an attachment download is left alone. With the reader engine the Raycast
+convert command does the same for the active tab instead of running pdf2htmlEX.
+
 The daemon's own download carries no cookies, so a host behind a sign-in
 answers it with a sign-in page. With extension 0.4.0 or later such a URL still
 goes from the link straight to the reader, with no browser PDF viewer in
