@@ -703,8 +703,20 @@ def render_for_ocr(path: str, index: int, scale: float, rotation: int, out_path:
 # Rasters
 # ----------------------------------------------------------------------------
 
-def render_png(path: str, index: int, width_px: int) -> bytes:
-    """One page, annotations and forms drawn as Chrome's viewer draws them."""
+# JPEG for page rasters: 4:4:4 (no chroma subsampling, so coloured text keeps
+# its edges) at quality 90. Against the lossless PNG of the same render, on
+# text, figure and slide pages, PSNR is 42-53 dB and under 0.1 % of pixels
+# differ by more than 16 levels, none by more than 45; encoding is 5x faster
+# (13 ms against 60-70 ms for a 2720 px page) and the file 20-30 % smaller.
+JPEG_QUALITY = 90
+RASTER_FORMATS = ("png", "jpg")
+
+
+def render_raster(path: str, index: int, width_px: int, fmt: str = "png") -> bytes:
+    """One page, annotations and forms drawn as Chrome's viewer draws them,
+    as PNG (lossless) or JPEG (`fmt="jpg"`, the overlay's page rasters)."""
+    if fmt not in RASTER_FORMATS:
+        raise ValueError(fmt)
     pdf = open_document(path)
     page = pdf[index]
     try:
@@ -718,9 +730,16 @@ def render_png(path: str, index: int, width_px: int) -> bytes:
         try:
             image = bitmap.to_pil()
             buffer = io.BytesIO()
-            image.save(buffer, format="PNG", compress_level=1)
+            if fmt == "jpg":
+                image.convert("RGB").save(buffer, format="JPEG", quality=JPEG_QUALITY, subsampling=0)
+            else:
+                image.save(buffer, format="PNG", compress_level=1)
             return buffer.getvalue()
         finally:
             bitmap.close()
     finally:
         page.close()
+
+
+def render_png(path: str, index: int, width_px: int) -> bytes:
+    return render_raster(path, index, width_px, "png")

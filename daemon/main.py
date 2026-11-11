@@ -833,18 +833,55 @@ def reader_ocr(hash_: str, pages: str = "", wait: float = 0.0):
         raise HTTPException(502, f"could not read PDF: {error}") from error
 
 
-@app.get("/r/{hash_}/p/{page}/{width}.png")
-def reader_raster(hash_: str, page: int, width: int):
-    pdf = _reader_source(hash_)
+async def _reader_raster(request: Request, hash_: str, page: int, width: int, fmt: str):
+    """A page raster, rendered when not cached. A request that disconnects
+    while its render is still queued releases it (Reader.raster_release), so
+    pages scrolled past and zoom levels left behind cost no worker time."""
+    from starlette.concurrency import run_in_threadpool
+
+    def job():
+        return reader.raster_job(hash_, _reader_source(hash_), page, width, fmt)
+
     try:
-        path = reader.raster(hash_, pdf, page, width)
+        future, key = await run_in_threadpool(job)
+    except HTTPException:
+        raise
     except IndexError:
         raise HTTPException(404, f"no page {page}")
     except Exception as error:
         raise HTTPException(502, f"could not render page {page}: {error}") from error
-    # Keyed by content hash, page and width, so the bytes never change.
-    return FileResponse(path, media_type="image/png",
+    try:
+        waiting = asyncio.wrap_future(future)
+        while True:
+            done, _ = await asyncio.wait({waiting}, timeout=0.05)
+            if done:
+                break
+            if await request.is_disconnected():
+                waiting.cancel()
+                return Response(status_code=499)
+        path = waiting.result()
+    except asyncio.CancelledError:
+        if future.cancelled():
+            return Response(status_code=499)
+        raise
+    except Exception as error:
+        raise HTTPException(502, f"could not render page {page}: {error}") from error
+    finally:
+        reader.raster_release(key)
+    # Keyed by content hash, page, width and format, so the bytes never change.
+    return FileResponse(path, media_type="image/jpeg" if fmt == "jpg" else "image/png",
                         headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
+@app.get("/r/{hash_}/p/{page}/{width}.png")
+async def reader_raster(request: Request, hash_: str, page: int, width: int):
+    return await _reader_raster(request, hash_, page, width, "png")
+
+
+@app.get("/r/{hash_}/p/{page}/{width}.jpg")
+async def reader_raster_jpeg(request: Request, hash_: str, page: int, width: int):
+    """The overlay's page rasters: JPEG, encoded 5x faster than PNG."""
+    return await _reader_raster(request, hash_, page, width, "jpg")
 
 
 def _require_cached_entry(hash_: str) -> str:
