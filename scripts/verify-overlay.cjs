@@ -660,6 +660,17 @@ async function main() {
     s = await panel();
     record('moving the selection previews the section behind the panel', s && Math.abs(previewTop - origin) > 50 && /Discussion/.test(s.active.text),
       `${origin.toFixed(1)} → ${previewTop.toFixed(1)} (${s && s.active && s.active.text})`);
+    const shown = await probe(() => {
+      const p = window.__probe;
+      const a = p.outlineLinks().find((l) => /Discussion/.test(l.textContent));
+      const d = a && p.destY(a);
+      const below = document.querySelector('.pdf2html-finder').getBoundingClientRect().bottom - p.pc.getBoundingClientRect().top + 16;
+      // pdf2htmlEX destinations preview at their page top (overlay-quickopen.js).
+      const y = a && a.hasAttribute('data-reader-dest') ? d && d.y : p.pageTop(p.page(parseInt(a.getAttribute('href').slice(3), 16)));
+      return a && { y, below, atEnd: d && d.atEnd };
+    });
+    record('the preview puts the heading just below the panel', shown && (shown.atEnd || near(shown.y, shown.below, 2)),
+      shown ? `target at ${shown.y.toFixed(1)}, panel bottom + 16 at ${shown.below.toFixed(1)}` : 'none');
     await press('Escape');
     record('Esc after a preview restores the exact position', !(await panel()) && Math.abs((await scrollTop()) - origin) < 0.5,
       `${origin.toFixed(2)} vs ${(await scrollTop()).toFixed(2)}`);

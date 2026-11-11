@@ -40,6 +40,10 @@ var SWITCH_LABEL = { sections: 'Sections', documents: 'Documents', all: 'Everyth
 // Rows rendered for a filtered list; nobody reads past this.
 var MAX_RESULTS = 200;
 var PREVIEW_GAP = 16;
+// Row and heading heights in px, as in overlay.css; the list is windowed.
+var ROW_H = 34;
+var HEAD_H = 28;
+var OVERSCAN = 240;
 
 export function createQuickOpen(core) {
     var document = core.document;
@@ -60,7 +64,6 @@ export function createQuickOpen(core) {
         if (sectionCache) return sectionCache;
         var entries = navigation.entries();
         var root = document.getElementById('outline');
-        var byLink = new Map();
         sectionCache = entries.map(function (entry) {
             var depth = 0, parents = [];
             var li = entry.link && entry.link.closest ? entry.link.closest('li') : null;
@@ -71,10 +74,8 @@ export function createQuickOpen(core) {
                 if (a) parents.unshift((a.textContent || '').replace(/\s+/g, ' ').trim());
                 up = up.parentElement ? up.parentElement.closest('li') : null;
             }
-            var item = { entry: entry, depth: depth, path: parents.join(' › '),
+            return { entry: entry, depth: depth, path: parents.join(' › '),
                 title: prepare(entry.label), pathTarget: parents.length ? prepare(parents.join(' ')) : null };
-            byLink.set(entry, item);
-            return item;
         });
         return sectionCache;
     }
@@ -370,9 +371,7 @@ export function createQuickOpen(core) {
     function scopeOf(mode, value) {
         if (mode !== 'all') return { scope: mode, query: value, chip: MODES[mode].chip };
         var c = value.charAt(0);
-        if (c === '#') return { scope: 'pages', query: value.slice(1), chip: NARROW[c].chip };
         if (NARROW[c]) return { scope: NARROW[c].scope, query: value.slice(1), chip: NARROW[c].chip };
-        if (/^\s*\d+\s*$/.test(value)) return { scope: 'all', query: value, chip: '' };
         return { scope: 'all', query: value, chip: '' };
     }
     function listFor(scope, q) {
@@ -438,6 +437,30 @@ export function createQuickOpen(core) {
             + '</button>';
     }
     function selectable(i) { return panel.rows[i] && !panel.rows[i].heading; }
+    // The list is windowed: rows have fixed heights (ROW_H, HEAD_H, matching
+    // overlay.css), and only those within OVERSCAN px of the visible part are
+    // in the DOM, so 2,000 sections render as fast as 20.
+    function layout() {
+        var tops = new Array(panel.rows.length + 1), y = 0;
+        for (var i = 0; i < panel.rows.length; i++) { tops[i] = y; y += panel.rows[i].heading ? HEAD_H : ROW_H; }
+        tops[panel.rows.length] = y;
+        panel.tops = tops;
+    }
+    function renderWindow() {
+        if (!panel || !panel.rows.length) return;
+        var list = panel.list, tops = panel.tops, n = panel.rows.length;
+        var from = list.scrollTop - OVERSCAN, to = list.scrollTop + (list.clientHeight || 400) + OVERSCAN;
+        var a = 0, b = n;
+        while (a < n && tops[a + 1] <= from) a++;
+        b = a;
+        while (b < n && tops[b] < to) b++;
+        if (panel.window && panel.window[0] === a && panel.window[1] === b) return;
+        panel.window = [a, b];
+        var html = '<div class="pdf2html-finder-space" style="height:' + tops[a] + 'px"></div>';
+        for (var i = a; i < b; i++) html += rowHtml(panel.rows[i], i);
+        html += '<div class="pdf2html-finder-space" style="height:' + (tops[n] - tops[b]) + 'px"></div>';
+        list.innerHTML = html;
+    }
     function render(opts) {
         if (!panel) return;
         opts = opts || {};
@@ -453,33 +476,35 @@ export function createQuickOpen(core) {
         if (want) for (var i = 0; i < panel.rows.length; i++) if (panel.rows[i].key === want) { idx = i; break; }
         if (idx < 0) for (var j = 0; j < panel.rows.length; j++) if (selectable(j)) { idx = j; break; }
         panel.idx = idx;
+        panel.window = null;
         if (!panel.rows.length) {
+            panel.tops = [0];
             panel.list.innerHTML = '<div class="pdf2html-finder-empty">' + escapeHtml(result.empty || 'Nothing here yet.') + '</div>';
         } else {
-            panel.list.innerHTML = panel.rows.map(rowHtml).join('');
+            layout();
+            if (result.center) centerActive();
+            else if (!keep) { panel.list.scrollTop = 0; scrollActive(); }
+            renderWindow();
         }
         panel.input.setAttribute('aria-activedescendant', idx >= 0 ? 'pdf2html-finder-row-' + idx : '');
-        if (result.center) centerActive(); else panel.list.scrollTop = 0;
-        if (!keep) scrollActive();
         renderFoot();
         if (panel.previewed) schedulePreview();
     }
     function activeEl() { return panel.list.querySelector('.pdf2html-finder-row.active'); }
+    // Bring the selected row into view; at the top of a group, its heading too.
     function scrollActive() {
-        var el = activeEl();
-        if (!el) return;
-        // Keep the group heading above the first row of a group in view.
-        var prev = el.previousElementSibling;
-        if (prev && prev.classList.contains('pdf2html-finder-group') && !prev.previousElementSibling) {
-            panel.list.scrollTop = 0;
-            return;
-        }
-        el.scrollIntoView({ block: 'nearest' });
+        var i = panel.idx, list = panel.list;
+        if (i < 0 || !panel.tops) return;
+        var top = panel.tops[i], bottom = panel.tops[i + 1];
+        if (i > 0 && panel.rows[i - 1].heading) top = panel.tops[i - 1];
+        if (top < list.scrollTop) list.scrollTop = top;
+        else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
+        renderWindow();
     }
     function centerActive() {
-        var el = activeEl();
-        if (!el) return;
-        panel.list.scrollTop = Math.max(0, el.offsetTop - (panel.list.clientHeight - el.offsetHeight) / 2);
+        var i = panel.idx;
+        if (i < 0) return;
+        panel.list.scrollTop = Math.max(0, panel.tops[i] - (panel.list.clientHeight - ROW_H) / 2);
     }
     function kbd(label) { return '<span class="pdf2html-kbd">' + escapeHtml(label) + '</span>'; }
     function footItem(keys, tip) {
@@ -503,10 +528,11 @@ export function createQuickOpen(core) {
         var old = activeEl();
         if (old) { old.classList.remove('active'); old.setAttribute('aria-selected', 'false'); }
         panel.idx = i;
-        var el = activeEl() || panel.list.querySelector('[data-i="' + i + '"]');
+        if (fromKeyboard) scrollActive();
+        var el = panel.list.querySelector('[data-i="' + i + '"]');
         if (el) { el.classList.add('active'); el.setAttribute('aria-selected', 'true'); }
         panel.input.setAttribute('aria-activedescendant', 'pdf2html-finder-row-' + i);
-        if (fromKeyboard) { scrollActive(); schedulePreview(); }
+        if (fromKeyboard) schedulePreview();
         renderFoot();
     }
     function move(delta) {
@@ -612,6 +638,10 @@ export function createQuickOpen(core) {
             }
             if (ev.target.closest && ev.target.closest('.pdf2html-finder-close')) closePanel(true);
         });
+        p.list.addEventListener('scroll', function () {
+            if (p.scrollFrame) return;
+            p.scrollFrame = window.requestAnimationFrame(function () { p.scrollFrame = 0; if (panel === p) renderWindow(); });
+        }, { passive: true });
         p.list.addEventListener('mousemove', function (ev) {
             var rowEl = ev.target.closest && ev.target.closest('.pdf2html-finder-row');
             if (rowEl) setActive(Number(rowEl.getAttribute('data-i')), false);
@@ -654,8 +684,10 @@ export function createQuickOpen(core) {
         render(panel.interacted && row ? { keepKey: row.key } : {});
         if (panel && panel.pendingCommit && panel.rows[panel.idx]) commit(panel.pendingCommit === 'alt');
     });
-    // Outline items depend on the document; pages refresh as reader text lands.
-    document.addEventListener('pdf2html-viewport-change', function () { if (pageCache) pageCache.complete = false; });
+
+    // Index the outline while the reader is idle, so the first ⌘O is as quick
+    // as the rest.
+    if (window.requestIdleCallback) window.requestIdleCallback(function () { sections(); }, { timeout: 4000 });
 
     return {
         toggle: toggle,

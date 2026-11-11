@@ -1278,6 +1278,7 @@ body.sidebar-shown #pdf2html-sidebar-body #outline {
 
 .pdf2html-finder-list {
     max-height: min(52vh, 404px);
+    overflow-anchor: none;
     overflow-y: auto;
     padding: 4px 0 6px;
     scrollbar-width: thin;
@@ -1300,7 +1301,10 @@ body.sidebar-shown #pdf2html-sidebar-body #outline {
 }
 
 .pdf2html-finder-group {
-    padding: 10px 18px 4px;
+    box-sizing: border-box;
+    height: 28px;                  /* HEAD_H in overlay-quickopen.js */
+    padding: 10px 18px 0;
+    line-height: 14px;
     font-size: 11px;
     color: var(--fg-dimmer);
     font-weight: 500;
@@ -1312,9 +1316,10 @@ body.sidebar-shown #pdf2html-sidebar-body #outline {
     grid-template-columns: 18px minmax(0, 1fr) auto;
     align-items: center;
     column-gap: 10px;
+    box-sizing: border-box;
     width: 100%;
-    min-height: 34px;
-    padding: 6px 18px 6px 16px;
+    height: 34px;                  /* ROW_H in overlay-quickopen.js */
+    padding: 0 18px 0 16px;
     margin: 0;
     background: transparent;
     border: 0;
@@ -1367,15 +1372,17 @@ body.sidebar-shown #pdf2html-sidebar-body #outline {
     overflow: hidden;
     white-space: nowrap;
 }
+/* The title keeps its width; the muted secondary text gives way first. */
 .pdf2html-finder-row .primary {
-    flex: 0 1 auto;
+    flex: 0 0 auto;
+    max-width: 100%;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     color: var(--fg);
 }
 .pdf2html-finder-row .secondary {
-    flex: 0 100 auto;
+    flex: 0 1 auto;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
