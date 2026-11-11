@@ -3,9 +3,9 @@
 Read [README.md](README.md) for the conversion, cache, daemon, overlay and extension boundaries.
 The product is PDFs as HTML for keyboard-native Vimium use, from two engines. The reader
 (`daemon/reader.py`, ADR 0014) builds pages from the PDF on demand with PDFium; all PDFium calls
-stay in `daemon/pdfium_doc.py` and run in worker processes. pdf2htmlEX conversion is the default
-and rollback path until `PDF_VIEWER_ENGINE=reader` is made the default; its conversion and
-indexing remain explicit script operations.
+stay in `daemon/pdfium_doc.py` and run in worker processes. The reader is the default engine. pdf2htmlEX conversion is the
+rollback path (`PDF_VIEWER_ENGINE=pdf2htmlex`) and still serves entries converted earlier; its
+conversion and indexing remain explicit script operations.
 
 ## Route before changing
 

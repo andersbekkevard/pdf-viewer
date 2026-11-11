@@ -17,9 +17,9 @@ replaces pdf2htmlEX's converted HTML.
 | `GET /r/<hash>/p/<page>/<width>.png` | The same, lossless PNG (sidebar thumbnails, tools). |
 | `GET /r/<hash>/ocr?pages=1-4&wait=20` | Recognized text of scanned pages as `.t ocr` markup, per page `done`, `pending`, `failed`, `none` or `unavailable`. See "Scanned pages". |
 
-`PDF_VIEWER_ENGINE=reader` makes the routes the extension redirects to
-(`/view`, `/view-raw`) behave like `/read`, so every PDF opens in the reader.
-Unset, or `pdf2htmlex`, keeps converted entries on their HTML and sends a cache
+The routes the extension redirects to (`/view`, `/view-raw`) behave like
+`/read`, so every PDF opens in the reader; that is the default.
+`PDF_VIEWER_ENGINE=pdf2htmlex` keeps converted entries on their HTML and sends a cache
 miss to the browser's own viewer; `/read` and `/r/` work either way.
 
 An entry opened on demand has no `mappings.tsv` row. Its name and source live in

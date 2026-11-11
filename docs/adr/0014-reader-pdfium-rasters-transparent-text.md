@@ -1,9 +1,8 @@
 # ADR 0014: Reader — PDFium rasters under a transparent text layer
 
-**Status**: Accepted for the reader routes (`/read`, `/r/<hash>/`). Making it
-the default engine (`PDF_VIEWER_ENGINE=reader`) waits for Anders' check in
-Comet with Vimium; until then pdf2htmlEX output stays the default and the
-rollback.
+**Status**: Accepted. The reader is the default engine since 2026-11-11;
+pdf2htmlEX output is the rollback (`PDF_VIEWER_ENGINE=pdf2htmlex`) and still
+serves entries converted earlier. Not yet checked in Comet.
 **Date**: 2026-11-10
 
 ## Context
@@ -135,7 +134,7 @@ scripts, and the manual step on a cache miss.
   when the daemon is down. Without a claiming extension the older relay
   applies: the browser's viewer first, then a swap to the reader about a
   second or more later. See `docs/reader.md`, "Sign-in-gated sources".
-- **Rollback** is `PDF_VIEWER_ENGINE=pdf2htmlex` (the default today):
+- **Rollback** is `PDF_VIEWER_ENGINE=pdf2htmlex`:
   converted entries serve their HTML as before.
 
 ## Not decided here

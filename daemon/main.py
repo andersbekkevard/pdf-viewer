@@ -113,10 +113,10 @@ opens.configure_logging()
 
 def _prefer_reader() -> bool:
     """Whether documents open in the reader (PDFium rasters, built on demand)
-    instead of pdf2htmlEX's converted HTML. PDF_VIEWER_ENGINE=pdf2htmlex is
-    the rollback: converted entries then keep serving their HTML and a cache
-    miss falls back to the browser's own viewer."""
-    return os.environ.get("PDF_VIEWER_ENGINE", "pdf2htmlex").strip().lower() == "reader"
+    instead of pdf2htmlEX's converted HTML. The reader is the default;
+    PDF_VIEWER_ENGINE=pdf2htmlex is the rollback: converted entries then
+    serve their HTML and a cache miss falls back to the browser's viewer."""
+    return os.environ.get("PDF_VIEWER_ENGINE", "reader").strip().lower() != "pdf2htmlex"
 
 
 def _prefer_light_from_environment() -> bool:

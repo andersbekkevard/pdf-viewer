@@ -86,10 +86,10 @@ position restore, …).
 **Two engines.** The newer one, the **reader**, opens a PDF directly: PDFium
 page rasters at device resolution under a transparent text layer, built on
 demand with no conversion step ([`docs/reader.md`](docs/reader.md), ADR 0014).
-`/read?path=` and `/read?url=` open any PDF in it today. Start the daemon with
-`PDF_VIEWER_ENGINE=reader` to make it the engine for every PDF the extension
-redirects, including uncached, sign-in-gated and `file://` ones. Without that
-variable the pdf2htmlEX path described below is the default and the rollback.
+It is the default engine for every PDF the extension redirects, including
+uncached, sign-in-gated and `file://` ones. Start the daemon with
+`PDF_VIEWER_ENGINE=pdf2htmlex` for the rollback: the pdf2htmlEX path described
+below.
 
 All core phases done (1 → 7). What works end-to-end today:
 

@@ -301,6 +301,8 @@ class EngineAndSaveTests(unittest.TestCase):
             self.assertEqual(main.healthz()["engine"], "reader")
         with patch.dict("os.environ", {}, clear=False) as env:
             env.pop("PDF_VIEWER_ENGINE", None)
+            self.assertEqual(main.healthz()["engine"], "reader")
+        with patch.dict("os.environ", {"PDF_VIEWER_ENGINE": "pdf2htmlex"}):
             self.assertEqual(main.healthz()["engine"], "pdf2htmlex")
 
     def test_save_checks_bytes_and_names_from_disposition(self):

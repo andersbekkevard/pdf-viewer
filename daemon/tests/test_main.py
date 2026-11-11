@@ -4,6 +4,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from unittest.mock import patch
 
 from fastapi import BackgroundTasks
@@ -27,6 +28,11 @@ class FakeActivity:
 
 class ViewRepresentationTest(unittest.TestCase):
     def setUp(self):
+        # These are the converted-HTML (pdf2htmlEX) routes; the reader is the default.
+        # (The tests clear the environment, so the engine is pinned on the function.)
+        engine = unittest.mock.patch.object(main, "_prefer_reader", return_value=False)
+        engine.start()
+        self.addCleanup(engine.stop)
         self.temp = tempfile.TemporaryDirectory()
         root = pathlib.Path(self.temp.name) / "cache"
         root.mkdir()
