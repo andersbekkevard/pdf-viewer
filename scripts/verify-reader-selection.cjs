@@ -65,6 +65,20 @@ module.exports = async function(page, base, record) {
       return getSelection().toString();
     });
     record('reader preserves PDFium line-end hyphen on selection/copy', /hyphen-\n+ated unchanged/.test(hyphen),JSON.stringify(hyphen));
+    await page.keyboard.press('Meta+c');
+    record('reader native copy preserves the line-end hyphen',
+      (await page.evaluate(()=>navigator.clipboard.readText()))===hyphen);
+    const rtl=await page.evaluate(()=>{
+      const pc=document.querySelector('#pf5 .pc');
+      getSelection().selectAllChildren(pc);
+      return {text:getSelection().toString(),lines:[...pc.querySelectorAll('.t')].map(l=>l.textContent).join('\n'),
+        rtl:pc.querySelectorAll('.t[dir="rtl"]').length};
+    });
+    record('reader RTL selection preserves extracted line order',rtl.rtl===2 &&
+      rtl.text.replace(/\s+/g,' ').trim()===rtl.lines.replace(/\s+/g,' ').trim());
+    await page.keyboard.press('Meta+c');
+    record('reader native RTL copy preserves selected text',
+      (await page.evaluate(()=>navigator.clipboard.readText()))===rtl.text);
     await page.evaluate(()=>{getSelection().removeAllRanges();window.find('C1R2');});
     await page.waitForTimeout(300);
     await page.evaluate(()=>{document.getElementById('page-container').scrollTop+=800;});

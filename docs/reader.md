@@ -394,5 +394,5 @@ Both shell and text versions invalidate caches; experimental extraction has
 a distinct text version, so toggling the flag cannot reuse its text as the
 default layer. This is opt-in because the existing scorecard compares copied
 text against PDFium **stream order**, and geometric ordering has not met that
-copy/find fidelity gates. Do not enable it by default on the strength of synthetic
+copy-fidelity gate. Do not enable it by default on the strength of synthetic
 fixtures. See `bench/reader/README.md` for the independent order diagnostics.
