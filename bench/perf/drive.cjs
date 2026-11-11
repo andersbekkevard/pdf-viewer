@@ -480,7 +480,9 @@ async function main() {
         await btn.click();
     }
     out.phases.zoom.tLastInput = Date.now();
-    out.phases.zoom.tInput = (await inputsSince(page, out.phases.zoom.tAction, spec.engine === 'native' ? 'pointerdown' : 'keydown'))[0] || null;
+    // The reader's key: '=' (the Meta keydown before it is not the input).
+    out.phases.zoom.tInput = (await inputsSince(page, out.phases.zoom.tAction,
+        spec.engine === 'native' ? 'pointerdown' : 'keydown', spec.engine === 'native' ? null : '='))[0] || null;
     await settle(page, 'zoom', out.phases.zoom.tAction, spec.phaseMaxMs);
     out.phases.zoom.state = await stateNow();
 
@@ -495,7 +497,8 @@ async function main() {
         if (btnOut) await btnOut.click(); else await page.keyboard.press('Meta+Minus');
     }
     out.phases.zoom_burst.tLastInput = Date.now();
-    const burstInputs = await inputsSince(page, out.phases.zoom_burst.tAction, spec.engine === 'native' ? 'pointerdown' : 'keydown');
+    const burstInputs = await inputsSince(page, out.phases.zoom_burst.tAction,
+        spec.engine === 'native' ? 'pointerdown' : 'keydown', spec.engine === 'native' ? null : '-');
     out.phases.zoom_burst.inputs = burstInputs;
     out.phases.zoom_burst.tInput = burstInputs.length === burst ? burstInputs[burst - 1] : null;
     await settle(page, 'zoom_burst', out.phases.zoom_burst.tLastInput, spec.phaseMaxMs);
