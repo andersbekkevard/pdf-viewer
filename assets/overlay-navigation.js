@@ -139,10 +139,10 @@ export function createNavigation(core) {
         landPage(Math.min(total, Math.max(1, currentPage + delta)), false);
     }
     // A reader outline entry names a point on its page; land the heading at
-    // the same lead as a page top.
+    // the viewport top, matching pdf2htmlEX XYZ destinations.
     function gotoPoint(entry) {
         var target = entry.point && documentModel.page(entry.page);
-        return !!target && documentModel.scrollToPagePoint(target, entry.point.y, PAGE_LEAD);
+        return !!target && documentModel.scrollToPagePoint(target, entry.point.y, 0);
     }
     // A reader link destination: `point` is {x, y} in the target page's px,
     // or null for the page top. Lands exactly as an outline jump does.
