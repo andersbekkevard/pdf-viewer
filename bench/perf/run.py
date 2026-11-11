@@ -5,7 +5,7 @@
 # ///
 """Perf bench: time to view, interaction latency and memory, reader vs Chrome's native PDF viewer.
 
-Each trial is one fresh full Chromium (Chromium for Testing, headed by default)
+Each trial is one fresh full Chromium (Chromium for Testing, new-headless by default)
 running the same journey on one document with one engine (drive.cjs). Latency
 is read from screencast frames, identically for both engines; frame pacing
 from a trace of the display compositor; memory from macOS `footprint` over
@@ -13,7 +13,7 @@ every browser process. Definitions: bench/perf/README.md.
 
 Usage:
     uv run bench/perf/run.py --out /tmp/pdfv-perf/results/perf.json [--engine reader|native|both]
-        [--docs SHA_PREFIX,...] [--repeat 5] [--base http://127.0.0.1:7481] [--headless]
+        [--docs SHA_PREFIX,...] [--repeat 5] [--base http://127.0.0.1:7442] [--headed]
     python3 bench/perf/compare.py /tmp/pdfv-perf/results/perf.json
 
 The reader needs a daemon with PDF_VIEWER_ENGINE=reader on --base, with its
@@ -48,31 +48,35 @@ from PIL import Image
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 DRIVE = HERE / "drive.cjs"
-WORK = pathlib.Path("/tmp/pdfv-perf/work")
+WORK = pathlib.Path("~/.cache/pdf_viewer-bench/perf-work").expanduser()   # outside the repository
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(REPO / "bench" / "corpus" / "probe"))
 import probe as oldprobe  # noqa: E402  (corpus location and Playwright lookup)
 
-BENCH_VERSION = "1"
+BENCH_VERSION = "2"
 
 # Default document set: local corpus, stratified by page count, text- and figure-heavy.
 DEFAULT_DOCS = [
     "3a22c08d7c0f",  # 3 p, mixed text and images
     "6bbca166322c",  # 18 p, 8 MB, image-heavy slides
     "fa9b7cc99c1e",  # 27 p, vector-figure heavy
-    "09b124f6a862",  # 125 p, slides with figures
     "6045f88e2eca",  # 127 p, text-heavy
     "7319a537e6c3",  # 342 p, text-heavy
-    "40d976c83c18",  # 714 p
     "3b592f92ab8c",  # 1677 p, the largest
 ]
+# Also present locally and usable with --docs: 09b124f6a862 (125 p slides), 40d976c83c18 (714 p),
+# 00bf2159e2ab (1137 p).
 
-# Geometry. The headed window is placed on the Mac's built-in display (below the
-# main display), so it never covers the owner's work: position and size are fixed.
+# Geometry. Trials run in new-headless full Chromium (`--headless=new`, which
+# still runs Chrome's PDF viewer): a headed window takes keyboard focus on the
+# owner's Mac while he works, wherever it is placed. `--headed` exists for a
+# deliberate check only. Frames in new-headless come from a virtual 60 Hz
+# begin-frame source, not the display, so frame times are in 16.7 ms steps.
+# The window position applies to --headed only.
 # Native zoom 125 % is 5/3 CSS px per PDF point (native 100 % = 4/3 px/pt); the
 # reader's zoom is CSS px per point, so 1.6667 is the same page size on screen.
 # 125 % -> 150 % is the native viewer's next preset step.
-WINDOW = {"width": 1320, "height": 840}
+WINDOW = {"width": 1300, "height": 820}
 WINDOW_POSITION = {"x": 320, "y": 1100}
 DPR = 2
 NATIVE_ZOOM, NATIVE_ZOOM_STEP = 125, 150
@@ -83,6 +87,9 @@ READER_ZOOM_STEP = round(NATIVE_ZOOM_STEP / 75, 4)
 REGION = {"x0": 0.3, "x1": 0.7, "y0": 0.1, "y1": 0.97}
 WHEEL_DELTA, WHEEL_INTERVAL_MS = 100, 16
 PAGE_GAP_CSS = 8
+# The overlay's viewport cookie for this window (page-container width x DPR,
+# assets/overlay.js), seeded before the reader's cold open: see drive.cjs.
+VIEWPORT_COOKIE = "1289x2"
 
 # Pixel comparison: a pixel differs when its luma differs by more than
 # PIX_THRESHOLD; two frames match when fewer than MATCH_FRACTION of the
@@ -90,6 +97,15 @@ PAGE_GAP_CSS = 8
 PIX_THRESHOLD = 40
 MATCH_FRACTION = 0.002
 NONBLANK_FRACTION = 0.005
+# Coarse comparison ("the page is there, at its final size and place, legible but
+# perhaps not sharp"): luma averaged over COARSE x COARSE device-px blocks (8 px =
+# 4 CSS px at DPR 2), a block differs by more than COARSE_THRESHOLD levels, and
+# two frames match when fewer than COARSE_FRACTION of blocks differ. A raster
+# scaled from another zoom, or a quarter-resolution preview, matches the sharp
+# final frame; the previous page, a blank page or the old size does not.
+COARSE = 8
+COARSE_THRESHOLD = 24
+COARSE_FRACTION = 0.01
 
 
 def sh(cmd, timeout=30):
@@ -156,6 +172,20 @@ class Frames:
             self._cache[name] = np.asarray(im.crop(box), dtype=np.int16)
         return self._cache[name]
 
+    def coarse(self, name: str) -> np.ndarray:
+        key = "coarse:" + name
+        if key not in self._cache:
+            x = self.luma(name)
+            h, w = (x.shape[0] // COARSE) * COARSE, (x.shape[1] // COARSE) * COARSE
+            self._cache[key] = x[:h, :w].reshape(h // COARSE, COARSE, w // COARSE, COARSE).mean(axis=(1, 3))
+        return self._cache[key]
+
+    def coarse_diff(self, a: str, b: str) -> float:
+        x, y = self.coarse(a), self.coarse(b)
+        if x.shape != y.shape:
+            return 1.0
+        return float(np.mean(np.abs(x - y) > COARSE_THRESHOLD))
+
     def diff(self, a: str, b: str) -> float:
         x, y = self.luma(a), self.luma(b)
         if x.shape != y.shape:
@@ -191,6 +221,16 @@ def analyze_phase(fr: Frames, ph: dict, ref_time: float, *, is_open: bool) -> di
     while k > 0 and fr.diff(window[k - 1]["file"], final) < MATCH_FRACTION:
         k -= 1
     res["complete_ms"] = round(window[min(k, len(window) - 1)]["t"] - ref_time, 1)
+    # Coarsely complete: from this frame on, every frame shows the final page at
+    # its final size and place (legible, maybe blurred); a blank or old-size frame
+    # after it would push it later, so it also catches flicker.
+    k = len(window)
+    while k > 0 and fr.coarse_diff(window[k - 1]["file"], final) < COARSE_FRACTION:
+        k -= 1
+    res["coarse_ms"] = round(window[min(k, len(window) - 1)]["t"] - ref_time, 1)
+    # Frames on the way that were neither the old view nor near the final one at
+    # coarse scale and were mostly blank: a blank page during a zoom or jump.
+    res["blank_frames"] = sum(1 for f in window if not fr.nonblank(f["file"]))
     # First visible response.
     if is_open:
         first = next((f for f in window if fr.nonblank(f["file"])), None)
@@ -232,6 +272,14 @@ def analyze_trace(path: pathlib.Path, ph: dict) -> dict | None:
     if len(vs) <= 10:
         vs = sorted(e["ts"] / 1000 for e in events if e.get("name") == "OnVSyncPresentation")
         vsync_source = "OnVSyncPresentation"
+    if len(vs) <= 10:
+        # New-headless: no display; the virtual begin-frame source (60 Hz) paces frames.
+        by_thread = {}
+        for e in events:
+            if e.get("name") == "ExternalBeginFrameSource::OnBeginFrame":
+                by_thread.setdefault((e.get("pid"), e.get("tid")), []).append(e["ts"] / 1000)
+        vs = sorted(max(by_thread.values(), key=len)) if by_thread else []
+        vsync_source = "ExternalBeginFrameSource"
     vsync = float(statistics.median(np.diff(vs))) if len(vs) > 10 else None
     if not vsync:
         return {"error": "no vsync events"}
@@ -244,7 +292,10 @@ def analyze_trace(path: pathlib.Path, ph: dict) -> dict | None:
     # engine that does not animate between events (the reader) can only update that
     # often, while one that does (native) updates every vsync. The comparable
     # question is how often a whole input period passed with no presented frame.
-    period = ph.get("intervalMs") or 16
+    # A frame source slower than the input (new-headless: 60 Hz against 62.5 Hz
+    # wheel input) leaves an input period without a frame now and then even
+    # when keeping up, so the period is the slower of the two.
+    period = max(ph.get("intervalMs") or 16, vsync)
     bins = np.arange(t0, t1 - period, period)
     idx = np.searchsorted(np.array(win), bins)
     nxt = np.array(win + [float("inf")])[idx]
@@ -271,7 +322,12 @@ def score_trial(wdir: pathlib.Path, raw: dict, spec: dict) -> dict:
             res["phases"][name] = {"incomplete": True}
             continue
         is_open = name.startswith("open")
-        ref = ph["tLastInput"] if name.startswith("scroll") else ph["tAction"]
+        ref = ph["tLastInput"] if name.startswith("scroll") or name == "zoom_burst" else ph["tAction"]
+        # Discrete inputs are timed from the event as the page received it (drive.cjs, input clock).
+        if ph.get("tInput"):
+            ref = ph["tInput"]
+        elif name in ("jump", "zoom", "zoom_burst"):
+            res["notes"].append(f"{name}: no input timestamp from the page; timed from the driver's call")
         a = analyze_phase(fr, ph, ref, is_open=is_open)
         a["state"] = ph.get("state")
         if name == "scroll5":
@@ -284,7 +340,7 @@ def score_trial(wdir: pathlib.Path, raw: dict, spec: dict) -> dict:
             a = {"trace": analyze_trace(wdir / "scroll-trace.json", ph), "state": ph.get("state"),
                  "before": ph.get("before"), "input_ms": round(ph["tLastInput"] - ph["tAction"], 1),
                  "events": ph.get("events")}
-        if name in ("jump", "zoom"):
+        if name in ("jump", "zoom", "zoom_burst"):
             a["target"] = ph.get("target")
             a["before"] = ph.get("before")
         if ph.get("status") is not None:
@@ -308,6 +364,9 @@ def score_trial(wdir: pathlib.Path, raw: dict, spec: dict) -> dict:
             "delta_by_kind": {k: a.get(k, 0) - b.get(k, 0) for k in sorted(set(a) | set(b))},
             "procs_after": len(mem["after"]["procs"]), "footprint_missing": mem["after"]["missing"],
         }
+        if mem.get("afterZoom"):
+            z = by_kind(mem["afterZoom"])
+            res["memory"]["browser_after_zoom_delta"] = (mem["afterZoom"]["total"] - sum(z.get(k, 0) for k in bench_only)) - tb
         if mem.get("daemonAfter"):
             res["memory"]["daemon_after"] = mem["daemonAfter"]["total"]
             res["memory"]["daemon_delta"] = mem["daemonAfter"]["total"] - mem["daemonBefore"]["total"]
@@ -317,7 +376,7 @@ def score_trial(wdir: pathlib.Path, raw: dict, spec: dict) -> dict:
     if raw["engine"] == "reader":
         rs = raw.get("rasters", [])
         def phase_of(t):
-            for name in ("zoom", "scroll5", "jump", "scroll10", "open_warm", "open_cold"):
+            for name in ("zoom_burst", "zoom", "scroll5", "jump", "scroll10", "open_warm", "open_cold"):
                 if name in phases and "tAction" in phases[name] and t >= phases[name]["tAction"] - 400:
                     return name
             return "open_cold"
@@ -332,7 +391,16 @@ def score_trial(wdir: pathlib.Path, raw: dict, spec: dict) -> dict:
             p["ms_median"] = round(statistics.median(p["ms"]), 1) if p["ms"] else None
             p["ms_max"] = max(p["ms"]) if p["ms"] else None
             del p["ms"]
-        journey = [r for r in rs if phase_of(r["t"]) != "zoom"]
+        journey = [r for r in rs if not phase_of(r["t"]).startswith("zoom")]
+        # Burst: widths requested after the first step of the burst. Only the final
+        # zoom's width (one per visible page) is needed; the rest is wasted work.
+        if "zoom_burst" in phases and phases["zoom_burst"].get("state"):
+            final_widths = {r["width"] for r in rs if phase_of(r["t"]) == "zoom_burst"
+                            and r["t"] >= phases["zoom_burst"]["tLastInput"] - 50}
+            burst = [r for r in rs if phase_of(r["t"]) == "zoom_burst"]
+            per.setdefault("zoom_burst", {})["widths"] = len({r["width"] for r in burst})
+            per["zoom_burst"]["stale_requests"] = sum(1 for r in burst if r["t"] < phases["zoom_burst"]["tLastInput"] - 50
+                                                     and r["width"] not in final_widths)
         res["rasters"] = {
             "requests": len(rs), "bytes": sum(r["bytes"] or 0 for r in rs), "aborted": raw.get("abortedRasters", 0),
             "journey_requests": len(journey), "journey_bytes": sum(r["bytes"] or 0 for r in journey),
@@ -347,6 +415,8 @@ def score_trial(wdir: pathlib.Path, raw: dict, spec: dict) -> dict:
             res["phases"][name]["documents"] = [{k: v for k, v in d.items() if k != "t"} for d in docs
                                                 if t0 - 50 <= d["t"] <= t1]
     res["viewport"] = raw.get("viewport")
+    if raw.get("viewportCookieSeen") and spec.get("viewportCookie") and raw["viewportCookieSeen"] != spec["viewportCookie"]:
+        res["notes"].append(f"viewport cookie seeded {spec['viewportCookie']} but the overlay wrote {raw['viewportCookieSeen']}")
     res["browser_version"] = raw.get("browserVersion")
     res["mode"] = raw.get("mode")
     return res
@@ -367,13 +437,19 @@ METRICS = {
     "open_cold_ms": (("phases", "open_cold", "complete_ms"), "ms"),
     "open_warm_ms": (("phases", "open_warm", "complete_ms"), "ms"),
     "open_cold_first_content_ms": (("phases", "open_cold", "first_content_ms"), "ms"),
+    "open_cold_first_page_ms": (("phases", "open_cold", "coarse_ms"), "ms"),
     "scroll_settle_ms": (("phases", "scroll5", "complete_ms"), "ms"),
     "scroll_fps": (("phases", "scroll10", "trace", "fps"), "fps"),
     "scroll_stall_fraction": (("phases", "scroll10", "trace", "stall_fraction"), "frac"),
     "scroll_interval_p95_ms": (("phases", "scroll10", "trace", "interval_p95"), "ms"),
+    "jump_legible_ms": (("phases", "jump", "coarse_ms"), "ms"),
     "jump_ms": (("phases", "jump", "complete_ms"), "ms"),
+    "zoom_applied_ms": (("phases", "zoom", "coarse_ms"), "ms"),
     "zoom_ms": (("phases", "zoom", "complete_ms"), "ms"),
+    "zoom_burst_applied_ms": (("phases", "zoom_burst", "coarse_ms"), "ms"),
+    "zoom_burst_ms": (("phases", "zoom_burst", "complete_ms"), "ms"),
     "memory_browser_mb": (("memory", "browser_delta"), "MB"),
+    "memory_after_zoom_mb": (("memory", "browser_after_zoom_delta"), "MB"),
     "memory_daemon_mb": (("memory", "daemon_after"), "MB"),
 }
 
@@ -403,21 +479,28 @@ def main() -> int:
     ap.add_argument("--engine", choices=["reader", "native", "both"], default="both")
     ap.add_argument("--docs", help="comma-separated sha256 prefixes (default: the 8-document set in run.py)")
     ap.add_argument("--repeat", type=int, default=5)
-    ap.add_argument("--base", default="http://127.0.0.1:7481")
-    ap.add_argument("--native-port", type=int, default=7482)
+    ap.add_argument("--base", default="http://127.0.0.1:7442")
+    ap.add_argument("--native-port", type=int, default=0, help="port of the native viewer's PDF server (0: any free port)")
+    ap.add_argument("--work", default=str(WORK), help="scratch directory for frames (private content; outside the repo)")
     ap.add_argument("--corpus")
-    ap.add_argument("--headless", action="store_true", help="new-headless full Chromium instead of a headed window")
+    ap.add_argument("--headed", action="store_true",
+                    help="a visible browser window instead of new-headless; it TAKES KEYBOARD FOCUS on the "
+                         "desktop it opens on, so never use it while someone works at the machine")
     ap.add_argument("--keep-frames", help="keep screencast frames here (private content!)")
-    ap.add_argument("--max-load", type=float, default=4.0,
+    ap.add_argument("--no-viewport-cookie", action="store_true",
+                    help="open the reader without the overlay's viewport cookie (no first-raster preload)")
+    ap.add_argument("--max-load", type=float, default=12.0,
                     help="wait (up to 2 min) before a trial while the 1-minute load average is above this")
     args = ap.parse_args()
     args.base = args.base.rstrip("/")
-    if args.keep_frames and str(pathlib.Path(args.keep_frames).expanduser().resolve()).startswith(str(REPO.resolve())):
-            print("run: --keep-frames must be outside the repository", file=sys.stderr)
+    for d in (args.keep_frames, args.work):
+        if d and str(pathlib.Path(d).expanduser().resolve()).startswith(str(REPO.resolve())):
+            print("run: --keep-frames and --work must be outside the repository", file=sys.stderr)
             return 2
+    work = pathlib.Path(args.work).expanduser()
     port = int(args.base.rsplit(":", 1)[1])
-    if not 7480 <= port <= 7489 or not 7480 <= args.native_port <= 7489:
-        print("run: use ports 7480-7489 for the bench daemon and the native server", file=sys.stderr)
+    if port == 7435 or args.native_port == 7435:
+        print("run: 7435 is the owner's daemon; run the bench against a scratch daemon", file=sys.stderr)
         return 2
     engines = ["reader", "native"] if args.engine == "both" else [args.engine]
     if "reader" in engines:
@@ -427,7 +510,9 @@ def main() -> int:
         except Exception as exc:
             print(f"run: daemon at {args.base} not reachable: {exc}", file=sys.stderr)
             return 2
-        if health.get("engine") != "reader" or "/.cache/pdf_viewer" in str(health.get("cache_dir")):
+        owner = pathlib.Path.home() / ".cache" / "pdf_viewer"
+        cache = pathlib.Path(str(health.get("cache_dir") or owner))
+        if health.get("engine") != "reader" or cache == owner or owner in cache.parents:
             print(f"run: the daemon must run the reader on a scratch cache, got {health}", file=sys.stderr)
             return 2
     node_path = oldprobe.playwright_node_path()
@@ -457,7 +542,7 @@ def main() -> int:
 
     out_path = pathlib.Path(args.out).expanduser().resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    WORK.mkdir(parents=True, exist_ok=True)
+    work.mkdir(parents=True, exist_ok=True)
     meta = {
         "bench": "perf", "bench_version": BENCH_VERSION,
         "git_commit": sh(["git", "-C", str(REPO), "rev-parse", "HEAD"]) or None,
@@ -467,12 +552,14 @@ def main() -> int:
                     "memory_gb": round(int(sh(["sysctl", "-n", "hw.memsize"]) or 0) / 2**30),
                     "macos": platform.mac_ver()[0]},
         "chromium": chromium.split("/ms-playwright/")[-1].split("/")[0],
-        "mode": "new-headless" if args.headless else "headed",
+        "mode": "headed" if args.headed else "new-headless",
         "window": WINDOW, "window_position": WINDOW_POSITION, "dpr": DPR, "native_zoom": [NATIVE_ZOOM, NATIVE_ZOOM_STEP],
         "reader_zoom": [READER_ZOOM, READER_ZOOM_STEP], "region": REGION,
         "wheel": {"delta": WHEEL_DELTA, "interval_ms": WHEEL_INTERVAL_MS},
-        "pixel_match": {"threshold": PIX_THRESHOLD, "fraction": MATCH_FRACTION},
+        "pixel_match": {"threshold": PIX_THRESHOLD, "fraction": MATCH_FRACTION,
+                        "coarse": {"block": COARSE, "threshold": COARSE_THRESHOLD, "fraction": COARSE_FRACTION}},
         "repeat": args.repeat, "engines": engines,
+        "viewport_cookie": None if args.no_viewport_cookie else VIEWPORT_COOKIE,
         "started": machine_state(),
     }
     results: dict = {"meta": meta, "docs": []}
@@ -505,18 +592,20 @@ def main() -> int:
                     waited += 10
                 state = machine_state()
                 state["waited_s"] = waited
-                wdir = WORK / f"{sha[:12]}-{engine}-{rep}"
+                wdir = work / f"{sha[:12]}-{engine}-{rep}"
                 shutil.rmtree(wdir, ignore_errors=True)
                 wdir.mkdir(parents=True)
                 deleted = http("DELETE", f"{args.base}/mapping/{hash16}") if engine == "reader" else None
                 spec = {
-                    "engine": engine, "pdfPath": str(pdf), "chromium": chromium, "headless": args.headless,
+                    "engine": engine, "pdfPath": str(pdf), "chromium": chromium, "headless": not args.headed,
                     "readUrl": f"{args.base}/read?path={urllib.parse.quote(str(pdf))}",
                     "stateResetUrl": f"{args.base}/entry/{hash16}/state",
                     "nativePort": args.native_port, "nativeZoom": NATIVE_ZOOM,
                     "readerZoom": READER_ZOOM, "readerZoomStep": READER_ZOOM_STEP,
                     "window": WINDOW, "windowPosition": WINDOW_POSITION, "dpr": DPR, "region": REGION, "jpegQuality": 80,
                     "outDir": str(wdir), "daemonPid": dpid if engine == "reader" else None,
+                    "zoomBurst": 4, "zoomBurstIntervalMs": 60,
+                    "viewportCookie": None if args.no_viewport_cookie else VIEWPORT_COOKIE,
                     "quietMs": 1500, "openQuietMs": 2500, "coldMaxMs": 120000, "phaseMaxMs": 30000,
                     "baselineIdleMs": 3000, "idleMs": 3000,
                     "pointer": {"x": WINDOW["width"] // 2, "y": 400},
@@ -543,6 +632,7 @@ def main() -> int:
                     trial = {"engine": engine, "fatal": err or "no trial.json"}
                 trial["rep"] = rep
                 trial["machine"] = state
+                trial["machine_end"] = machine_state()
                 trial["seconds"] = round(time.monotonic() - t0, 1)
                 if deleted is not None:
                     trial["cold_entry_delete"] = deleted
@@ -555,9 +645,13 @@ def main() -> int:
                 ph = trial.get("phases", {})
                 print(f"[{n}/{total}] {sha[:12]} {pages}p {engine} r{rep}: "
                       f"cold {dig(ph, ('open_cold', 'complete_ms'))} warm {dig(ph, ('open_warm', 'complete_ms'))} "
-                      f"scroll {dig(ph, ('scroll10', 'complete_ms'))} fps {dig(ph, ('scroll10', 'trace', 'fps'))} "
-                      f"jump {dig(ph, ('jump', 'complete_ms'))} zoom {dig(ph, ('zoom', 'complete_ms'))} "
-                      f"mem {round((dig(trial, ('memory', 'browser_delta')) or 0) / 1e6)} MB"
+                      f"stall {dig(ph, ('scroll10', 'trace', 'stall_fraction'))} settle {dig(ph, ('scroll5', 'complete_ms'))} "
+                      f"jump {dig(ph, ('jump', 'coarse_ms'))}/{dig(ph, ('jump', 'complete_ms'))} "
+                      f"zoom {dig(ph, ('zoom', 'coarse_ms'))}/{dig(ph, ('zoom', 'complete_ms'))} "
+                      f"burst {dig(ph, ('zoom_burst', 'coarse_ms'))}/{dig(ph, ('zoom_burst', 'complete_ms'))} "
+                      f"mem {round((dig(trial, ('memory', 'browser_delta')) or 0) / 1e6)}/"
+                      f"{round((dig(trial, ('memory', 'browser_after_zoom_delta')) or 0) / 1e6)} MB "
+                      f"load {state['load'][0]}"
                       f"{' FATAL ' + trial['fatal'][:200] if trial.get('fatal') else ''} | {trial['seconds']} s",
                       flush=True)
                 write()

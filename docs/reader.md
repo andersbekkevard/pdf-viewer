@@ -13,7 +13,8 @@ replaces pdf2htmlEX's converted HTML.
 | `GET /read?url=<url>`, `GET /read-raw?<url>` | Downloads the PDF once into `<hash>/_source/`, registers it and redirects. |
 | `GET /r/<hash>/` | The reader shell (HTML). Served from `<hash>/reader/shell.html` once all text has been extracted; before that, built per request with text for a few pages (see [Loading](#loading)). |
 | `GET /r/<hash>/text/<k>.json` | Text range `k`: `{"first": 32k+1, "pages": [markup, …], "ocr": [page, …]}`, each page's `.t` lines and links. Cached under `<hash>/reader/text/<k>.json`. |
-| `GET /r/<hash>/p/<page>/<width>.png` | One page rendered `width` device pixels wide. Cached under `<hash>/reader/px/<width>/`. |
+| `GET /r/<hash>/p/<page>/<width>.jpg` | One page rendered `width` device pixels wide, JPEG (the overlay's rasters; see [Rasters](#rasters)). Cached under `<hash>/reader/px/<width>/`. |
+| `GET /r/<hash>/p/<page>/<width>.png` | The same, lossless PNG (sidebar thumbnails, tools). |
 | `GET /r/<hash>/ocr?pages=1-4&wait=20` | Recognized text of scanned pages as `.t ocr` markup, per page `done`, `pending`, `failed`, `none` or `unavailable`. See "Scanned pages". |
 
 `PDF_VIEWER_ENGINE=reader` makes the routes the extension redirects to
@@ -99,7 +100,7 @@ round-trip delay and a bandwidth limit (`PDFV_VERIFY_RTT_MS`,
   PDFium is not thread-safe, so these only run in worker processes.
 - `daemon/reader.py`: the shell markup, the worker pool, and the cache of
   shells, text ranges and rasters (rasters are evicted least-recently-used
-  above `PDF_VIEWER_RASTER_CACHE_MB`, default 1500).
+  as soon as they exceed `PDF_VIEWER_RASTER_CACHE_MB`, default 1500).
 - `daemon/sources.py`: downloading a remote PDF.
 - `daemon/ocr.py` and `daemon/ocr_vision.swift`: recognition of scanned
   pages (see "Scanned pages").
@@ -178,11 +179,11 @@ selectors in [pdf2htmlex-dom.md](pdf2htmlex-dom.md) hold. The root carries
   numbers) is dispatched on `document`. The root becomes
   `data-reader-text="complete"` when no range is outstanding. The complete
   shell carries `data-reader-text="complete"` and has no pending frames.
-- **`img.bi`** has no `src` in the markup. The raster lifecycle in
-  `overlay-document.js` mounts pages near the viewport and asks for
-  `data-reader-raster` + `<css width × zoom × devicePixelRatio>.png`, so the
-  image is never resampled. After a zoom or resize it keeps the old image,
-  scaled, until the new one has loaded.
+- **`img.bi`** has no `src` in the markup (its `data-pdf2html-src` is a
+  fallback the reader does not use). The raster lifecycle in
+  `overlay-document.js` asks for `data-reader-raster` +
+  `<css width × zoom × devicePixelRatio>.jpg`, so the image is never
+  resampled once sharp; see [Rasters](#rasters).
 - **`.t`** is one line of text, transparent, positioned by its top-left corner.
   Its `font-size` is the line's height on the page. A line is one element so
   that it is one run for native find; a `<br>` ends it so that a copied
@@ -206,6 +207,74 @@ selectors in [pdf2htmlex-dom.md](pdf2htmlex-dom.md) hold. The root carries
 - **Links** are empty anchors above the text. External links are limited to
   `http`, `https` and `mailto`. A press that starts on text makes links ignore
   the pointer until release, so a selection can cross a link.
+
+## Rasters
+
+A page raster is one JPEG of the whole page at its exact device width. The
+overlay (`mountReaderRasters` in `overlay-document.js`) decides which pages
+hold one, from three intersection observers on `#page-container`:
+
+| Band | Margin around the viewport | The page |
+|---|---|---|
+| visible | none | is fetched first |
+| near | one viewport above and below | is fetched at the current width |
+| kept | three viewports | keeps what it has; nothing new is fetched |
+| beyond | | holds the placeholder (released), so decoded rasters stay bounded |
+
+- **First raster.** The overlay keeps `pdfv_vp=<container width>x<pixel
+  ratio>` as a cookie (`overlay.js`). From it, the saved page and the zoom,
+  the shell request (`/r/<hash>/`) works out the URL the overlay will ask
+  for first, exactly as `want` in `overlay-document.js` computes it
+  (`Math.round(cssWidth × (zoom × ratio))`, `.jpg`), starts that render
+  and sends `Link: <…>; rel=preload; as=image`, so the browser's preloaded
+  response is the one the page's image uses. At mount the pages on screen
+  are found by bisection and asked for at once, a frame before the
+  observers report.
+- **Preview.** A page on screen with nothing to show (first open, far
+  jump, scrollbar drag) also gets a raster at half its width, which renders
+  and decodes several times faster; the sharp one replaces it and cancels
+  it if it is still on its way. A page that already shows a raster (zoom)
+  never gets one.
+- **Placeholder, never no source.** A page without a raster holds a 1 px
+  transparent GIF. Chromium can give an image that receives its source
+  while its page is still content-visibility-skipped no layout box when the
+  page comes back on screen a frame later: the raster is loaded and decoded
+  but the page stays white, and waiting does not clear it. Removing `src`
+  to release a raster led there (returning to a pin, history back after a
+  far jump, `raster-no-box` in the scorecard). Going from one image to
+  another does not. `verify-overlay.cjs`, group `paint`, checks it.
+
+- **Order and cap.** At most three raster requests are in flight. Pages on
+  screen go first, then outward from them; a page on screen never waits
+  behind a prefetch (one is cancelled to make room). A far jump through
+  `scrollToPage`/`scrollToPagePoint` asks for the target before the
+  observers have reported.
+- **Swap without a gap.** A raster is fetched and decoded in an off-screen
+  `Image` and only then put into `img.bi`, so a page never shows blank or
+  half-decoded while it already had a raster.
+- **Zoom.** The new zoom is in the next frame with the rasters already
+  loaded, scaled by the browser. Requests for the width just left are
+  cancelled at once; new ones go out when the zoom has been still for
+  120 ms, so a burst of ⌘+ presses asks for one width only.
+- **Cancellation.** Dropping an `Image`'s source aborts its request. The
+  daemon serves rasters from an async route that notices the disconnect,
+  and a render still waiting in the worker queue for a request that went
+  away is dropped (`Reader.raster_release`). A render already running
+  finishes and is cached.
+- **Format.** JPEG quality 90 without chroma subsampling: against the
+  lossless PNG of the same render, 42–53 dB PSNR and under 0.1 % of pixels
+  more than 16 levels apart, at a fifth of the encode time. Highlights and
+  selection are drawn by the browser over the raster, so the format does
+  not touch them.
+- **States.** `data-pdf2html-raster-state` on the `.pf`: `ready` (the raster
+  at the current width is shown), `loading`, `error` (retried when the page
+  comes near again), `unloaded`.
+- **Workers.** Background work (text ranges, OCR preparation) never takes
+  the last free worker, so a raster asked for while a book's text is being
+  extracted, on every first open, starts at once.
+- **Disk.** The daemon counts the raster cache once and then per write, and
+  evicts least-recently-used rasters to 80 % of `PDF_VIEWER_RASTER_CACHE_MB`
+  as soon as a write takes it over.
 
 ## Scanned pages
 

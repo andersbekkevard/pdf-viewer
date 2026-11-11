@@ -146,6 +146,7 @@ export function createDocumentModel(core) {
         // passes; past a few screens, jump.
         var near = Math.abs(top - root.scrollTop) <= 3 * root.clientHeight;
         root.scrollTo({ top: top, behavior: smooth && near ? 'smooth' : 'instant' });
+        if (!near && readerJumped) readerJumped(pf);
         return true;
     }
     // Put a point `y` page px down the page `lead` px below the viewport top.
@@ -157,7 +158,9 @@ export function createDocumentModel(core) {
         var declared = pf ? parseFloat(pf.style.height) : 0;
         if (!root || !extent || !declared) return false;
         var offset = Math.max(0, Math.min(declared, y)) * extent.height / declared;
+        var far = Math.abs(extent.top + offset - root.scrollTop) > root.clientHeight;
         root.scrollTo({ top: Math.max(0, extent.top + offset - (lead || 0)), behavior: 'instant' });
+        if (far && readerJumped) readerJumped(pf);
         return true;
     }
     // The page covering most of the viewport (one-based), or null.
@@ -230,6 +233,7 @@ export function createDocumentModel(core) {
     function mountRasterLifecycle() {
         var root = container();
         if (!root) return;
+        if (isReader()) { mountReaderRasters(root); return; }
         var entries = new Map();
 
         function setState(entry, state) {
@@ -237,40 +241,13 @@ export function createDocumentModel(core) {
                 entry.page.dataset.pdf2htmlRasterState = state;
             }
         }
-        // A reader raster is rendered at the width asked for, so ask for the
-        // page's exact device width: declared CSS width × zoom × pixel ratio.
-        // Anything else has one fixed source.
-        function sourceFor(img) {
-            var base = img.getAttribute('data-reader-raster');
-            if (!base) return img.getAttribute('data-pdf2html-src');
-            var pf = img.closest('.pf');
-            var cssWidth = pf ? parseFloat(pf.style.width) : 0;
-            var zoom = parseFloat(root.style.getPropertyValue('--pdf2html-zoom')) || 1;
-            if (!cssWidth) return img.getAttribute('data-pdf2html-src');
-            return base + Math.max(64, Math.round(cssWidth * zoom * (window.devicePixelRatio || 1))) + '.png';
-        }
-        // After a zoom or resize: keep showing the old raster, scaled, until
-        // the one at the new width has loaded, then swap.
-        function retarget(entry) {
-            if (!entry.mounted) return;
-            entry.images.forEach(function (img) {
-                var want = sourceFor(img);
-                if (img.getAttribute('src') === want) return;
-                if (!img.complete || !img.naturalWidth) { img.setAttribute('src', want); return; }
-                var next = new window.Image();
-                next.onload = function () {
-                    if (entry.mounted && sourceFor(img) === want) img.setAttribute('src', want);
-                };
-                next.src = want;
-            });
-        }
+        function sourceFor(img) { return img.getAttribute('data-pdf2html-src'); }
         function updateState(entry) {
             // Completion of an old request must not revive an exited page.
             if (!entry.mounted) return;
             var ready = true, failed = false;
             entry.images.forEach(function (img) {
-                var fixed = !img.getAttribute('data-reader-raster');
-                if ((fixed ? img.getAttribute('src') !== sourceFor(img) : !img.hasAttribute('src')) || !img.complete) ready = false;
+                if (img.getAttribute('src') !== sourceFor(img) || !img.complete) ready = false;
                 else if (!img.naturalWidth) { ready = false; failed = true; }
             });
             setState(entry, failed ? 'error' : ready ? 'ready' : 'loading');
@@ -323,20 +300,244 @@ export function createDocumentModel(core) {
         }, { root: root, rootMargin: '3500px 0px', threshold: 0 });
         entries.forEach(function (entry) { observer.observe(entry.page); });
 
-        if (!isReader()) return;
-        var timer = null;
-        function retargetAll() {
-            timer = null;
-            entries.forEach(retarget);
-        }
-        // Debounced: a zoom slider drag or window resize fires many changes.
-        function schedule() {
-            if (timer) window.clearTimeout(timer);
-            timer = window.setTimeout(retargetAll, 120);
-        }
-        document.addEventListener('pdf2html-viewport-change', schedule);
-        window.addEventListener('resize', schedule);
     }
+
+    // Reader rasters (daemon/reader.py, docs/reader.md "Rasters"). One JPEG per
+    // page, rendered at the page's exact device width. What a page holds:
+    //
+    //   near (within NEAR_MARGIN of the viewport)  the raster at the current
+    //       width; fetched in order, pages on screen first, at most
+    //       MAX_REQUESTS at a time.
+    //   kept (within KEEP_MARGIN)  whatever it has; nothing new is fetched.
+    //   beyond                      nothing: the image is released, so the
+    //       browser's decoded rasters stay bounded however far one reads.
+    //
+    // A new raster is fetched and decoded off-screen and only then swapped in,
+    // so the page never goes blank or shows a half-decoded image; until then
+    // the old raster stays, scaled by the browser (zoom, resize). After a zoom
+    // the sharp request waits until the zoom has been still for ZOOM_SETTLE_MS,
+    // and requests for a width or page no longer wanted are cancelled at once:
+    // the daemon drops a queued render whose request went away.
+    var NEAR_MARGIN = '100% 0px', KEEP_MARGIN = '300% 0px';
+    // A page without a raster shows this transparent pixel, never no source.
+    // Chromium gives an image that gets its source while its page is still
+    // content-visibility-skipped no layout box when the page is un-skipped a
+    // frame later: the raster is loaded and decoded but the page stays white
+    // until something reattaches the image (seen after a far jump back to a
+    // released page; scripts/verify-overlay.cjs "on-screen pages paint").
+    // Going from one image to another never takes that path.
+    var PLACEHOLDER = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+    var MAX_REQUESTS = 3, ZOOM_SETTLE_MS = 120;
+    // A page on screen with nothing to show (a far jump, a scrollbar drag)
+    // first gets a raster at 1/PREVIEW_DIVISOR of its width, which renders and
+    // decodes several times faster; the sharp one replaces it. 0 disables.
+    var PREVIEW_DIVISOR = 2;
+    function mountReaderRasters(root) {
+        var entries = new Map();
+        var order = [];
+        var inflight = 0;
+        var holdUntil = 0, holdTimer = null, pumpQueued = false;
+        var scale = currentScale();
+
+        function currentScale() {
+            var zoom = parseFloat(root.style.getPropertyValue('--pdf2html-zoom')) || 1;
+            return zoom * (window.devicePixelRatio || 1);
+        }
+        function want(entry, divisor) {
+            return entry.base + Math.max(64, Math.round(entry.cssWidth * scale / (divisor || 1))) + '.jpg';
+        }
+        function setState(entry, state) {
+            if (entry.page.dataset.pdf2htmlRasterState !== state) entry.page.dataset.pdf2htmlRasterState = state;
+        }
+        function updateState(entry) {
+            if (!entry.kept && !entry.near) setState(entry, 'unloaded');
+            else if (entry.shown === want(entry)) setState(entry, 'ready');
+            else if (entry.failed === want(entry)) setState(entry, 'error');
+            else setState(entry, entry.near ? 'loading' : entry.shown ? 'ready' : 'unloaded');
+        }
+        function cancel(entry) {
+            cancelPreview(entry);
+            var job = entry.job;
+            if (!job) return;
+            entry.job = null;
+            inflight -= 1;
+            // Dropping the source aborts the request; its decode() rejects.
+            job.image.removeAttribute('src');
+        }
+        function cancelPreview(entry) {
+            var job = entry.preview;
+            if (!job) return;
+            entry.preview = null;
+            job.image.removeAttribute('src');
+        }
+        function release(entry) {
+            cancel(entry);
+            entry.failed = null;
+            if (entry.img.getAttribute('src') !== PLACEHOLDER) entry.img.setAttribute('src', PLACEHOLDER);
+            entry.shown = null;
+            updateState(entry);
+        }
+        function start(entry, url, preview) {
+            var image = new window.Image();
+            var job = { url: url, image: image };
+            if (preview) entry.preview = job;
+            else { entry.job = job; inflight += 1; }
+            image.src = url;
+            function finish(ok) {
+                if (preview) {
+                    if (entry.preview !== job) return;
+                    entry.preview = null;
+                    // Only into an empty page: never over a sharp or scaled raster.
+                    if (ok && !entry.shown) {
+                        entry.img.setAttribute('src', url);
+                        entry.shown = url;
+                    }
+                    return;
+                }
+                if (entry.job !== job) return;   // cancelled or superseded
+                entry.job = null;
+                inflight -= 1;
+                cancelPreview(entry);
+                if (ok) {
+                    entry.img.setAttribute('src', url);
+                    entry.shown = url;
+                } else {
+                    entry.failed = url;
+                }
+                updateState(entry);
+                schedule();
+            }
+            (image.decode ? image.decode() : new Promise(function (ok, fail) {
+                image.onload = ok; image.onerror = fail;
+            })).then(function () { finish(true); }, function () { finish(!!(image.complete && image.naturalWidth)); });
+        }
+        function visible(entry) { return entry.visible; }
+        // Requests in the order they should go out: pages on screen first, then
+        // outward from them.
+        function pump() {
+            pumpQueued = false;
+            var now = Date.now();
+            if (now < holdUntil) {
+                if (!holdTimer) holdTimer = window.setTimeout(function () { holdTimer = null; pump(); }, holdUntil - now);
+                return;
+            }
+            var anchor = -1;
+            for (var i = 0; i < order.length; i++) if (order[i].visible) { anchor = i; break; }
+            var wanted = [];
+            for (var k = 0; k < order.length; k++) {
+                var entry = order[k];
+                if (!entry.near) continue;
+                var url = want(entry);
+                if (entry.shown === url || entry.failed === url) continue;
+                if (entry.job && entry.job.url === url) continue;
+                wanted.push({ entry: entry, url: url, rank: entry.visible ? -1 : Math.abs(k - anchor) });
+            }
+            wanted.sort(function (a, b) { return a.rank - b.rank; });
+            if (PREVIEW_DIVISOR) {
+                for (var v = 0; v < wanted.length && wanted[v].rank < 0; v++) {
+                    var e = wanted[v].entry;
+                    if (!e.shown && !e.preview && !(e.job && e.job.url === wanted[v].url)) {
+                        start(e, want(e, PREVIEW_DIVISOR), true);
+                    }
+                }
+            }
+            for (var w = 0; w < wanted.length; w++) {
+                var item = wanted[w];
+                if (item.entry.job) cancel(item.entry);   // a stale width
+                if (inflight >= MAX_REQUESTS) {
+                    if (item.rank >= 0) break;
+                    // A page on screen does not wait behind prefetches.
+                    var victim = null;
+                    entries.forEach(function (e) { if (e.job && !e.visible && !victim) victim = e; });
+                    if (!victim) break;
+                    cancel(victim);
+                }
+                start(item.entry, item.url);
+            }
+        }
+        function schedule() {
+            if (pumpQueued) return;
+            pumpQueued = true;
+            Promise.resolve().then(pump);
+        }
+        // The page's width on screen changed (zoom, window, display): the shown
+        // rasters stay, scaled, and requests for the old width are dropped now;
+        // new ones go out once the change has settled.
+        function rescale() {
+            var next = currentScale();
+            if (next === scale) { schedule(); return; }
+            scale = next;
+            holdUntil = Date.now() + ZOOM_SETTLE_MS;
+            entries.forEach(function (entry) {
+                if (entry.job && entry.job.url !== want(entry)) cancel(entry);
+                updateState(entry);
+            });
+            schedule();
+        }
+
+        pages().forEach(function (pf) {
+            var img = pf.querySelector('img.bi[data-reader-raster]');
+            if (!img) return;
+            var entry = {
+                page: pf, img: img, base: img.getAttribute('data-reader-raster'),
+                cssWidth: parseFloat(pf.style.width) || 0,
+                near: false, kept: false, visible: false, shown: null, failed: null, job: null, preview: null,
+            };
+            if (!entry.cssWidth) return;
+            img.setAttribute('src', PLACEHOLDER);
+            entries.set(pf, entry);
+            order.push(entry);
+            setState(entry, 'unloaded');
+        });
+        if (!entries.size) return;
+
+        function observe(margin, apply) {
+            var observer = new window.IntersectionObserver(function (changes) {
+                changes.forEach(function (change) {
+                    var entry = entries.get(change.target);
+                    if (entry) apply(entry, change.isIntersecting);
+                });
+                schedule();
+            }, { root: root, rootMargin: margin, threshold: 0 });
+            entries.forEach(function (entry) { observer.observe(entry.page); });
+        }
+        observe('0px', function (entry, on) { entry.visible = on; });
+        observe(NEAR_MARGIN, function (entry, on) {
+            entry.near = on;
+            if (!on) { cancel(entry); entry.failed = null; }
+            updateState(entry);
+        });
+        observe(KEEP_MARGIN, function (entry, on) {
+            entry.kept = on;
+            if (!on) release(entry);
+        });
+        // The first observer reports come a frame after mounting; the pages on
+        // screen now (found by bisection, frames are in document order) are
+        // asked for at once, which is the first page of a fresh open.
+        (function kick() {
+            var box = root.getBoundingClientRect();
+            var lo = 0, hi = order.length - 1;
+            while (lo < hi) {
+                var mid = (lo + hi) >> 1;
+                if (order[mid].page.getBoundingClientRect().bottom < box.top) lo = mid + 1; else hi = mid;
+            }
+            for (var i = lo; i < order.length && i < lo + 4; i++) {
+                if (order[i].page.getBoundingClientRect().top > box.bottom) break;
+                order[i].near = order[i].kept = order[i].visible = true;
+            }
+            pump();
+        })();
+        // A jump lands before the observers report: ask for the target first.
+        readerJumped = function (pf) {
+            var entry = entries.get(pf);
+            if (!entry || entry.near) return;
+            entry.near = entry.kept = entry.visible = true;
+            pump();
+        };
+        document.addEventListener('pdf2html-viewport-change', rescale);
+        window.addEventListener('resize', rescale);
+    }
+    var readerJumped = null;
 
     return {
         container: container,

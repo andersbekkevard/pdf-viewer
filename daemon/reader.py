@@ -250,7 +250,13 @@ class Reader:
         self._lock = threading.Lock()
         self._building: dict[str, threading.Lock] = {}
         self._sizes: dict[tuple[str, int, int], list[tuple[float, float]]] = {}
-        self._writes = 0
+        # Raster jobs and the cache's byte count. Reentrant: cancelling a
+        # queued render runs its done callback, which takes it again.
+        self._raster_lock = threading.RLock()
+        self._raster_jobs: dict[str, dict] = {}
+        # Bytes in the raster cache: None until counted by the first eviction.
+        self._raster_bytes: int | None = None
+        self._evicting = False
         self._ocr_queue = None
         self._ocr_sources = {}
         self._ocr_generation = {}
@@ -261,6 +267,7 @@ class Reader:
         self._queue: list[tuple] = []
         self._queued = threading.Condition(threading.Lock())
         self._active = 0
+        self._background = 0
         self._sequence = 0
         self._dispatcher: threading.Thread | None = None
 
@@ -293,15 +300,27 @@ class Reader:
             self._queued.notify()
         return future
 
+    def _ready(self) -> bool:
+        """Whether the most urgent queued task may start now. Background work
+        (text ranges, OCR preparation) never takes the last free worker, so a
+        page raster asked for while a book's text is being extracted starts at
+        once instead of waiting for a text task to finish."""
+        if not self._queue or self._active >= self.workers:
+            return False
+        background = self._queue[0][0] >= 1
+        return not background or self.workers < 2 or self._background < self.workers - 1
+
     def _dispatch(self) -> None:
         while True:
             with self._queued:
-                while not (self._queue and self._active < self.workers):
+                while not self._ready():
                     self._queued.wait()
-                _, _, fn, args, future = heapq.heappop(self._queue)
+                priority, _, fn, args, future = heapq.heappop(self._queue)
+                background = priority >= 1
                 self._active += 1
+                self._background += background
             if not future.set_running_or_notify_cancel():
-                self._task_done()
+                self._task_done(background)
                 continue
             try:
                 pool = self.pool()
@@ -313,17 +332,19 @@ class Reader:
                     inner = pool.submit(fn, *args)
             except BaseException as error:  # noqa: BLE001 - handed to the caller
                 future.set_exception(error)
-                self._task_done()
+                self._task_done(background)
                 continue
-            inner.add_done_callback(functools.partial(self._finished, pool, future))
+            inner.add_done_callback(functools.partial(self._finished, pool, future, background))
 
-    def _task_done(self) -> None:
+    def _task_done(self, background: bool = False) -> None:
         with self._queued:
             self._active -= 1
+            self._background -= background
             self._queued.notify()
 
-    def _finished(self, pool, future: concurrent.futures.Future, inner: concurrent.futures.Future) -> None:
-        self._task_done()
+    def _finished(self, pool, future: concurrent.futures.Future, background: bool,
+                  inner: concurrent.futures.Future) -> None:
+        self._task_done(background)
         error = inner.exception()
         if error is None:
             future.set_result(inner.result())
@@ -645,24 +666,78 @@ class Reader:
             self._ocr_queue.forget(f"{hash_}:{generation}")
 
     # --------------------------------------------------------------- rasters
-    def raster(self, hash_: str, pdf: pathlib.Path, page: int, width: int) -> pathlib.Path:
-        """PNG of a 1-based page at a device width, rendered when not cached."""
+    def raster_path(self, hash_: str, pdf: pathlib.Path, page: int, width: int,
+                    fmt: str = "png") -> tuple[pathlib.Path, int]:
+        """Cache path and clamped width of a 1-based page's raster."""
         sizes = self.sizes(pdf)
         if page < 1 or page > len(sizes):
             raise IndexError(page)
+        if fmt not in pdfium_doc.RASTER_FORMATS:
+            raise ValueError(fmt)
         page_width, page_height = sizes[page - 1]
         width = raster_width(page_width, width, page_height)
-        path = self.entry_dir(hash_) / "px" / str(width) / f"{page}.png"
+        return self.entry_dir(hash_) / "px" / str(width) / f"{page}.{fmt}", width
+
+    def raster_job(self, hash_: str, pdf: pathlib.Path, page: int, width: int,
+                   fmt: str = "png", priority: float = 0) -> tuple[concurrent.futures.Future, str | None]:
+        """A future for the raster's cache path, and a key to `raster_release`
+        it with (None when it was already cached).
+
+        Requests for the same raster share one render. A render still queued
+        when every request for it has been released is dropped, so a page
+        the reader has scrolled past or a zoom level already left costs no
+        worker time. `priority` orders queued work (lower first); the default 0
+        runs before text ranges (1) and OCR (2)."""
+        path, width = self.raster_path(hash_, pdf, page, width, fmt)
         if path.is_file():
             try:
                 os.utime(path)
             except OSError:
                 pass
-            return path
-        with self._key_lock(f"px:{hash_}:{width}:{page}"):
-            if path.is_file():
-                return path
-            data = self._run(pdfium_doc.render_png, str(pdf), page - 1, width)
+            done: concurrent.futures.Future = concurrent.futures.Future()
+            done.set_result(path)
+            return done, None
+        key = f"{hash_}:{fmt}:{width}:{page}"
+        with self._raster_lock:
+            job = self._raster_jobs.get(key)
+            if job is None:
+                job = {"done": concurrent.futures.Future(), "waiters": 0}
+                self._raster_jobs[key] = job
+                job["task"] = self._submit(pdfium_doc.render_raster, str(pdf), page - 1, width, fmt,
+                                           priority=priority)
+                job["task"].add_done_callback(functools.partial(self._raster_rendered, key, job, hash_, path))
+            job["waiters"] += 1
+        return job["done"], key
+
+    def raster_release(self, key: str | None) -> None:
+        """One request for the raster is gone (answered or disconnected)."""
+        if key is None:
+            return
+        with self._raster_lock:
+            job = self._raster_jobs.get(key)
+            if job is None:
+                return
+            job["waiters"] -= 1
+            if job["waiters"] > 0 or job["done"].done():
+                return
+            # Future.cancel succeeds only while the task waits in the queue;
+            # a render already running finishes and is cached.
+            if job["task"].cancel():   # its callback forgets the job
+                self._raster_jobs.pop(key, None)
+                job["done"].cancel()
+
+    def _raster_rendered(self, key: str, job: dict, hash_: str, path: pathlib.Path,
+                         task: concurrent.futures.Future) -> None:
+        with self._raster_lock:
+            if self._raster_jobs.get(key) is job:
+                del self._raster_jobs[key]
+        done = job["done"]
+        if task.cancelled():
+            if not done.done():
+                done.cancel()
+            return
+        try:
+            data = task.result()
             if not (self.root / hash_).is_dir():
                 # Deleted while this page rendered: do not bring it back.
                 raise FileNotFoundError(hash_)
@@ -670,16 +745,51 @@ class Reader:
             tmp = path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
             tmp.write_bytes(data)
             tmp.replace(path)
-        self._writes += 1
-        if self._writes % 100 == 0:
+        except BaseException as error:  # noqa: BLE001 - handed to the waiters
+            if not done.done():
+                done.set_exception(error)
+            return
+        self._raster_written(len(data))
+        if not done.done():
+            done.set_result(path)
+
+    def _raster_written(self, size: int) -> None:
+        """Keep the raster cache within its budget: the total is counted once
+        and then tracked per write, and eviction runs as soon as it is over."""
+        with self._raster_lock:
+            if self._raster_bytes is not None:
+                self._raster_bytes += size
+            over = self._raster_bytes is None or self._raster_bytes > self.raster_cache_bytes
+            if over and self._evicting:
+                return
+            self._evicting = over
+        if over:
+            # Off the thread that delivers worker results.
+            threading.Thread(target=self._evict_once, name="reader-evict", daemon=True).start()
+
+    def _evict_once(self) -> None:
+        try:
             self.evict()
-        return path
+        finally:
+            with self._raster_lock:
+                self._evicting = False
+
+    def raster(self, hash_: str, pdf: pathlib.Path, page: int, width: int,
+               fmt: str = "png") -> pathlib.Path:
+        """Cache path of a 1-based page at a device width, rendered when not cached."""
+        future, key = self.raster_job(hash_, pdf, page, width, fmt)
+        try:
+            return future.result()
+        finally:
+            self.raster_release(key)
 
     def evict(self) -> int:
         """Drop least-recently-used rasters until the cache fits its budget."""
         files = []
         total = 0
-        for path in self.root.glob("*/reader/px/*/*.png"):
+        for path in self.root.glob("*/reader/px/*/*"):
+            if path.suffix not in (".png", ".jpg"):
+                continue
             try:
                 stat = path.stat()
             except OSError:
@@ -688,6 +798,8 @@ class Reader:
             total += stat.st_size
         removed = 0
         if total <= self.raster_cache_bytes:
+            with self._raster_lock:
+                self._raster_bytes = total
             return removed
         files.sort()
         target = self.raster_cache_bytes * 0.8
@@ -700,4 +812,6 @@ class Reader:
                 removed += 1
             except OSError:
                 pass
+        with self._raster_lock:
+            self._raster_bytes = total
         return removed
