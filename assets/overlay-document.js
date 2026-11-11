@@ -320,6 +320,10 @@ export function createDocumentModel(core) {
     // the daemon drops a queued render whose request went away.
     var NEAR_MARGIN = '100% 0px', KEEP_MARGIN = '300% 0px';
     var MAX_REQUESTS = 3, ZOOM_SETTLE_MS = 120;
+    // A page on screen with nothing to show (a far jump, a scrollbar drag)
+    // first gets a raster at 1/PREVIEW_DIVISOR of its width, which renders and
+    // decodes several times faster; the sharp one replaces it. 0 disables.
+    var PREVIEW_DIVISOR = 2;
     function mountReaderRasters(root) {
         var entries = new Map();
         var order = [];
@@ -331,8 +335,8 @@ export function createDocumentModel(core) {
             var zoom = parseFloat(root.style.getPropertyValue('--pdf2html-zoom')) || 1;
             return zoom * (window.devicePixelRatio || 1);
         }
-        function want(entry) {
-            return entry.base + Math.max(64, Math.round(entry.cssWidth * scale)) + '.jpg';
+        function want(entry, divisor) {
+            return entry.base + Math.max(64, Math.round(entry.cssWidth * scale / (divisor || 1))) + '.jpg';
         }
         function setState(entry, state) {
             if (entry.page.dataset.pdf2htmlRasterState !== state) entry.page.dataset.pdf2htmlRasterState = state;
@@ -344,11 +348,18 @@ export function createDocumentModel(core) {
             else setState(entry, entry.near ? 'loading' : entry.shown ? 'ready' : 'unloaded');
         }
         function cancel(entry) {
+            cancelPreview(entry);
             var job = entry.job;
             if (!job) return;
             entry.job = null;
             inflight -= 1;
             // Dropping the source aborts the request; its decode() rejects.
+            job.image.removeAttribute('src');
+        }
+        function cancelPreview(entry) {
+            var job = entry.preview;
+            if (!job) return;
+            entry.preview = null;
             job.image.removeAttribute('src');
         }
         function release(entry) {
@@ -358,16 +369,27 @@ export function createDocumentModel(core) {
             entry.shown = null;
             updateState(entry);
         }
-        function start(entry, url) {
+        function start(entry, url, preview) {
             var image = new window.Image();
             var job = { url: url, image: image };
-            entry.job = job;
-            inflight += 1;
+            if (preview) entry.preview = job;
+            else { entry.job = job; inflight += 1; }
             image.src = url;
             function finish(ok) {
+                if (preview) {
+                    if (entry.preview !== job) return;
+                    entry.preview = null;
+                    // Only into an empty page: never over a sharp or scaled raster.
+                    if (ok && !entry.shown) {
+                        entry.img.setAttribute('src', url);
+                        entry.shown = url;
+                    }
+                    return;
+                }
                 if (entry.job !== job) return;   // cancelled or superseded
                 entry.job = null;
                 inflight -= 1;
+                cancelPreview(entry);
                 if (ok) {
                     entry.img.setAttribute('src', url);
                     entry.shown = url;
@@ -403,6 +425,14 @@ export function createDocumentModel(core) {
                 wanted.push({ entry: entry, url: url, rank: entry.visible ? -1 : Math.abs(k - anchor) });
             }
             wanted.sort(function (a, b) { return a.rank - b.rank; });
+            if (PREVIEW_DIVISOR) {
+                for (var v = 0; v < wanted.length && wanted[v].rank < 0; v++) {
+                    var e = wanted[v].entry;
+                    if (!e.shown && !e.preview && !(e.job && e.job.url === wanted[v].url)) {
+                        start(e, want(e, PREVIEW_DIVISOR), true);
+                    }
+                }
+            }
             for (var w = 0; w < wanted.length; w++) {
                 var item = wanted[w];
                 if (item.entry.job) cancel(item.entry);   // a stale width
@@ -443,7 +473,7 @@ export function createDocumentModel(core) {
             var entry = {
                 page: pf, img: img, base: img.getAttribute('data-reader-raster'),
                 cssWidth: parseFloat(pf.style.width) || 0,
-                near: false, kept: false, visible: false, shown: null, failed: null, job: null,
+                near: false, kept: false, visible: false, shown: null, failed: null, job: null, preview: null,
             };
             if (!entry.cssWidth) return;
             if (img.hasAttribute('src')) img.removeAttribute('src');
@@ -473,6 +503,22 @@ export function createDocumentModel(core) {
             entry.kept = on;
             if (!on) release(entry);
         });
+        // The first observer reports come a frame after mounting; the pages on
+        // screen now (found by bisection, frames are in document order) are
+        // asked for at once, which is the first page of a fresh open.
+        (function kick() {
+            var box = root.getBoundingClientRect();
+            var lo = 0, hi = order.length - 1;
+            while (lo < hi) {
+                var mid = (lo + hi) >> 1;
+                if (order[mid].page.getBoundingClientRect().bottom < box.top) lo = mid + 1; else hi = mid;
+            }
+            for (var i = lo; i < order.length && i < lo + 4; i++) {
+                if (order[i].page.getBoundingClientRect().top > box.bottom) break;
+                order[i].near = order[i].kept = order[i].visible = true;
+            }
+            pump();
+        })();
         // A jump lands before the observers report: ask for the target first.
         readerJumped = function (pf) {
             var entry = entries.get(pf);

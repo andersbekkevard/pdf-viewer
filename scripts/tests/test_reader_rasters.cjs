@@ -32,7 +32,11 @@ async function main() {
         get pending() { return 'src' in this.attrs && !!this.resolve && !this.settled; }
         finish(ok = true) { this.settled = true; this.complete = ok; this.naturalWidth = ok ? 1 : 0; ok ? this.resolve() : this.reject(new Error('bad')); }
     }
-    const pending = () => images.filter((i) => i.pending);
+    // Previews are half width: 600 px at zoom 1; sharp requests are the rest.
+    const isPreview = (i) => /\/(600|780|840)\.jpg$/.test(i.src);
+    const all = () => images.filter((i) => i.pending);
+    const pending = () => all().filter((i) => !isPreview(i));
+    const previews = () => all().filter(isPreview);
     const urls = () => pending().map((i) => i.src);
 
     function el(attrs) {
@@ -46,11 +50,17 @@ async function main() {
         const img = el({ 'data-reader-raster': `/r/h/p/${i + 1}/`, 'data-pdf2html-src': `/r/h/p/${i + 1}/1200.png` });
         return {
             id: 'pf' + (i + 1).toString(16), img, dataset: {}, style: { width: '600px' },
+            // Laid out 1000 px apart; the scroller box below starts empty so the
+            // mount-time kick finds nothing and the observers drive this test.
+            getBoundingClientRect: () => ({ top: i * 1000, bottom: i * 1000 + 990 }),
             querySelector: (sel) => (sel.startsWith('img.bi') ? img : null),
         };
     });
     let zoom = '1';
-    const root = { style: { getPropertyValue: () => zoom }, querySelectorAll: () => frames };
+    const root = {
+        style: { getPropertyValue: () => zoom }, querySelectorAll: () => frames,
+        getBoundingClientRect: () => ({ top: -5000, bottom: -4000 }),
+    };
     const html = el({ 'data-pdf2html-representation': 'raster-v1' });
     const listeners = {};
     const document = {
@@ -89,9 +99,17 @@ async function main() {
     await view(9, 11);
     assert.deepEqual(urls().slice(0, 2).sort(), ['/r/h/p/10/1200.jpg', '/r/h/p/11/1200.jpg'], 'pages on screen go first');
     assert.equal(pending().length, 3, 'at most three requests at once');
+    assert.deepEqual(previews().map((i) => i.src).sort(), ['/r/h/p/10/600.jpg', '/r/h/p/11/600.jpg'],
+        'empty pages on screen also get a half-width preview');
     assert.equal(state(9), 'loading');
     assert(!frames[9].img.hasAttribute('src'), 'nothing is shown before it has decoded');
+    previews().find((i) => i.src === '/r/h/p/10/600.jpg').finish();
+    await flush();
+    assert.equal(frames[9].img.getAttribute('src'), '/r/h/p/10/600.jpg', 'the preview fills the empty page');
+    assert.equal(state(9), 'loading', 'a preview is not ready');
     pending().forEach((i) => i.finish());
+    await flush();
+    assert.equal(previews().length, 0, 'the sharp raster cancels a preview still on its way');
     await flush();
     assert.equal(frames[9].img.getAttribute('src'), '/r/h/p/10/1200.jpg');
     assert.equal(state(9), 'ready');
@@ -99,6 +117,7 @@ async function main() {
     pending().forEach((i) => i.finish());
     await flush();
 
+    assert.equal(frames[9].img.getAttribute('src'), '/r/h/p/10/1200.jpg');
     // Zoom burst: the shown raster stays, no request until the zoom has settled,
     // and only the final width is ever requested.
     const before = images.length;
@@ -107,7 +126,7 @@ async function main() {
         listeners['pdf2html-viewport-change']();
         await advance(60);
     }
-    assert.equal(images.length, before, 'no request during the burst');
+    assert.equal(images.length, before, 'no request during the burst, and no preview over a scaled raster');
     assert.equal(frames[9].img.getAttribute('src'), '/r/h/p/10/1200.jpg', 'old raster kept, scaled');
     assert.equal(state(9), 'loading');
     await advance(130);
@@ -129,6 +148,7 @@ async function main() {
     // Far jump: everything near the old place is released, the target goes first.
     await view(29, 30);
     assert.equal(urls()[0], '/r/h/p/30/1680.jpg');
+    assert.deepEqual(previews().map((i) => i.src), ['/r/h/p/30/840.jpg']);
     assert(!frames[9].img.hasAttribute('src'), 'rasters far from the viewport are released');
     assert.equal(state(9), 'unloaded');
     // A late completion of a cancelled request cannot revive a released page.
