@@ -12,6 +12,7 @@ Routes:
     GET    /r/<hash>/           reader shell: PDFium rasters under transparent text
     GET    /r/<hash>/p/<n>/<w>.png  one page rendered at a device width
     GET    /r/<hash>/text/<k>.json  text and link markup of one range of pages
+    GET    /r/<hash>/ocr?pages=1-4&wait=s  recognized text of scanned pages (ocr.py)
     GET    /native?...          the original PDF for a hash, path or url
     GET    /library             cached docs by frecency (overlay :open, ⌘K)
     GET    /cache-urls          redirect rules for the browser extension
@@ -791,7 +792,45 @@ def reader_text(hash_: str, index: int, background: BackgroundTasks):
     except Exception as error:
         raise HTTPException(502, f"could not read text range {index}: {error}") from error
     background.add_task(reader.finish_shell, hash_, pdf, catalog.entry_name(hash_))
-    return JSONResponse({"first": first, "pages": pages}, headers={"Cache-Control": "no-cache"})
+    return JSONResponse({"first": first, "pages": pages, "ocr": [first + i for i, body in enumerate(pages) if getattr(body, "scanned", False)]}, headers={"Cache-Control": "no-cache"})
+
+
+def _page_ranges(spec: str, limit: int) -> list[int]:
+    """"1-4,7" → [1, 2, 3, 4, 7], clipped to 1..limit, at most 512 pages."""
+    pages: list[int] = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        first, _, last = part.partition("-")
+        try:
+            start = int(first)
+            stop = int(last) if last else start
+        except ValueError:
+            raise HTTPException(400, f"bad page range {part!r}")
+        for page in range(max(1, start), min(limit, stop) + 1):
+            pages.append(page)
+            if len(pages) >= 512:
+                return pages
+    return pages
+
+
+@app.get("/r/{hash_}/ocr")
+def reader_ocr(hash_: str, pages: str = "", wait: float = 0.0):
+    """Recognized text of scanned pages (daemon/ocr.py), as `.t ocr` markup.
+
+    `pages` is a range list ("1-4,7"); `wait` (seconds, at most 30) moves
+    those pages to the front of the queue and waits for them. The first call
+    for a document queues all its scanned pages in the background."""
+    pdf = _reader_source(hash_)
+    name = catalog.entry_name(hash_)
+    try:
+        count = len(reader.sizes(pdf))
+        return reader.ocr_status(hash_, pdf, name, _page_ranges(pages, count), max(0.0, min(30.0, wait)))
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(502, f"could not read PDF: {error}") from error
 
 
 @app.get("/r/{hash_}/p/{page}/{width}.png")
@@ -968,6 +1007,7 @@ def delete_mapping(hash_: str):
     """
     was_disabled = catalog.is_disabled(hash_)
     try:
+        reader.ocr_forget(hash_)
         result = catalog.delete(hash_)
     except InvalidCatalogInput as error:
         raise HTTPException(400, str(error)) from error

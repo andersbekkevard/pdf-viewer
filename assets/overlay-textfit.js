@@ -79,5 +79,13 @@ export function createTextFit(core) {
         });
     }
 
-    return { mount: mount };
+    // Lines added to a page after load (overlay-ocr.js): fit the page again.
+    // Segments already fitted get the same spacing.
+    function refit(pf) {
+        if (!context) return;
+        fitted.delete(pf);
+        fitPage(pf);
+    }
+
+    return { mount: mount, refit: refit };
 }

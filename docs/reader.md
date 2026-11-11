@@ -12,8 +12,9 @@ replaces pdf2htmlEX's converted HTML.
 | `GET /read?path=<file>` | Registers the local PDF under its content hash and redirects to `/r/<hash>/`. The file is read in place. |
 | `GET /read?url=<url>`, `GET /read-raw?<url>` | Downloads the PDF once into `<hash>/_source/`, registers it and redirects. |
 | `GET /r/<hash>/` | The reader shell (HTML). Served from `<hash>/reader/shell.html` once all text has been extracted; before that, built per request with text for a few pages (see [Loading](#loading)). |
-| `GET /r/<hash>/text/<k>.json` | Text range `k`: `{"first": 32k+1, "pages": [markup, …]}`, each page's `.t` lines and links. Cached under `<hash>/reader/text/<k>.json`. |
+| `GET /r/<hash>/text/<k>.json` | Text range `k`: `{"first": 32k+1, "pages": [markup, …], "ocr": [page, …]}`, each page's `.t` lines and links. Cached under `<hash>/reader/text/<k>.json`. |
 | `GET /r/<hash>/p/<page>/<width>.png` | One page rendered `width` device pixels wide. Cached under `<hash>/reader/px/<width>/`. |
+| `GET /r/<hash>/ocr?pages=1-4&wait=20` | Recognized text of scanned pages as `.t ocr` markup, per page `done`, `pending`, `failed`, `none` or `unavailable`. See "Scanned pages". |
 
 `PDF_VIEWER_ENGINE=reader` makes the routes the extension redirects to
 (`/view`, `/view-raw`) behave like `/read`, so every PDF opens in the reader.
@@ -33,9 +34,12 @@ An entry opened on demand has no `mappings.tsv` row. Its name and source live in
   shells, text ranges and rasters (rasters are evicted least-recently-used
   above `PDF_VIEWER_RASTER_CACHE_MB`, default 1500).
 - `daemon/sources.py`: downloading a remote PDF.
+- `daemon/ocr.py` and `daemon/ocr_vision.swift`: recognition of scanned
+  pages (see "Scanned pages").
 - Overlay: `overlay-document.js` (raster lifecycle and geometry),
-  `overlay-readertext.js` (text that arrives after the shell),
-  `overlay-textfit.js` (text fitting), `overlay-links.js` (link clicks). The
+  `overlay-readertext.js` (progressive PDFium text),
+  `overlay-textfit.js` (text fitting), `overlay-links.js` (link clicks),
+  `overlay-ocr.js` (recognized text for scanned pages). The
   other overlay modules do not know which engine built the page.
 
 ## Loading
@@ -106,7 +110,7 @@ selectors in [pdf2htmlex-dom.md](pdf2htmlex-dom.md) hold. The root carries
   the complete shell's markup, and `pdf2html-text-ready` (`detail.pages`, page
   numbers) is dispatched on `document`. The root becomes
   `data-reader-text="complete"` when no range is outstanding. The complete
-  shell has none of these attributes.
+  shell carries `data-reader-text="complete"` and has no pending frames.
 - **`img.bi`** has no `src` in the markup. The raster lifecycle in
   `overlay-document.js` mounts pages near the viewport and asks for
   `data-reader-raster` + `<css width × zoom × devicePixelRatio>.png`, so the
@@ -135,6 +139,85 @@ selectors in [pdf2htmlex-dom.md](pdf2htmlex-dom.md) hold. The root carries
 - **Links** are empty anchors above the text. External links are limited to
   `http`, `https` and `mailto`. A press that starts on text makes links ignore
   the pointer until release, so a selection can cross a link.
+
+## Scanned pages
+
+A scanned page has no text objects, so PDFium gives it no text layer. The
+reader recognizes such pages on this Mac with Apple's Vision framework and
+delivers the text afterwards, in the same line format, so selection, copy,
+find and Vimium work on them. Nothing leaves the machine.
+
+**Which pages.** `ocr.needs_ocr`: images cover at least half the page and its
+PDFium text (segment width × line height, summed) covers less than 1.5 % of
+it. A library stamp or page number over a scan does not count as a text
+layer; a producer's invisible OCR layer (render mode 3) does, because PDFium
+returns that text, so such pages are left alone. Pages with no images (blank
+pages, text drawn as outlines) are not recognized. The shell marks recognized
+pages `data-reader-ocr="pending"` on the `.pf`. The decision is made only
+when that page's PDFium range is extracted. Range caches store the decision;
+range responses name scanned pages in `ocr` (1-based), and the overlay marks
+them before announcing text ready. The initial response and complete cached
+shell derive their markers from the same range metadata. Image coverage is
+looked up only for pages that fail the text half of the rule, so born-digital
+documents pay nothing.
+
+**How.** `daemon/ocr_vision.swift` is compiled once with `swiftc` into
+`~/Library/Caches/pdf_viewer/ocr-tool/pdfv-ocr-<source hash>`
+(`PDF_VIEWER_OCR_TOOL_DIR` overrides) and runs as a child process per page:
+`VNRecognizeTextRequest`, accurate, language correction on, automatic
+language detection (revision 3 reads Norwegian Bokmål and Nynorsk). The page
+is rendered in a PDFium worker as a grayscale PNG at 2 px per point, at least
+1600 and at most 2600 px wide, 16 MP at most; accuracy was flat from 1.5 to
+4 px per point on clean renders. Vision's line and per-word boxes are mapped
+to page px, each word's box is shared among its characters along the
+direction the text runs, and `pdfium_doc._build_line` groups them, so a wide
+gap inside a recognized line becomes segments exactly as for PDFium text and
+a skewed baseline breaks into steps. Vision reads text in all four
+orientations itself; its corner points give each line's `dir`. Lines below
+confidence 0.3 and lines lying on the page's own PDFium text are dropped.
+Recognized lines carry the marker class `ocr` (`<div class="t ocr" …>`) and
+are otherwise identical to other lines.
+
+**When.** The shell is served without waiting. `overlay-ocr.js` waits for the
+visible rasters, then asks `GET /r/<hash>/ocr?pages=…&wait=…` for the visible
+pages and then the nearest ones; it inserts the returned lines before the
+page's links, has `overlay-textfit.js` fit the page, and marks it `done`. Each request queues newly discovered scanned pages at background priority
+(utility QoS, two pages at a time, `PDF_VIEWER_OCR_WORKERS`); pages asked for
+with a wait move to the front. Already queued work finishes even after the
+tab closes. A small status pill (bottom right) shows while a visible page is
+being recognized or the document is incomplete, and when a visible page is a
+scan that cannot be recognized.
+
+**Where results live.** `<hash>/reader/ocr/v<OCR_VERSION>/<page>.json`,
+written once per page and never redone while `OCR_VERSION` (in `ocr.py`)
+stays the same and the source path, mtime, size and TEXT_LAYER_VERSION match;
+bump OCR_VERSION when recognition or line building changes. A page
+that fails is reported `failed` and not retried until the daemon restarts.
+
+**Limits.** About 0.6 s per page on this Mac (median over 122 scanned corpus
+pages, render included; the very first Vision call after boot took 12 s while
+its models loaded). Native find sees a page only once its text is in the DOM,
+so a long scanned book is fully findable after its background pass. Highlights
+follow a skewed line in steps, not along the slope. Handwriting is recognized
+roughly. Table columns usually come back as separate lines. Without macOS,
+`swiftc` (Xcode Command Line Tools) or with `PDF_VIEWER_OCR=off`, nothing is
+recognized and the pages behave as before, apart from the status pill.
+
+**Delivery and completion.** OCR retains its separate endpoint because recognition
+is much slower than PDFium extraction and has independent per-page progress.
+Progressive ranges and `readerText.whenLoaded` settle on PDFium extraction alone;
+`data-reader-text="complete"` never waits for OCR. The OCR module discovers
+markers both at mount and on each range insertion, adds lines before links,
+and refits them. Yank waits for PDFium ranges, copies the text currently
+available, and reports how many scanned pages in its scope are still being
+read. It never waits for recognition. The status pill stays below the toast
+and uses the same theme tokens.
+
+PDFium work runs in priority order: visible rasters/shell work, text ranges,
+then OCR raster preparation. Vision runs in bounded child processes outside
+that pool. Entry deletion forgets queued OCR before removing files; a running
+recognition may finish, but its final write is locked against deletion and
+cannot recreate the entry.
 
 ## Rules for overlay code
 

@@ -176,7 +176,7 @@ class ShellMarkupTest(unittest.TestCase):
     def test_complete_shell_has_no_markers(self):
         line = {"x": 0, "y": 0, "h": 10, "segs": [{"t": "x", "w": 5, "gap": 0, "sp": False}]}
         html = reader.build_shell("abc", "T", [(100.0, 100.0)] * 2, [], [[line], []])
-        self.assertNotIn("data-reader-text", html)
+        self.assertIn('data-reader-text="complete"', html)
         self.assertNotIn("data-reader-pending", html)
         self.assertEqual(html.count('class="t"'), 1)
 
@@ -333,8 +333,9 @@ class TextRangeTest(unittest.TestCase):
             # Hold the dispatcher, as if every worker were busy.
             self.reader._active += self.reader.workers
         background = [self.reader._submit(pdfium_doc.page_sizes, str(self.pdf), urgent=False) for _ in range(3)]
+        ocr_task = self.reader._submit(pdfium_doc.page_sizes, str(self.pdf), priority=2)
         urgent = self.reader._submit(pdfium_doc.page_sizes, str(self.pdf))
-        for name, future in [("background", f) for f in background] + [("urgent", urgent)]:
+        for name, future in [("background", f) for f in background] + [("urgent", urgent), ("ocr", ocr_task)]:
             future.add_done_callback(lambda _f, name=name: (lock.acquire(), order.append(name), lock.release()))
         with self.reader._queued:
             # One worker frees up: the urgent task takes it.
@@ -346,7 +347,8 @@ class TextRangeTest(unittest.TestCase):
             self.reader._queued.notify_all()
         for future in background:
             future.result(timeout=30)
-        self.assertEqual(order, ["urgent", "background", "background", "background"])
+        ocr_task.result(timeout=30)
+        self.assertEqual(order, ["urgent", "background", "background", "background", "ocr"])
 
 
 class RouteTest(unittest.TestCase):

@@ -154,6 +154,7 @@ export function createReaderText(core) {
             var pc = documentModel.pageContent(pf);
             if (!pf || !pc || !documentModel.isTextPending(pf)) continue;
             if (markup[i]) pc.insertAdjacentHTML('beforeend', markup[i]);
+            if ((data.ocr || []).indexOf(n) >= 0) pf.setAttribute('data-reader-ocr', 'pending');
             pf.removeAttribute('data-reader-pending');
             done.push(n);
         }

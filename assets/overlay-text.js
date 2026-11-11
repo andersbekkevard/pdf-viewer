@@ -97,10 +97,16 @@ export function createTextInteraction(core) {
     }
 
     // Copy, then say what was copied (or that nothing was).
-    function copy(value, what) {
-        if (!value) { notify('Nothing to copy', { error: true }); return; }
+    function copy(value, what, from, to) {
+        var pendingOcr = 0;
+        for (var n = from || 0; n < (to || 0); n++) {
+            var pf = documentModel.page(n);
+            if (pf && pf.getAttribute("data-reader-ocr") === "pending") pendingOcr++;
+        }
+        var suffix = pendingOcr ? "; " + plural(pendingOcr, "scanned page") + " still being read" : "";
+        if (!value) { notify('Nothing to copy' + suffix, { error: true }); return; }
         writeClip(value).then(function (ok) {
-            if (ok) notify('Copied ' + what);
+            if (ok) notify('Copied ' + what + suffix);
             else notify('Could not copy to the clipboard', { error: true });
         });
     }
@@ -122,19 +128,19 @@ export function createTextInteraction(core) {
     }
     function yankPage() {
         var page = navigation.page();
-        pageRangeText(page, page + 1).then(function (body) { copy(body, 'page ' + page); });
+        pageRangeText(page, page + 1).then(function (body) { copy(body, 'page ' + page, page, page + 1); });
     }
     function yankChapter() {
         var r = navigation.chapterRange(navigation.page());
         if (!r) { notify('This document has no chapters', { error: true }); return; }
         pageRangeText(r.start, r.end).then(function (body) {
-            copy(body ? (r.label ? r.label + '\n\n' : '') + body : '', 'chapter (' + plural(r.end - r.start, 'page') + ')');
+            copy(body ? (r.label ? r.label + '\n\n' : '') + body : '', 'chapter (' + plural(r.end - r.start, 'page') + ')', r.start, r.end);
         });
     }
     function yankDocument() {
         var total = documentModel.totalPages();
         pageRangeText(1, total + 1).then(function (body) {
-            copy(body ? (document.title || 'Document').trim() + '\n\n' + body : '', 'document (' + plural(total, 'page') + ')');
+            copy(body ? (document.title || 'Document').trim() + '\n\n' + body : '', 'document (' + plural(total, 'page') + ')', 1, total + 1);
         });
     }
     // The selection as a quote that says where it is from, for pasting into

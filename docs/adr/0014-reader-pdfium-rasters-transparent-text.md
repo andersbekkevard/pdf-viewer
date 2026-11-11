@@ -113,8 +113,9 @@ scripts, and the manual step on a cache miss.
   match, as before.
 - **Text order is PDFium's.** It is usually reading order; it is not
   guaranteed for multi-column layouts.
-- **Scanned PDFs have no text.** The page still shows; a text source such as
-  OCR could feed the same text-layer format later.
+- **Scanned PDFs have no PDFium text.** On-device OCR (Apple Vision) now
+  feeds the same text-layer format after the shell is served
+  (`docs/reader.md`, "Scanned pages").
 - **The daemon needs `pypdfium2` and Pillow** (wheels, no local build).
 - **Text arrives after the first page on a first open.** Until it has,
   native find and `/` search see only pages that have text; on the largest
