@@ -144,6 +144,7 @@ preparePdf2htmlEx({ document: document, window: window });
         commands.init();
         registerEscapeHandler(commands, finger, settings, sidebar, prefs);
         registerDocumentTabGuard();
+        registerZoomKeys(zoom);
         registerCountedMotions(navigation, text);
         registerArrowKeys(navigation, text, documentModel, sidebar, focus, finger);
         library.load();
@@ -188,6 +189,25 @@ preparePdf2htmlEx({ document: document, window: window });
                 e.preventDefault();
                 e.stopPropagation();
             }
+        }, true);
+    }
+
+    // ⌘/Ctrl with + − 0 zooms the pages, never the browser: browser zoom
+    // scales the sidebar and controls and leaves fit-width pages as they
+    // were. Taken in the capture phase for both engines, so pdf2htmlEX's own
+    // handler does not see the key a second time.
+    function registerZoomKeys(zoom) {
+        var STEP = 0.9;
+        document.addEventListener('keydown', function (e) {
+            if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+            var c = e.code, k = e.key;
+            var zoomIn = k === '+' || k === '=' || c === 'Equal' || c === 'NumpadAdd';
+            var zoomOut = k === '-' || k === '_' || c === 'Minus' || c === 'NumpadSubtract';
+            var reset = k === '0' || c === 'Digit0' || c === 'Numpad0';
+            if (!zoomIn && !zoomOut && !reset) return;
+            e.preventDefault(); e.stopPropagation();
+            if (reset) zoom.set('auto');
+            else zoom.scaleBy(zoomIn ? 1 / STEP : STEP);
         }, true);
     }
 
