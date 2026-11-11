@@ -114,6 +114,28 @@ def get_all(hash_: str) -> dict[str, dict]:
     return {key: {"value": json.loads(value), "ts": ts} for key, value, ts in rows}
 
 
+def positions() -> dict[str, tuple[int, int]]:
+    """hash -> (saved page, ts in ms) for every document with a position.
+
+    One query for the whole store, so the library can show where each
+    document was left without a request per row. Never raises.
+    """
+    out: dict[str, tuple[int, int]] = {}
+    try:
+        with _connect() as conn:
+            rows = conn.execute("SELECT hash, value, ts FROM state WHERE key = 'position'").fetchall()
+    except sqlite3.Error:
+        return out
+    for hash_, encoded, ts in rows:
+        try:
+            page = json.loads(encoded).get("page")
+        except (ValueError, AttributeError):
+            continue
+        if isinstance(page, (int, float)) and not isinstance(page, bool) and page >= 1:
+            out[hash_] = (int(page), int(ts))
+    return out
+
+
 def put(hash_: str, key: str, value: Any, ts: Any) -> dict:
     """Store a value unless a newer one exists; return the stored row."""
     _check_hash(hash_)
