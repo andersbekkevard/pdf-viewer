@@ -77,6 +77,9 @@ are medians of three cold opens (no `<hash>/reader/`) on a running daemon,
 | Raster width at fit-width, 2× display | 1191 px, upscaled | exact device px (2720) |
 | One page raster, 2720 px wide (render + encode) | — | 70–150 ms as PNG; 25–60 ms as JPEG q90 4:4:4 (render 10–40 ms, encode about 13 ms against 60–70 ms), in parallel workers |
 | Text extraction, 1,677-page book | — | 5.4 s CPU over the workers (10.5 s before the per-page work was shared between text and links) |
+| Far jump, legible / sharp (median over 6 documents; Chrome's viewer 44 ms) | — | 46 ms / 74 ms (99 / 99 ms before the raster scheduling of 2026-11-11) |
+| Zoom step, at the new size / sharp (Chrome's viewer 35 ms) | — | 26 ms / 201 ms |
+| Browser memory against Chrome's viewer, 27–127 pages | — | about 1.9× (text layer in the DOM, GPU image cache); `bench/perf/README.md` |
 
 Scorecard over the 57 tier-1 corpus documents present locally
 (`bench/reader/`, 2026-11-10), same documents for both engines:
