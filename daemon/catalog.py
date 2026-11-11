@@ -14,6 +14,8 @@ import pathlib
 import re
 import shutil
 import threading
+import tempfile
+import time
 import urllib.parse
 from typing import Optional, Protocol
 
@@ -227,12 +229,98 @@ class CacheCatalog:
         manifest = dict(current) if current else {"name": self._sanitize_name(name) or hash_}
         source_ref = strip_passthrough(source_ref)
         if source_ref.startswith("/"):
-            # Stored resolved, as lookups compare resolved paths.
-            source_ref = str(pathlib.Path(source_ref).expanduser().resolve())
+            # Keep the lexical path so extension rules match the file URL.
+            source_ref = self.local_path(pathlib.Path(source_ref))
+        refs = list(manifest.get("source_refs", [manifest.get("source_ref")]))
+        refs = [r for r in refs if r]
+        if source_ref not in refs:
+            refs.append(source_ref)
+        if source_ref.startswith("/") or any(r.startswith("/") for r in refs):
+            if len(refs) > 1 or "source_refs" in manifest:
+                manifest["source_refs"] = refs
         manifest["source_ref"] = source_ref
         if manifest != current:
             self._write_manifest(hash_, manifest)
         return manifest
+
+    @staticmethod
+    def local_path(path: pathlib.Path) -> str:
+        # Preserve every symlink component: this is the browser's file URL.
+        path = path.expanduser().absolute()
+        return str(path)
+
+    def local_entry(self, path: pathlib.Path) -> Optional[str]:
+        needle = self.local_path(path)
+        for hash_, manifest in self.manifests().items():
+            if needle in manifest.get("source_refs", [manifest.get("source_ref")]):
+                return hash_
+        return self._mapped_hash_for_path(path)
+
+    @staticmethod
+    def local_stamp(path: pathlib.Path) -> str:
+        st = path.stat()
+        return f"{st.st_dev}:{st.st_ino}:{st.st_size}:{st.st_mtime_ns}:{st.st_ctime_ns}"
+
+    def open_local(self, path: pathlib.Path, validate, inherit) -> tuple[str, str]:
+        """Publish an immutable, parsed snapshot, then move just this path's reference.
+
+        The lock serializes reference/state transfers and GC. PDFium validation
+        is supplied by the adapter and runs in the reader's worker process.
+        """
+        source = self.local_path(path)
+        path = pathlib.Path(source)
+        with self._manifests_lock:
+            before = self.local_stamp(path)
+            previous = self.local_entry(path)
+            old = self.manifests().get(previous, {})
+            if old.get("local_stamps", {}).get(source) == before and self.cached_source(previous):
+                return previous, before
+            self.root.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="_local-", dir=self.root) as scratch:
+                snapshot = pathlib.Path(scratch) / "source.pdf"
+                shutil.copyfile(path, snapshot)
+                time.sleep(0.6)
+                if before != self.local_stamp(path):
+                    raise InvalidCatalogInput("local PDF is still being written; retry shortly")
+                with snapshot.open("rb") as stream:
+                    stream.seek(max(0, snapshot.stat().st_size - 2048))
+                    if b"%%EOF" not in stream.read():
+                        raise InvalidCatalogInput("local PDF is incomplete; retry after saving")
+                pages = validate(snapshot)
+                if not pages:
+                    raise InvalidCatalogInput("local PDF has no pages")
+                if before != self.local_stamp(path):
+                    raise InvalidCatalogInput("local PDF changed during validation; retry shortly")
+                hash_ = self._content_hash(snapshot)
+                target_exists = hash_ in self.mappings()
+                dest = self.root / hash_ / "_source" / "source.pdf"
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                if not dest.exists():
+                    snapshot.replace(dest)
+                if previous and previous != hash_ and not target_exists:
+                    inherit(previous, hash_, len(pages))
+                manifest = self.register(hash_, source, path.stem)
+                # Track each browser-visible local alias independently.
+                refs = list(manifest.get("source_refs", [manifest.get("source_ref")]))
+                if source not in refs:
+                    refs.append(source)
+                manifest.update(source_ref=source, source_refs=refs, pages=len(pages))
+                manifest.setdefault("local_stamps", {})[source] = before
+                self._write_manifest(hash_, manifest)
+                if previous and previous != hash_:
+                    old = dict(old)
+                    refs = [r for r in old.get("source_refs", [old.get("source_ref")]) if r and r != source]
+                    # A legacy TSV reference is an independent source too.
+                    mapping = self._tsv_mappings().get(previous)
+                    if mapping and mapping.source_ref != source and mapping.source_ref not in refs:
+                        refs.append(mapping.source_ref)
+                    if refs:
+                        old.update(source_ref=refs[-1], source_refs=refs)
+                        old.get("local_stamps", {}).pop(source, None)
+                        self._write_manifest(previous, old)
+                    else:
+                        self.delete(previous)
+                return hash_, before
 
     def _content_hash(self, path: pathlib.Path) -> str:
         stat = path.stat()
@@ -244,16 +332,24 @@ class CacheCatalog:
             for chunk in iter(lambda: source.read(1 << 20), b""):
                 digest.update(chunk)
         value = digest.hexdigest()[:16]
+        if len(self._content_hashes) >= 128:
+            self._content_hashes.clear()
         self._content_hashes[key] = value
         return value
 
     def _mapped_hash_for_path(self, path: pathlib.Path) -> Optional[str]:
-        try:
-            needle = str(path.expanduser().resolve(strict=True))
-        except FileNotFoundError:
-            needle = str(path.expanduser())
-        return next((h for h, m in self.mappings().items()
-                     if strip_passthrough(m.source_ref) == needle), None)
+        lexical = self.local_path(path)
+        resolved = str(path.expanduser().resolve())
+        candidates = []
+        for hash_, mapping in self.mappings().items():
+            refs = self.manifests().get(hash_, {}).get("source_refs", [mapping.source_ref])
+            for ref in refs:
+                if ref and ref.startswith("/"):
+                    if ref == lexical:
+                        return hash_
+                    candidates.append((hash_, ref))
+        return next((hash_ for hash_, ref in candidates
+                     if str(pathlib.Path(ref).resolve()) == resolved), None)
 
     def _hash_for_local_path(self, path: pathlib.Path) -> Optional[str]:
         mapped = self._mapped_hash_for_path(path)
@@ -333,6 +429,9 @@ class CacheCatalog:
         exists, else the cached download. None when neither is on disk."""
         if not HASH_RE.fullmatch(hash_ or ""):
             return None
+        cached = self.cached_source(hash_)
+        if cached:
+            return cached
         source_ref = self.source_ref(hash_)
         if source_ref and source_ref.startswith("/"):
             path = pathlib.Path(source_ref)
@@ -411,10 +510,13 @@ class CacheCatalog:
 
     def extension_entries(self) -> list[dict]:
         out = []
+        entries = []
         for hash_, mapping in self.mappings().items():
+            refs = self.manifests().get(hash_, {}).get("source_refs", [mapping.source_ref])
+            entries.extend((hash_, ref) for ref in refs)
+        for hash_, source_ref in entries:
             if self.viewer_href(hash_) is None:
                 continue
-            source_ref = mapping.source_ref
             if source_ref.startswith(("http://", "https://")):
                 parsed = urllib.parse.urlparse(source_ref)
                 out.append({"kind": "url", "host": parsed.netloc.lower(), "path": parsed.path,

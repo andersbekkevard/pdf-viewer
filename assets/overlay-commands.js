@@ -146,6 +146,11 @@ export function createCommandSurface(core) {
     }
 
     var COMMANDS = [
+        { name: 'livereload', aliases: [], usage: 'livereload [on|off]', help: 'Toggle local PDF live reload',
+          handler: function (a) {
+              var on = a === 'on' ? prefs.set('liveReload', true) : a === 'off' ? prefs.set('liveReload', false) : prefs.toggle('liveReload');
+              notify('Local PDF live reload ' + (on ? 'on' : 'off'));
+          } },
         { name: 'page', aliases: ['p'], usage: 'page N', help: 'Go to page N',
           desc: 'goto page N', requiresArg: true,
           handler: function (a) { if (a) navigation.gotoPage(parseInt(a, 10), true); } },

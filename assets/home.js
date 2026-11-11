@@ -341,3 +341,10 @@ window.addEventListener('resize', headHeight);
 window.addEventListener('pageshow', (event) => { if (event.persisted) load(); });
 input.focus();
 load();
+
+// Unknown (extension not yet reporting) is distinct from permission denied.
+fetch('/healthz', { cache: 'no-store' }).then(r => r.json()).then(health => {
+    const hint = document.getElementById('file-access-hint');
+    hint.textContent = health.file_access_hint || '';
+    hint.hidden = !health.file_access_hint;
+}).catch(() => {});

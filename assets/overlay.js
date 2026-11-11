@@ -12,6 +12,7 @@
 // ============================================================================
 
 import { el, isInputTarget } from './overlay-dom.js';
+import { createLiveReload } from './overlay-livereload.js';
 import { createPreferences } from './overlay-prefs.js';
 import { createDocumentState } from './overlay-state.js';
 import { createDocumentModel } from './overlay-document.js';
@@ -140,6 +141,8 @@ preparePdf2htmlEx({ document: document, window: window });
         sidebar.mount();
         pageCounter.mount();
         navigation.init();
+        createLiveReload({ window: window, prefs: prefs, fetch: fetch.bind(window),
+            documentState: documentState, entryHash: entryHash });
         focus.mount();
         commands.init();
         registerEscapeHandler(commands, finger, settings, sidebar, prefs);

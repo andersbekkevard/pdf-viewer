@@ -15,6 +15,7 @@ export function createPreferences(storage) {
     }
     var SPECS = {
         // Keep the caret on the centre line (Vim `scrolloff=999`).
+        liveReload: flag('pdf2html-live-reload', true),
         pinned: flag('pdf2html-pinned', true),
         // Scrolloff band as a fraction of the viewport, 0–0.5.
         scrollOff: {

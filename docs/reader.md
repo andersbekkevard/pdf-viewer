@@ -242,3 +242,57 @@ cannot recreate the entry.
 `bench/reader/` scores the reader against PDFium over the local corpus: opens,
 page count, visual difference, copy exactness, find recall and highlight
 alignment. See its README.
+
+## Local files and live reload
+
+Local opens capture a stable parsed snapshot; the reader never renders a half-written
+original. Tabs poll `/local-file/check` every 1.5 seconds (a stat, no filesystem
+watcher). A changed stamp must persist across two polls before a validated `/read`
+open. Current position, marks and zoom are saved before transferring to the new
+hash and replacing the tab's URL. Invalid/incomplete saves and missing files leave
+the last good view intact and retry. Page numbers clamp when the document shrinks.
+No focus calls or new keyboard handlers are installed. Polling aborts on pagehide,
+resumes on pageshow, and stops entirely when the tab closes. `:livereload off`
+disables it globally for that browser origin; default is on.
+
+The extension reports Chrome's `isAllowedFileSchemeAccess` at worker start and on
+its sync alarm. `/healthz` exposes `file_scheme_access` (null until reported) and
+`file_access_hint`; the library shows that hint when permission is off. Switch on
+**Allow access to file URLs** in the extension settings for automatic file opens.
+A disabled symlink alias is kept as a file URL via the extension navigation signal,
+since Chromium blocks ordinary HTTP-to-file redirects.
+
+### Local lifecycle verification (generated PDFs, November 2026)
+
+Baseline `96d81f4`, isolated daemon on port 7444: a reportlab 4-page file
+rewritten at the same path as 2 pages retained the same hash and state; an
+already-open tab still had 4 page frames after four seconds. No automatic
+revision cleanup occurred, and the old entry remained after opening the changed
+bytes under a renamed path. Thus same-path state was not lost: identity was
+stale. Renamed changed content got a new hash with no continuity. Both raw-file
+and query opens reached the same entry. A disabled symlink returned
+`application/pdf` at the HTTP raw-file route, losing its file URL. After source
+deletion, a fresh request to its reader returned 404. A truncated rewrite returned
+502. Unicode names and a roughly 400-character nested path opened with HTTP 200.
+Baseline load averages were 43.35/21.74/11.43 (initial route probe) and
+21.92/21.21/14.64 (browser probe); these are correctness checks, not benchmarks.
+
+After the change, headless Chromium on the same generated 4→2-page scenario
+retained the tab during an incomplete save and reloaded a complete replacement
+in 4.95–5.13 seconds, clamping position and marks to page 2. Preference off/on,
+zero page errors, and no further polling after tab close passed. Exact proof:
+
+```
+source scripts/lib/playwright.sh
+resolve_playwright
+NODE_PATH="$PW_NODE_PATH" node daemon/tests/verify_local_reload.cjs
+uv run --directory daemon python -m unittest discover -s tests
+scripts/verify-extension.sh
+scripts/verify-vimium.sh --engine reader
+```
+
+The local proof requires an already-running scratch reader on port 7444 (override
+with `PDFV_TEST_BASE`), never the personal daemon. The extension harness passed
+all 9 checks and the real-Vimium harness all 49 checks. Comet and the owner's real
+extension profile were not touched. `smoke-viewer.sh` is deliberately not run:
+it hardcodes the personal cache/port, violating this task's isolation boundary.
