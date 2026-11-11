@@ -365,7 +365,17 @@ async function main() {
     };
 
     // ---- cold open, then warm open in a new tab
+    // A returning browser holds the overlay's viewport cookie (overlay.js
+    // pdfv_vp), from which the daemon preloads the first raster with the shell.
+    // A fresh profile would not, so the trial starts with the value this
+    // window produces; the value the overlay actually writes is recorded.
+    if (spec.engine === 'reader' && spec.viewportCookie) {
+        await context.addCookies([{ name: 'pdfv_vp', value: spec.viewportCookie, url: new URL(spec.readUrl).origin + '/' }]);
+    }
     await open('open_cold', spec.coldMaxMs);
+    if (spec.engine === 'reader') {
+        out.viewportCookieSeen = ((await context.cookies()).find((c) => c.name === 'pdfv_vp') || {}).value || null;
+    }
     await stopScreencast();
     await page.close();
     if (spec.engine === 'reader' && spec.stateResetUrl) {

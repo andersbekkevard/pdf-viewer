@@ -25,7 +25,8 @@ MIN_SCROLL_PAGES = 16
 
 # metric: (label, unit, higher_is_better)
 METRICS = [
-    ("open_cold_ms", "open, cold (ms)", "ms", False),
+    ("open_cold_first_page_ms", "open, cold: first page legible (ms)", "ms", False),
+    ("open_cold_ms", "open, cold: sharp (ms)", "ms", False),
     ("open_warm_ms", "open, warm (ms)", "ms", False),
     ("scroll_settle_ms", "held scroll: last input to crisp (ms)", "ms", False),
     ("scroll_stall_fraction", "held scroll: input periods with no new frame", "frac", False),
@@ -46,6 +47,7 @@ METRICS = [
 # missing change invalidates it.
 PATHS = {
     "open_cold_ms": (("phases", "open_cold", "complete_ms"), "open_cold"),
+    "open_cold_first_page_ms": (("phases", "open_cold", "coarse_ms"), "open_cold"),
     "open_warm_ms": (("phases", "open_warm", "complete_ms"), "open_warm"),
     "scroll_settle_ms": (("phases", "scroll5", "complete_ms"), "scroll5"),
     "scroll_fps": (("phases", "scroll10", "trace", "fps"), None),

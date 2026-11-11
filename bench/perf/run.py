@@ -87,6 +87,9 @@ READER_ZOOM_STEP = round(NATIVE_ZOOM_STEP / 75, 4)
 REGION = {"x0": 0.3, "x1": 0.7, "y0": 0.1, "y1": 0.97}
 WHEEL_DELTA, WHEEL_INTERVAL_MS = 100, 16
 PAGE_GAP_CSS = 8
+# The overlay's viewport cookie for this window (page-container width x DPR,
+# assets/overlay.js), seeded before the reader's cold open: see drive.cjs.
+VIEWPORT_COOKIE = "1289x2"
 
 # Pixel comparison: a pixel differs when its luma differs by more than
 # PIX_THRESHOLD; two frames match when fewer than MATCH_FRACTION of the
@@ -412,6 +415,8 @@ def score_trial(wdir: pathlib.Path, raw: dict, spec: dict) -> dict:
             res["phases"][name]["documents"] = [{k: v for k, v in d.items() if k != "t"} for d in docs
                                                 if t0 - 50 <= d["t"] <= t1]
     res["viewport"] = raw.get("viewport")
+    if raw.get("viewportCookieSeen") and spec.get("viewportCookie") and raw["viewportCookieSeen"] != spec["viewportCookie"]:
+        res["notes"].append(f"viewport cookie seeded {spec['viewportCookie']} but the overlay wrote {raw['viewportCookieSeen']}")
     res["browser_version"] = raw.get("browserVersion")
     res["mode"] = raw.get("mode")
     return res
@@ -432,6 +437,7 @@ METRICS = {
     "open_cold_ms": (("phases", "open_cold", "complete_ms"), "ms"),
     "open_warm_ms": (("phases", "open_warm", "complete_ms"), "ms"),
     "open_cold_first_content_ms": (("phases", "open_cold", "first_content_ms"), "ms"),
+    "open_cold_first_page_ms": (("phases", "open_cold", "coarse_ms"), "ms"),
     "scroll_settle_ms": (("phases", "scroll5", "complete_ms"), "ms"),
     "scroll_fps": (("phases", "scroll10", "trace", "fps"), "fps"),
     "scroll_stall_fraction": (("phases", "scroll10", "trace", "stall_fraction"), "frac"),
@@ -481,6 +487,8 @@ def main() -> int:
                     help="a visible browser window instead of new-headless; it TAKES KEYBOARD FOCUS on the "
                          "desktop it opens on, so never use it while someone works at the machine")
     ap.add_argument("--keep-frames", help="keep screencast frames here (private content!)")
+    ap.add_argument("--no-viewport-cookie", action="store_true",
+                    help="open the reader without the overlay's viewport cookie (no first-raster preload)")
     ap.add_argument("--max-load", type=float, default=12.0,
                     help="wait (up to 2 min) before a trial while the 1-minute load average is above this")
     args = ap.parse_args()
@@ -551,6 +559,7 @@ def main() -> int:
         "pixel_match": {"threshold": PIX_THRESHOLD, "fraction": MATCH_FRACTION,
                         "coarse": {"block": COARSE, "threshold": COARSE_THRESHOLD, "fraction": COARSE_FRACTION}},
         "repeat": args.repeat, "engines": engines,
+        "viewport_cookie": None if args.no_viewport_cookie else VIEWPORT_COOKIE,
         "started": machine_state(),
     }
     results: dict = {"meta": meta, "docs": []}
@@ -596,6 +605,7 @@ def main() -> int:
                     "window": WINDOW, "windowPosition": WINDOW_POSITION, "dpr": DPR, "region": REGION, "jpegQuality": 80,
                     "outDir": str(wdir), "daemonPid": dpid if engine == "reader" else None,
                     "zoomBurst": 4, "zoomBurstIntervalMs": 60,
+                    "viewportCookie": None if args.no_viewport_cookie else VIEWPORT_COOKIE,
                     "quietMs": 1500, "openQuietMs": 2500, "coldMaxMs": 120000, "phaseMaxMs": 30000,
                     "baselineIdleMs": 3000, "idleMs": 3000,
                     "pointer": {"x": WINDOW["width"] // 2, "y": 400},
