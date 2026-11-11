@@ -1277,8 +1277,9 @@ def _first_raster(hash_: str, pdf: pathlib.Path, viewport: Optional[str]) -> Opt
                 raise ValueError
         except (TypeError, ValueError):
             zoom = min(4 / 3, max(0.5, 0.85 * container_width / round(sizes[0][0], 2)))
-        # Widths as the shell declares them (two decimals).
-        return page, max(64, math.floor(round(sizes[page - 1][0], 2) * zoom * ratio + 0.5))
+        # Widths as the shell declares them (two decimals), and the overlay's
+        # arithmetic in its order: Math.round(cssWidth * (zoom * ratio)).
+        return page, max(64, math.floor(round(sizes[page - 1][0], 2) * (zoom * ratio) + 0.5))
     except Exception:
         return None
 
@@ -1292,11 +1293,13 @@ def _prewarm_first_raster(hash_: str, pdf: pathlib.Path, viewport: Optional[str]
 
     def render():
         try:
-            reader.raster(hash_, pdf, page, width)
+            reader.raster(hash_, pdf, page, width, "jpg")
         except Exception:
             pass
     threading.Thread(target=render, daemon=True).start()
-    return f"/r/{hash_}/p/{page}/{width}.png"
+    # Exactly the URL overlay-document.js asks for first (mountReaderRasters,
+    # `want`), so the preloaded response is the one the page's image uses.
+    return f"/r/{hash_}/p/{page}/{width}.jpg"
 
 
 @app.get("/r/{hash_}/")
