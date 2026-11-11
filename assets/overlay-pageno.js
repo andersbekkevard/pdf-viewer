@@ -43,6 +43,14 @@ export function createPageCounter(core) {
     // common "1.2 Title" pattern. The chapter reference goes left and the
     // title right; with only one part, it goes left so the pill stays compact.
     function renderChapter(entry) {
+        var deep = entry;
+        if (entry) {
+            var list = navigation.entries();
+            var rootLi = entry.link.closest('li');
+            while (rootLi && rootLi.parentElement && rootLi.parentElement.closest('li')) rootLi = rootLi.parentElement.closest('li');
+            entry = list.find(function (e) { return e.link.closest('li') === rootLi; }) || entry;
+        }
+        pill.title = deep && deep !== entry ? entry.label + ' · ' + deep.label : (entry ? entry.label : '');
         var label = entry ? entry.label : '';
         var chap = '', sub = '';
         var m = label.match(/^\s*((?:\d+)(?:\.\d+)*)\s+(.*)$/);
@@ -78,7 +86,10 @@ export function createPageCounter(core) {
     function mount() {
         var total = documentModel.totalPages();
         if (!total) return;
-        pill = document.createElement('div');
+        pill = document.createElement('button');
+        pill.type = 'button';
+        pill.setAttribute('aria-label', 'Open pages');
+        pill.addEventListener('click', function () { document.querySelector('[data-tab="thumbs"]').click(); document.body.classList.add('sidebar-shown'); });
         pill.id = 'pdf2html-pageno';
         pill.innerHTML =
             '<span class="side left" hidden><span class="text"></span><span class="sep">·</span></span>' +

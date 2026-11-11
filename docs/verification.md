@@ -54,25 +54,52 @@ blocker, what was attempted, and the exact missing artifact or user action.
 
 ## Overlay smoke test (standard pre-close check for overlay beads)
 
-`scripts/smoke-viewer.sh` is the standard pre-close check for any bead that
-touches `assets/overlay*.js` or `assets/overlay.css`. It is a single command that exits non-zero
-on any failure:
+`scripts/smoke-viewer.sh --reader` is the fast, self-contained pre-close check
+for reader overlay changes. It generates one synthetic page with reportlab
+through `uv`, boots a scratch reader daemon on a free loopback port with its own
+temporary cache and state database, and uses cached Playwright/Chromium headlessly.
+It checks overlay/sidebar boot, native `window.find`, zero console/page errors
+and zero failed overlay asset requests, then stops the daemon and removes the data.
+It never touches the owner's daemon or cache. `PDFV_PORT=7441` requests a particular
+free port; an occupied requested port fails rather than using that daemon.
+
+The existing `scripts/smoke-viewer.sh` without arguments remains the legacy
+pdf2htmlEX check (running daemon on 7435 required). Prefer the isolated
+`scripts/verify-overlay.sh --pdf2htmlex --only smoke` when testing that engine
+without writing to the owner's cache.
+
+## Overlay regression checks
 
 ```bash
-scripts/smoke-viewer.sh
+scripts/verify-overlay.sh                      # self-contained reader, headless
+scripts/verify-overlay.sh --both               # reader then native pdf2htmlEX
+scripts/verify-overlay.sh --pdf2htmlex          # isolated native conversion
+scripts/verify-overlay.sh http://127.0.0.1:7441/r/<hash>/
+PDFV_BASE=http://127.0.0.1:7441 scripts/verify-overlay.sh /<hash>/<file>.light.html
+scripts/verify-overlay.sh --reader --only geometry,navigation,sidebar,commands,search
 ```
 
-It converts `test/fixtures/basic_text.pdf` with the real native pdf2htmlEX
-binary into a temp cache entry, injects the live overlay, and runs headless
-Chromium (the locally-cached Playwright — no repo dependency) against the real
-daemon on `:7435`, asserting: expected `.pf` page count,
-`#pdf2html-pageno-current` present, sidebar DOM present,
-`pdf2htmlEX.defaultViewer.render_timer === null`, `window.find('Normal')`, zero
-console errors, and zero failed `/_assets/` requests. The temp entry is
-trap-cleaned on exit. The daemon must already be up — the script never starts
-it. Run it green before closing an overlay bead; a richer interactive proof
-from the list below is still warranted when the bead changes behavior the smoke
-test does not assert.
+With no target, the harness generates a 160-page version of the outline/link fixture
+from `verify-vimium`, long enough for the jump checks. All scratch data and processes
+are cleaned on exit; no Playwright installation or owner browser profile is used.
+Native pdf2htmlEX must already be installed for `--pdf2htmlex`/`--both`; missing tools
+fail explicitly. Full URLs select their own origin for resets and state requests.
+Cached-document runs reset the target's preferences and per-document state, so use
+a disposable document/cache. They require enough pages, text, outline and internal
+links for the requested groups; absent outline/link cases are explicitly reported.
+
+The shared geometry, navigation, sidebar, commands, search, smoke and interaction
+groups run on both engines. Interaction covers arrows, Space/Shift-Space,
+PageUp/PageDown/Home/End, Cmd-Z/Cmd-Shift-Z, Cmd/Ctrl plus/minus/0 (page width changes
+while sidebar width stays fixed), dark pages, the brief counter, quote copying,
+accessible expiring toasts, and position/zoom/marks restored from daemon state after
+clearing localStorage. Reader-only checks assert transparent text and, on a fresh
+generated document, hold text-range responses until the first raster paints, then
+require all text and `data-reader-text="complete"`. The pdf2htmlEX private runtime
+page/scale and stopped render-loop assertions are marked engine-specific.
+
+These checks exercise trusted Playwright keys without Vimium loaded. They complement
+the real-extension check below and cannot prove Comet, Raycast or native Cmd-F UI.
 
 ## Vimium check
 
@@ -116,7 +143,7 @@ Use the smallest proof that exercises the changed behavior:
   `localhost:7435`, perform the key sequence or pointer action, and confirm the
   visible state with Browser/Playwright screenshot or DOM snapshot.
 - **Overlay behavior (any `assets/overlay*` change)**: run
-  `scripts/verify-overlay.sh <viewer-path>` against a cached document with an
+  `scripts/verify-overlay.sh --both`, or a disposable cached document with an
   outline and internal links (e.g. `/<hash>/<stem>.light.html`), and once
   against a short paper. Groups (`--only geometry,navigation,sidebar,commands,search`)
   cover Vimium-sized steps and zoom (ADR 0012), page and chapter jump landing,
@@ -142,9 +169,16 @@ Use the smallest proof that exercises the changed behavior:
   scripts must not auto-install or auto-build it.
 - **Extension redirect behavior**: run `scripts/verify-extension.sh`, which
   loads a patched copy of the extension in Chromium against a scratch daemon,
-  cache and web origin (open PDF, sign-in-gated PDF, `file://`, disabled
-  entries). Then verify in Comet with the unpacked extension loaded: the
-  script cannot prove the real profile, Vimium or a real sign-in host.
+  cache and web origin (open PDF; sign-in-gated PDF on a new and on a known
+  host, with the time from navigation start to the first raster; gated
+  reopen; a slow transfer through the holding page; HTML instead of a PDF; an
+  HTML page on the gated host; expired session; `file://`; disabled entries;
+  daemon down and back). `PDFV_VERIFY_PORT=<port>` moves the scratch daemon
+  (the origin goes to that port + 1000) when another checkout runs it too;
+  `PDFV_VERIFY_RTT_MS` and `PDFV_VERIFY_MBPS` shape the origin's network
+  (default 60 ms, 100 Mbit/s). Then verify in Comet with the unpacked
+  extension loaded: the script cannot prove the real profile, Vimium, a real
+  sign-in host or its cookie policy.
 - **Reader (`daemon/reader.py`, `daemon/pdfium_doc.py`, reader overlay
   modules)**: `uv run --directory daemon python -m unittest discover -s tests`,
   then `uv run bench/reader/run.py --tier t1 --out <json>` and
@@ -157,6 +191,23 @@ Use the smallest proof that exercises the changed behavior:
   interaction used. Record what the sidebar could and could not access.
 - **Docs-only work**: verify links, command accuracy, `git diff --check`, and
   `br sync --status`.
+
+### Scorecard isolation caveat
+
+The current `bench/reader/run.py` hardcodes both `CACHE` (the owner's cache)
+and `SCRATCH` (`/tmp/pdfv-bench`). A custom `--base` does not change those
+paths: cache-skip/cleanup counts are unreliable for a scratch daemon, and
+concurrent scorecard runs can delete each other's work files. Serialize runs
+and use separate scratch directories when investigating failures. Do not
+interpret a `bench-error` from a missing work file as a viewer regression.
+
+Known scorecard finding (2026-11-10): on documents `8567362c2276` and
+`8abe6308619d`, the unmodified driver can report loaded/decoded rasters with
+zero image bounds and blank screenshots (`raster-no-box`, `blank-page`,
+`visual-diff-high`). A diagnostic delay after hiding benchmark chrome cleared the first document,
+while disabling content visibility in screenshot CSS cleared the second; neither
+intervention cleared both. Layout/paint readiness remains an unresolved known
+finding. Keep the original failures visible rather than relaxing the scorecard. Text/copy/find remain intact.
 
 ## Artifacts
 
@@ -217,3 +268,33 @@ a term on a distant page before and after reload. Measure a fresh browser's
 whole process set together with attributable serving memory; a renderer-only
 number is not the total-memory gate. Report cold and warm usable load through
 mounted controls, fonts, first-page raster readiness and two animation frames.
+
+## Open telemetry and private history
+
+Run `uv run --directory daemon python -m unittest tests/test_opens.py` for
+privacy fields, validated timing updates, SQLite failure isolation and redirect
+correlation. On a scratch daemon, open a fixture in headless Chromium and verify
+one reader attempt plus a timing sample via `/stats`; test a failed open too.
+The owner-cache smoke script is unsuitable for isolated worktree checks because
+it writes the production cache. See `bench/history/README.md` for the isolated
+history replay and its coverage limits.
+
+### Pins, hierarchy and control audit
+
+The overlay harness includes `pins` and `hierarchy` groups. The latter injects a
+2,000-entry synthetic tree before initialization, checks collapse persistence,
+current-branch expansion and top-level counter context, and measures disclosure
+DOM update cost. `PDFV_SCREENSHOTS=/tmp/<existing-directory>` retains generated
+Pins, empty-state, marker and expanded/collapsed outline screenshots. To compare
+keyboard latency against the same generated tree before this change, extract the
+previous sidebar module to a temporary file and set `PDFV_BASELINE_SIDEBAR` to
+that path. The harness reports the median of ten Ctrl-J dispatches with a forced
+outline layout; record host load alongside results.
+
+The real-Vimium harness also sends Ctrl-Shift-P/O with the documented exclusion
+rule, hints and activates pin rows, removal, markers, tabs, thumbnails, disclosure,
+counter, cheatsheet close and Settings controls. Range controls enter Vimium's
+insert mode; blur them before requesting the next hint. OCR notices and current
+toasts carry passive status messages and have no actions to hint; they stay out
+of the hint list. PDF internal/external links retain the existing real-extension
+checks. These proofs use generated PDFs and a disposable browser profile.

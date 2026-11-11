@@ -33,6 +33,17 @@ class StateTestCase(unittest.TestCase):
         self.temp.cleanup()
 
 
+class PinsInheritanceTest(StateTestCase):
+    def test_rewrite_clamps_pin_page_and_preserves_anchor_and_number(self):
+        pins = [{"number": 3, "page": 9, "y": .42, "x": .1, "title": "Return", "ts": 100}]
+        state.put(HASH, "pins", pins, 100)
+        state.inherit_local(HASH, "aabbccddeeff", 4)
+        pin = state.get_all("aabbccddeeff")["pins"]["value"][0]
+        self.assertEqual(pin, dict(pins[0], page=4))
+        state.inherit_local(HASH, "aabbccddeeff", 2)
+        self.assertEqual(state.get_all("aabbccddeeff")["pins"]["value"][0]["page"], 4)
+
+
 class LastWriterWinsTest(StateTestCase):
     def test_empty_hash_has_no_state(self):
         self.assertEqual(state.get_all(HASH), {})

@@ -2,10 +2,14 @@
     {
         "id": 1,
         "priority": 2,
-        "action": { "type": "allow" },
+        "action": {
+            "type": "allow"
+        },
         "condition": {
             "urlFilter": "_pdfvw=passthrough",
-            "resourceTypes": ["main_frame"]
+            "resourceTypes": [
+                "main_frame"
+            ]
         }
     },
     {
@@ -19,8 +23,52 @@
         },
         "condition": {
             "regexFilter": "^https?://.*\\.[Pp][Dd][Ff](?:\\?.*)?$",
-            "resourceTypes": ["main_frame"],
-            "excludedRequestDomains": ["localhost", "127.0.0.1"]
+            "resourceTypes": [
+                "main_frame"
+            ],
+            "excludedRequestDomains": [
+                "localhost",
+                "127.0.0.1"
+            ]
+        }
+    },
+    {
+        "id": 3,
+        "priority": 1,
+        "action": {
+            "type": "redirect",
+            "redirect": {
+                "regexSubstitution": "http://localhost:7435/view-raw?\\0"
+            }
+        },
+        "condition": {
+            "regexFilter": "^https?://.*",
+            "resourceTypes": [
+                "main_frame"
+            ],
+            "requestMethods": [
+                "get"
+            ],
+            "excludedRequestDomains": [
+                "localhost",
+                "127.0.0.1"
+            ],
+            "responseHeaders": [
+                {
+                    "header": "content-type",
+                    "values": [
+                        "application/pdf*"
+                    ]
+                }
+            ],
+            "excludedResponseHeaders": [
+                {
+                    "header": "content-disposition",
+                    "values": [
+                        "attachment*"
+                    ]
+                }
+            ]
         }
     }
 ]

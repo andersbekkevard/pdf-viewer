@@ -9,7 +9,13 @@
  * [::1]:7451, because the extension's static rule excludes localhost and
  * 127.0.0.1. Nothing touches ~/.cache/pdf_viewer or the daemons on 7435–7437.
  *
- * Usage: scripts/verify-extension.sh   (PDFV_CHROMIUM=<binary> to override)
+ * Usage: scripts/verify-extension.sh
+ *   PDFV_CHROMIUM=<binary>   browser to drive
+ *   PDFV_VERIFY_PORT=<port>  scratch daemon port (origin: port + 1000)
+ *   PDFV_VERIFY_RTT_MS, PDFV_VERIFY_MBPS   origin network shape (60, 100)
+ *   PDFV_VERIFY_TARGET_MS    bound on a known-host gated open (1000)
+ *   PDFV_VERIFY_DEBUG=1      print the service worker's console
+ *   PDFV_VERIFY_KEEP=1       keep the scratch directory
  */
 'use strict';
 
@@ -22,14 +28,64 @@ const os = require('os');
 const path = require('path');
 
 const REPO = path.resolve(__dirname, '..');
-const DAEMON_PORT = 7450;
-const ORIGIN_PORT = 7451;
+// PDFV_VERIFY_PORT moves the scratch daemon, and the origin to that port
+// + 1000, so parallel runs in sibling checkouts do not collide. The origin
+// never shares the daemon's port number: Chromium resolves `localhost` to
+// [::1] first, so an origin there would answer the viewer's requests.
+const DAEMON_PORT = Number(process.env.PDFV_VERIFY_PORT || 7450);
+const ORIGIN_PORT = Number(process.env.PDFV_VERIFY_ORIGIN_PORT
+  || (process.env.PDFV_VERIFY_PORT ? DAEMON_PORT + 1000 : 7451));
 const DAEMON = `http://127.0.0.1:${DAEMON_PORT}`;
 const VIEWER = `http://localhost:${DAEMON_PORT}`;
 const ORIGIN = `http://[::1]:${ORIGIN_PORT}`;
 const PDF = fs.readFileSync(path.join(REPO, 'test/fixtures/basic_text.pdf'));
+
+// A 2 MB PDF for the gated document, so the timings include a realistic
+// transfer: ten text pages sharing one uncompressed noise image.
+function makePdf(pages = 10, imageBytes = 2 * 1024 * 1024) {
+  const width = 1024;
+  const height = Math.ceil(imageBytes / (width * 3));
+  const image = require('crypto').randomBytes(width * height * 3);
+  const objects = [];
+  const add = (body) => { objects.push(body); return objects.length; };
+  const catalog = add(null);
+  const tree = add(null);
+  const font = add(Buffer.from('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>'));
+  const img = add(Buffer.concat([
+    Buffer.from(`<< /Type /XObject /Subtype /Image /Width ${width} /Height ${height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length ${image.length} >>\nstream\n`),
+    image, Buffer.from('\nendstream')]));
+  const kids = [];
+  for (let n = 1; n <= pages; n++) {
+    const content = `q 400 0 0 300 106 380 cm /Im1 Do Q BT /F1 24 Tf 72 720 Td (Gated notes page ${n}) Tj ET`;
+    const stream = add(Buffer.from(`<< /Length ${content.length} >>\nstream\n${content}\nendstream`));
+    kids.push(add(Buffer.from(`<< /Type /Page /Parent ${tree} 0 R /MediaBox [0 0 612 792] `
+      + `/Resources << /Font << /F1 ${font} 0 R >> /XObject << /Im1 ${img} 0 R >> >> /Contents ${stream} 0 R >>`)));
+  }
+  objects[catalog - 1] = Buffer.from(`<< /Type /Catalog /Pages ${tree} 0 R >>`);
+  objects[tree - 1] = Buffer.from(`<< /Type /Pages /Kids [${kids.map((k) => `${k} 0 R`).join(' ')}] /Count ${pages} >>`);
+  const parts = [Buffer.from('%PDF-1.4\n%\xe2\xe3\xcf\xd3\n', 'latin1')];
+  const offsets = [];
+  let length = parts[0].length;
+  objects.forEach((body, i) => {
+    offsets.push(length);
+    const chunk = Buffer.concat([Buffer.from(`${i + 1} 0 obj\n`), body, Buffer.from('\nendobj\n')]);
+    parts.push(chunk);
+    length += chunk.length;
+  });
+  const xref = ['xref', `0 ${objects.length + 1}`, '0000000000 65535 f ',
+    ...offsets.map((o) => `${String(o).padStart(10, '0')} 00000 n `)].join('\n');
+  parts.push(Buffer.from(`${xref}\ntrailer\n<< /Size ${objects.length + 1} /Root ${catalog} 0 R >>\nstartxref\n${length}\n%%EOF\n`));
+  return Buffer.concat(parts);
+}
+const GATED_PDF = makePdf();
+// PDFV_VERIFY_BIG_MB=<n> adds an unpaced gated PDF of that size, to check the
+// extension's upload of a large body.
+const BIG_MB = Number(process.env.PDFV_VERIFY_BIG_MB || 0);
+const BIG_PDF = BIG_MB ? makePdf(2, BIG_MB * 1024 * 1024) : null;
 // The daemon's relay gives up after about 20 s of silence; allow a margin.
 const RELAY_BOUND_MS = 25000;
+// Navigation start → first page raster for a gated PDF on a known host.
+const TARGET_MS = Number(process.env.PDFV_VERIFY_TARGET_MS || 1000);
 
 const results = [];
 function check(name, ok, detail = '') {
@@ -86,7 +142,7 @@ function copyExtension(dir) {
     recursive: true,
     filter: (src) => !src.includes(`${path.sep}_metadata`),
   });
-  for (const [file, count] of [['background.js', 2], ['rules.json', 1]]) {
+  for (const [file, count] of [['background.js', 2], ['rules.json', 2]]) {
     const target = path.join(dir, file);
     const text = fs.readFileSync(target, 'utf8');
     const patched = text.replace(/(127\.0\.0\.1|localhost):7435/g, `$1:${DAEMON_PORT}`);
@@ -96,32 +152,86 @@ function copyExtension(dir) {
   }
 }
 
-// The web origin: an open PDF, a PDF behind a session cookie that otherwise
-// answers 200 with a sign-in page, and the login that sets the cookie.
+// Network shape of the scratch origin: every response waits one round trip,
+// and PDF bodies are paced to a bandwidth, so timings resemble a real host
+// rather than loopback. PDFV_VERIFY_RTT_MS=0 PDFV_VERIFY_MBPS=0 turns it off.
+const RTT_MS = Number(process.env.PDFV_VERIFY_RTT_MS ?? 60);
+const MBPS = Number(process.env.PDFV_VERIFY_MBPS ?? 100);
+
+function sendPaced(res, body, mbps = MBPS) {
+  if (!mbps) { res.end(body); return; }
+  const chunk = 64 * 1024;
+  const msPerChunk = (chunk * 8) / (mbps * 1000);
+  let offset = 0;
+  const next = () => {
+    if (offset >= body.length) { res.end(); return; }
+    res.write(body.subarray(offset, offset + chunk));
+    offset += chunk;
+    setTimeout(next, msPerChunk);
+  };
+  next();
+}
+
+// The web origin: an open PDF, PDFs behind a session cookie (signed out, the
+// host redirects to a sign-in page, as an SSO host does), a gated URL that
+// answers HTML even when signed in, an ordinary HTML page on the gated host,
+// and the login and logout that set and clear the cookie.
 function startOrigin(log) {
   const server = http.createServer((req, res) => {
     const signedIn = /(?:^|;\s*)session=ok(?:;|$)/.test(req.headers.cookie || '');
     const url = new URL(req.url, ORIGIN);
-    log.push({ path: url.pathname, signedIn, mode: req.headers['sec-fetch-mode'] || '' });
-    if (url.pathname === '/open/doc.pdf') {
-      res.writeHead(200, { 'Content-Type': 'application/pdf' });
-      res.end(PDF);
-    } else if (url.pathname === '/gated/doc.pdf' && signedIn) {
-      res.writeHead(200, {
-        'Content-Type': 'application/pdf',
-        'Content-Disposition': 'inline; filename="Gated Notes.pdf"',
-      });
-      res.end(PDF);
-    } else if (url.pathname === '/gated/doc.pdf') {
-      res.writeHead(200, { 'Content-Type': 'text/html' });
-      res.end('<!doctype html><title>Sign in</title><form>Sign in to continue</form>');
-    } else if (url.pathname === '/login') {
-      res.writeHead(200, { 'Content-Type': 'text/html', 'Set-Cookie': 'session=ok; Path=/; HttpOnly' });
-      res.end('<!doctype html><title>Signed in</title>signed in');
-    } else {
-      res.writeHead(404);
+    if (url.pathname === '/favicon.ico') {
+      res.writeHead(204);
       res.end();
+      return;
     }
+    log.push({ t: Date.now(), path: url.pathname, signedIn, mode: req.headers['sec-fetch-mode'] || '' });
+    setTimeout(() => {
+      if (url.pathname === '/open/paper/2401.00001v2') {
+        // A PDF whose URL does not say so (arXiv-style): only the type does.
+        res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': PDF.length });
+        sendPaced(res, PDF);
+      } else if (url.pathname === '/open/download/7') {
+        res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': PDF.length,
+          'Content-Disposition': 'attachment; filename="export.pdf"' });
+        sendPaced(res, PDF);
+      } else if (url.pathname === '/open/doc.pdf') {
+        res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': PDF.length });
+        sendPaced(res, PDF);
+      } else if (url.pathname === '/gated/html.pdf' && signedIn) {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end('<!doctype html><title>Unavailable</title>This document is not available');
+      } else if (url.pathname === '/gated/big.pdf' && signedIn && BIG_PDF) {
+        res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': BIG_PDF.length });
+        res.end(BIG_PDF);
+      } else if (/^\/gated\/[\w-]+\.pdf$/.test(url.pathname) && signedIn) {
+        res.writeHead(200, {
+          'Content-Type': 'application/pdf',
+          'Content-Length': GATED_PDF.length,
+          'Content-Disposition': 'inline; filename="Gated Notes.pdf"',
+        });
+        // slow.pdf takes about 3 s, longer than the daemon holds a navigation.
+        sendPaced(res, GATED_PDF, url.pathname === '/gated/slow.pdf' ? 5 : MBPS);
+      } else if (url.pathname.startsWith('/gated/') && url.pathname.endsWith('.pdf')) {
+        res.writeHead(302, { Location: `/sso?next=${encodeURIComponent(url.pathname + url.search)}` });
+        res.end();
+      } else if (url.pathname === '/gated/notes.html') {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end('<!doctype html><title>Notes</title>course notes page');
+      } else if (url.pathname === '/sso') {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end('<!doctype html><title>Sign in</title><form>Sign in to continue</form>');
+      } else if (url.pathname === '/login') {
+        res.writeHead(200, { 'Content-Type': 'text/html', 'Set-Cookie': 'session=ok; Path=/; HttpOnly' });
+        res.end('<!doctype html><title>Signed in</title>signed in');
+      } else if (url.pathname === '/logout') {
+        res.writeHead(200, { 'Content-Type': 'text/html', 'Set-Cookie': 'session=; Path=/; Max-Age=0' });
+        res.end('<!doctype html><title>Signed out</title>signed out');
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    }, RTT_MS);
   });
   return new Promise((resolve, reject) => {
     server.once('error', reject);
@@ -131,7 +241,7 @@ function startOrigin(log) {
 
 async function startDaemon(tmp) {
   const cache = path.join(tmp, 'cache');
-  fs.mkdirSync(cache);
+  fs.mkdirSync(cache, { recursive: true });
   const logPath = path.join(tmp, 'daemon.log');
   const out = fs.openSync(logPath, 'a');
   const child = spawn('uv', ['run', '--directory', path.join(REPO, 'daemon'), 'uvicorn', 'main:app',
@@ -172,6 +282,9 @@ async function launch(profile, extensionDir, executablePath) {
   });
   const worker = context.serviceWorkers()[0]
     || await context.waitForEvent('serviceworker', { timeout: 15000 });
+  if (process.env.PDFV_VERIFY_DEBUG) {
+    worker.on('console', (msg) => console.log(`  [worker ${Date.now() % 100000}] ${msg.text()}`));
+  }
   return { context, worker };
 }
 
@@ -183,8 +296,9 @@ function dynamicRules(worker) {
 // detour through the native viewer.
 function trackCommits(page) {
   const commits = [];
+  commits.times = [];
   page.on('framenavigated', (frame) => {
-    if (frame === page.mainFrame()) commits.push(frame.url());
+    if (frame === page.mainFrame()) { commits.push(frame.url()); commits.times.push(Date.now()); }
   });
   return commits;
 }
@@ -199,7 +313,9 @@ async function gotoLoose(page, url) {
   try {
     await page.goto(url, { waitUntil: 'commit', timeout: 15000 });
   } catch (error) {
-    if (!/ERR_ABORTED|interrupted|frame was detached/i.test(error.message)) throw error;
+    // A dead daemon's refused connection is what the daemon-down checks
+    // provoke; the extension puts the tab back afterwards.
+    if (!/ERR_ABORTED|ERR_CONNECTION_REFUSED|interrupted|frame was detached/i.test(error.message)) throw error;
   }
 }
 
@@ -211,8 +327,30 @@ async function readerReady(page) {
   }).catch(() => false), 15000, 200);
 }
 
+// Epoch ms at which the reader's first page raster finished loading, from
+// the page's own resource timing (independent of the harness's polling).
+async function firstRasterAt(page) {
+  return page.evaluate(() => {
+    const img = document.querySelector('.pf img.bi');
+    if (!img || !img.complete || !img.naturalWidth) return null;
+    const entry = performance.getEntriesByType('resource')
+      .find((e) => /\/p\/1\/\d+\.png$/.test(e.name));
+    return entry ? performance.timeOrigin + entry.responseEnd : null;
+  }).catch(() => null);
+}
+
 function entryDirs(cache) {
   return fs.readdirSync(cache).filter((name) => /^[a-f0-9]{6,32}$/.test(name));
+}
+
+// Requests the origin saw for one path since a time.
+function originHits(log, pathname, since) {
+  return log.filter((r) => r.path === pathname && r.t >= since);
+}
+
+function describe(log, since) {
+  return JSON.stringify(log.filter((r) => r.t >= since)
+    .map((r) => `${r.t - since} ${r.path} ${r.mode || 'daemon'}${r.signedIn ? ' signed-in' : ''}`));
 }
 
 async function main() {
@@ -220,6 +358,7 @@ async function main() {
   // resolved path the daemon stores, not a symlinked spelling of it.
   const tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'pdfv-verify-extension-'));
   const cleanup = [];
+  const timings = {};
   try {
     for (const [port, host] of [[DAEMON_PORT, '127.0.0.1'], [ORIGIN_PORT, '::1']]) {
       if (!(await portFree(port, host))) throw new Error(`port ${port} on ${host} is already in use`);
@@ -231,38 +370,28 @@ async function main() {
     const originLog = [];
     const origin = await startOrigin(originLog);
     cleanup.push(() => new Promise((r) => origin.close(r)));
-    const daemon = await startDaemon(tmp);
-    cleanup.push(async () => {
+    let daemon = await startDaemon(tmp);
+    const stopDaemon = async () => {
       try { process.kill(-daemon.child.pid, 'SIGTERM'); } catch (_) {}
       await sleep(300);
       try { process.kill(-daemon.child.pid, 'SIGKILL'); } catch (_) {}
-    });
+    };
+    cleanup.push(() => stopDaemon());
     const daemonLog = () => fs.readFileSync(daemon.logPath, 'utf8');
+    const gatedHosts = () => {
+      try {
+        return JSON.parse(fs.readFileSync(path.join(daemon.cache, '_gated_hosts.json'), 'utf8')).hosts;
+      } catch (_) {
+        return [];
+      }
+    };
     console.log(`chromium: ${executablePath}`);
     console.log(`scratch: ${tmp}`);
+    console.log(`origin: ${RTT_MS} ms per response, ${MBPS || 'unpaced'} Mbit/s; load ${os.loadavg().map((l) => l.toFixed(1)).join(' ')}`);
 
-    // ---------------------------------------------------------------- signed out
-    // A fresh profile without the session cookie: the extension's fetch gets
-    // the sign-in page, so the tab stays native and nothing is stored.
-    {
-      const { context } = await launch(path.join(tmp, 'profile-signed-out'), extensionDir, executablePath);
-      try {
-        const page = await context.newPage();
-        await gotoLoose(page, `${ORIGIN}/gated/doc.pdf`);
-        const native = await waitFor(() => page.url().includes('_pdfvw=passthrough'), 10000);
-        const answered = await waitFor(() => /reader relay: extension could not fetch/.test(daemonLog()), RELAY_BOUND_MS);
-        await sleep(1000);
-        const stored = entryDirs(daemon.cache);
-        check('signed out: gated PDF stays in the native viewer and nothing is stored',
-          Boolean(native && answered) && page.url().includes('_pdfvw=passthrough') && stored.length === 0,
-          `url ${page.url()}, relay answered ${Boolean(answered)}, cache entries [${stored.join(', ')}]`);
-      } finally {
-        await context.close();
-      }
-    }
-
-    const { context, worker: firstWorker } = await launch(path.join(tmp, 'profile'), extensionDir, executablePath);
-    let worker = firstWorker;
+    const launched = await launch(path.join(tmp, 'profile'), extensionDir, executablePath);
+    const { context } = launched;
+    let worker = launched.worker;
     try {
       const fileRuleReady = await waitFor(async () => (await dynamicRules(worker))
         .some((r) => r.condition.regexFilter && r.condition.regexFilter.startsWith('^file://')), 10000);
@@ -273,7 +402,9 @@ async function main() {
       const errors = [];
       page.on('console', (msg) => { if (msg.type() === 'error') errors.push(msg.text()); });
       page.on('pageerror', (error) => errors.push(String(error)));
+      page.on('response', (resp) => { if (resp.status() >= 400) errors.push(`${resp.status()} ${resp.url()}`); });
       let commits = trackCommits(page);
+      let started = Date.now();
       await gotoLoose(page, `${ORIGIN}/open/doc.pdf`);
       await waitFor(() => isReader(page.url()), 10000);
       const openHash = hashOf(page.url());
@@ -283,32 +414,170 @@ async function main() {
         Boolean(openHash && openReady) && errors.length === 0
           && !commits.some((u) => u.includes('_pdfvw=passthrough')),
         `url ${page.url()}; errors ${JSON.stringify(errors)}`);
-
-      // ------------------------------------------------------------ gated PDF
-      await gotoLoose(page, `${ORIGIN}/login`);
-      errors.length = 0;
-      commits = trackCommits(page);
-      const started = Date.now();
-      await gotoLoose(page, `${ORIGIN}/gated/doc.pdf`);
-      const wentNative = await waitFor(
-        () => commits.some((u) => u.startsWith(`${ORIGIN}/gated/doc.pdf`) && u.includes('_pdfvw=passthrough')), 10000, 20);
-      const swapped = await waitFor(() => isReader(page.url()), RELAY_BOUND_MS);
-      const gatedHash = hashOf(page.url());
-      const gatedReady = gatedHash ? await readerReady(page) : false;
-      const stored = gatedHash ? path.join(daemon.cache, gatedHash, '_source', 'Gated Notes.pdf') : '';
-      check('signed in: gated PDF shows natively, then the same tab swaps to the reader',
-        Boolean(wentNative && swapped && gatedReady) && fs.existsSync(stored),
-        `${Date.now() - started} ms; commits ${JSON.stringify(commits)}; source ${stored ? path.basename(stored) : 'none'}`);
-      check('relayed source came from the browser session (cookie sent by the extension fetch)',
-        originLog.some((r) => r.path === '/gated/doc.pdf' && r.signedIn && r.mode !== 'navigate'),
-        JSON.stringify(originLog.filter((r) => r.path === '/gated/doc.pdf')));
+      check('open PDF is downloaded by the daemon, not through the browser session',
+        originHits(originLog, '/open/doc.pdf', started).every((r) => r.mode === ''),
+        describe(originLog, started));
 
       commits = trackCommits(page);
-      await gotoLoose(page, `${ORIGIN}/gated/doc.pdf`);
+      await gotoLoose(page, `${ORIGIN}/open/paper/2401.00001v2`);
       await waitFor(() => isReader(page.url()), 10000);
-      check('second visit to the gated PDF opens the reader directly',
-        hashOf(page.url()) === gatedHash && !commits.some((u) => u.includes('_pdfvw=passthrough')),
-        `commits ${JSON.stringify(commits)}`);
+      check('a PDF with no .pdf in its URL (content type only) lands in the reader',
+        isReader(page.url()) && await readerReady(page),
+        `url ${page.url()}; commits ${JSON.stringify(commits)}`);
+      commits = trackCommits(page);
+      // Playwright rejects the navigation when it turns into a download.
+      started = Date.now();
+      await page.goto(`${ORIGIN}/open/download/7`, { timeout: 8000 }).catch(() => {});
+      await sleep(1500);
+      check('a PDF sent as an attachment download is left alone',
+        originHits(originLog, '/open/download/7', started).length === 1 && commits.length === 0,
+        `url ${page.url()}; commits ${JSON.stringify(commits)}`);
+
+      await gotoLoose(page, `${ORIGIN}/login`);
+
+      // Opens a gated URL and reports what the tab went through.
+      async function gatedOpen(pathname) {
+        errors.length = 0;
+        commits = trackCommits(page);
+        started = Date.now();
+        await gotoLoose(page, `${ORIGIN}${pathname}`);
+        await waitFor(() => isReader(page.url()), RELAY_BOUND_MS, 20);
+        const hash = hashOf(page.url());
+        const ready = hash ? await readerReady(page) : false;
+        const rasterAt = ready ? await firstRasterAt(page) : null;
+        await sleep(300);
+        const hits = originHits(originLog, pathname, started);
+        return {
+          hash,
+          ready,
+          ms: rasterAt ? Math.round(rasterAt - started) : null,
+          native: commits.some((u) => u.startsWith(ORIGIN)) || hits.some((r) => r.mode === 'navigate'),
+          hits,
+          commits: [...commits],
+          detail: `first raster ${rasterAt ? Math.round(rasterAt - started) : '?'} ms after navigation start; `
+            + `${errors.length ? `console errors ${JSON.stringify(errors)}; ` : ''}`
+            + `commits ${JSON.stringify(commits.map((u, i) => `${commits.times[i] - started} ${u}`))}; `
+            + `origin ${describe(originLog, started)}`,
+        };
+      }
+      const sourceOf = (hash) => {
+        const dir = hash && path.join(daemon.cache, hash, '_source');
+        return dir && fs.existsSync(dir) ? fs.readdirSync(dir).filter((n) => n.endsWith('.pdf')) : [];
+      };
+      const host = new URL(ORIGIN).host;
+
+      // ----------------------------------------------- gated, host not yet known
+      const first = await gatedOpen('/gated/first.pdf');
+      timings.gatedNewHost = first.ms;
+      check('gated first open on a new host goes straight to the reader, never the browser viewer',
+        Boolean(first.hash && first.ready) && !first.native && first.commits.length === 1
+          && sourceOf(first.hash).includes('Gated Notes.pdf') && errors.length === 0,
+        first.detail);
+      check('its bytes came from the browser session (the extension fetch sent the cookie)',
+        first.hits.some((r) => r.signedIn && r.mode === 'cors'),
+        JSON.stringify(first.hits));
+      check('the daemon remembers that the host needs the session', gatedHosts().includes(host),
+        JSON.stringify(gatedHosts()));
+
+      // ------------------------------------------------ gated, host known
+      const known = await gatedOpen('/gated/doc.pdf');
+      timings.gatedKnownHost = known.ms;
+      check(`gated first open on a known host: reader within ${TARGET_MS} ms, no browser viewer, `
+        + 'no cookie-less try',
+        Boolean(known.hash && known.ready) && !known.native && known.ms !== null && known.ms < TARGET_MS
+          && known.hits.every((r) => r.signedIn) && known.hits.length === 1,
+        known.detail);
+
+      // ------------------------------------------------------------- reopen
+      const reopen = await gatedOpen('/gated/doc.pdf');
+      timings.gatedReopen = reopen.ms;
+      check('gated reopen is served from the stored source without touching the host',
+        reopen.hash === known.hash && reopen.ready && !reopen.native && reopen.hits.length === 0,
+        reopen.detail);
+
+      // ------------------------------------------------ suspended worker
+      // MV3 stops an idle service worker after about 30 s. The tab's own
+      // request must wake it in time to claim the open.
+      {
+        const cdp = await context.newCDPSession(page);
+        const extensionWorker = async () => (await cdp.send('Target.getTargets')).targetInfos
+          .find((t) => t.type === 'service_worker' && t.url.startsWith('chrome-extension://'));
+        const sw = await extensionWorker();
+        const stopped = sw && await cdp.send('Target.closeTarget', { targetId: sw.targetId }).then(() => true, () => false);
+        const gone = stopped && await waitFor(async () => !(await extensionWorker()), 3000, 20);
+        if (!gone) {
+          await cdp.detach();
+          skip('a suspended service worker wakes for a gated open', 'could not stop the worker through CDP');
+        } else {
+          const woken = await gatedOpen('/gated/woken.pdf');
+          timings.gatedWokenWorker = woken.ms;
+          await cdp.detach();
+          worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker', { timeout: 15000 });
+          check('a suspended service worker wakes for a gated open and claims it',
+            Boolean(woken.hash && woken.ready) && !woken.native && woken.hits.every((r) => r.signedIn),
+            woken.detail);
+        }
+      }
+
+      // ------------------------------------------------- slow: holding page
+      const slow = await gatedOpen('/gated/slow.pdf');
+      timings.gatedSlow = slow.ms;
+      check('a transfer longer than the hold shows the holding page, then the reader in the same tab',
+        Boolean(slow.hash && slow.ready) && !slow.native && slow.commits.length === 2
+          && /\/view-raw\?/.test(slow.commits[0]) && isReader(slow.commits[1]),
+        slow.detail);
+
+      if (BIG_PDF) {
+        const big = await gatedOpen('/gated/big.pdf');
+        timings.gatedBig = big.ms;
+        const stored = sourceOf(big.hash).length
+          && fs.statSync(path.join(daemon.cache, big.hash, '_source', sourceOf(big.hash)[0])).size;
+        check(`a ${BIG_MB} MB gated PDF goes through the extension's upload intact`,
+          Boolean(big.hash && big.ready) && stored === BIG_PDF.length, `${stored} bytes stored; ${big.detail}`);
+      }
+
+      // --------------------------------------------------- HTML, not a PDF
+      {
+        const before = entryDirs(daemon.cache).length;
+        commits = trackCommits(page);
+        started = Date.now();
+        await gotoLoose(page, `${ORIGIN}/gated/html.pdf`);
+        const landed = await waitFor(() => page.url().startsWith(`${ORIGIN}/gated/html.pdf`), 10000, 50);
+        await sleep(500);
+        const text = await page.evaluate(() => document.body.innerText).catch(() => '');
+        check('a gated URL that answers HTML ends on the site\'s own page, nothing stored',
+          Boolean(landed) && /not available/.test(text) && entryDirs(daemon.cache).length === before
+            && commits.length === 1 && !commits.some(isReader),
+          `url ${page.url()}; commits ${JSON.stringify(commits)}; origin ${describe(originLog, started)}`);
+      }
+
+      // ------------------------------------------- non-PDF page on that host
+      {
+        commits = trackCommits(page);
+        started = Date.now();
+        await gotoLoose(page, `${ORIGIN}/gated/notes.html`);
+        await sleep(500);
+        check('an HTML page on the gated host is untouched',
+          page.url() === `${ORIGIN}/gated/notes.html` && commits.length === 1
+            && originHits(originLog, '/gated/notes.html', started).length === 1,
+          `url ${page.url()}; commits ${JSON.stringify(commits)}`);
+      }
+
+      // ---------------------------------------------------- expired session
+      {
+        await gotoLoose(page, `${ORIGIN}/logout`);
+        const before = entryDirs(daemon.cache).length;
+        commits = trackCommits(page);
+        started = Date.now();
+        await gotoLoose(page, `${ORIGIN}/gated/expired.pdf`);
+        const landed = await waitFor(() => page.url().startsWith(`${ORIGIN}/sso`), 10000, 50);
+        await sleep(1000);
+        const text = await page.evaluate(() => document.body.innerText).catch(() => '');
+        check('expired session: the tab ends on the site\'s sign-in page, no loop, nothing stored',
+          Boolean(landed) && /Sign in/.test(text) && entryDirs(daemon.cache).length === before
+            && commits.length === 1 && originHits(originLog, '/gated/expired.pdf', started).length <= 3,
+          `url ${page.url()}; commits ${JSON.stringify(commits)}; origin ${describe(originLog, started)}`);
+      }
 
       // --------------------------------------------------------- disabled entry
       const disabled = await fetch(`${DAEMON}/entry/${openHash}/disabled`, {
@@ -326,6 +595,11 @@ async function main() {
         disabled.ok && Boolean(allowRule) && page.url().startsWith(`${ORIGIN}/open/doc.pdf`)
           && !commits.some(isReader),
         `allow rule ${Boolean(allowRule)}; url ${page.url()}`);
+      await fetch(`${DAEMON}/entry/${openHash}/disabled`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ disabled: false }),
+      });
 
       // ----------------------------------------------------------- file:// PDF
       const fileAccess = await worker.evaluate(() => chrome.extension.isAllowedFileSchemeAccess());
@@ -360,6 +634,39 @@ async function main() {
           Boolean(off && off.ok && fileAllow) && page.url() === fileUrl && !commits.some(isReader),
           `allow rule ${Boolean(fileAllow)}; url ${page.url()}`);
       }
+
+      // ----------------------------------------------------------- daemon down
+      {
+        await gotoLoose(page, `${ORIGIN}/login`);
+        await stopDaemon();
+        // At once, before the worker's poll has noticed: the tab is put back.
+        commits = trackCommits(page);
+        await gotoLoose(page, `${ORIGIN}/open/doc.pdf`);
+        const back = await waitFor(() => page.url().startsWith(`${ORIGIN}/open/doc.pdf`), 10000, 50);
+        await sleep(500);
+        check('daemon down: an open PDF ends in the browser viewer at its own URL, not an error page',
+          Boolean(back) && page.url().startsWith(`${ORIGIN}/open/doc.pdf`),
+          `url ${page.url()}; commits ${JSON.stringify(commits)}`);
+        // Now the worker knows: no error page in between at all.
+        commits = trackCommits(page);
+        await gotoLoose(page, `${ORIGIN}/gated/new.pdf`);
+        await sleep(1500);
+        check('daemon down: a gated PDF opens natively with no error page in between',
+          page.url().startsWith(`${ORIGIN}/gated/new.pdf`) && commits.length === 1
+            && !commits.some((u) => u.startsWith('chrome-error:')),
+          `url ${page.url()}; commits ${JSON.stringify(commits)}`);
+
+        daemon = await startDaemon(tmp);
+        const recovered = await waitFor(async () => {
+          const rules = await worker.evaluate(() => chrome.declarativeNetRequest.getSessionRules());
+          return rules.length === 0;
+        }, 15000, 200);
+        commits = trackCommits(page);
+        await gotoLoose(page, `${ORIGIN}/gated/doc.pdf`);
+        await waitFor(() => isReader(page.url()), 10000);
+        check('daemon back: redirects resume', Boolean(recovered) && isReader(page.url()),
+          `url ${page.url()}; commits ${JSON.stringify(commits)}`);
+      }
     } finally {
       await context.close();
     }
@@ -369,8 +676,11 @@ async function main() {
     for (const step of cleanup.reverse()) {
       try { await step(); } catch (_) {}
     }
-    fs.rmSync(tmp, { recursive: true, force: true });
+    if (process.env.PDFV_VERIFY_KEEP) console.log(`kept ${tmp}`);
+    else fs.rmSync(tmp, { recursive: true, force: true });
   }
+  console.log(`timings (ms, navigation start → first raster): ${JSON.stringify(timings)}; `
+    + `load ${os.loadavg().map((l) => l.toFixed(1)).join(' ')}`);
   const failed = results.filter((ok) => !ok).length;
   console.log(failed ? `FAIL ${failed} of ${results.length} checks` : `PASS all ${results.length} checks`);
   process.exit(failed ? 1 : 0);

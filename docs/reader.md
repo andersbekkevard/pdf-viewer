@@ -26,6 +26,73 @@ An entry opened on demand has no `mappings.tsv` row. Its name and source live in
 `<hash>/entry.json`, and `CacheCatalog.mappings()` merges both
 ([cache.md](cache.md)).
 
+## Sign-in-gated sources
+
+The extension sends a navigation to the daemon when its URL ends in `.pdf` or when the
+response is `application/pdf` (URLs such as arXiv's `/pdf/<id>` say nothing in the path);
+a PDF sent as an attachment download is left alone. With the reader engine the Raycast
+convert command does the same for the active tab instead of running pdf2htmlEX.
+
+The daemon's own download carries no cookies, so a host behind a sign-in
+answers it with a sign-in page. With extension 0.4.0 or later such a URL still
+goes from the link straight to the reader, with no browser PDF viewer in
+between:
+
+1. A redirect rule sends the tab to `/view-raw?<url>`. The daemon has no
+   source for it and holds the response open.
+2. The extension's service worker sees the same request (`webRequest`,
+   observe-only, main frame), which also wakes it if it was suspended, and asks
+   `POST /extension/open {"url": ...}` whether the daemon wants the browser's
+   bytes.
+3. For a host recorded in `_gated_hosts.json` the daemon wants them at once.
+   For any other host it first tries its own download; a PDF from that opens
+   the reader as before and the extension is told no.
+4. A yes claims the open. The worker fetches exactly the URL its tab is
+   navigating to, with `credentials: 'include'`, checks that the bytes start
+   with `%PDF`, and streams them to `PUT /extension/open/<id>?offset=<n>` in
+   4 MB pieces as they arrive, the last with `&done=1`. Neither side holds the
+   whole file: a worker that buffered 300 MB was killed by Chromium
+   mid-upload. The daemon appends the pieces to a temporary file in
+   `_source/`, moves it into place as `_source/<name>.pdf`, registers the
+   entry, records the host as gated when its own download had failed, and
+   answers the held request with a 307 to `/r/<hash>/`.
+5. A transfer still running after 2 s gets a holding page instead (a
+   no-store page at the same `/view-raw` URL, with a link to the original).
+   It long-polls `GET /extension/open/<id>` and replaces itself with the
+   reader, or with the fallback below.
+
+Every failure ends on the original URL with the passthrough marker, which the
+static allow rule lets through: a sign-in page (expired session) or other
+HTML, an HTTP error, a fetch error, a gap in the pieces or an upload that
+makes no progress for 60 s lead to the site's own page, and a PDF the daemon
+could not store opens in the browser's viewer. An open nobody claims within 1 s (an extension before 0.4.0, or none)
+falls back to the older relay: the browser's viewer first, then the extension
+hands the tab's bytes over and the tab swaps to the reader. The daemon waits
+for a claim only while an extension long-polls with `open=1`; otherwise it
+falls back at once.
+
+The extension fetches only a URL its own tab is navigating to, and the daemon
+accepts bytes only for an open it is holding. The claim is a JSON `POST` and
+the upload a `PUT`, which a web page cannot send to the daemon cross-origin.
+The session cookies stay in the browser; the daemon, bound to 127.0.0.1, sees
+only the PDF bytes.
+
+A reopen of the same host and path is served from the stored source without
+contacting the host. The daemon does not check whether the host's PDF has
+changed since: rasters and text are cached under the URL's hash, so a
+refreshed source would need a new entry identity.
+
+While the daemon is unreachable the worker installs a session rule that allows
+every main-frame request ahead of the redirect rules, so PDFs open in the
+browser's viewer instead of a connection-error page. A tab sent to the dead
+port before the worker noticed is put back on its original URL. The rule is
+removed as soon as `/healthz` answers again.
+
+`scripts/verify-extension.sh` measures the time from navigation start to the
+first page raster for these opens against a scratch origin that imposes a
+round-trip delay and a bandwidth limit (`PDFV_VERIFY_RTT_MS`,
+`PDFV_VERIFY_MBPS`).
+
 ## Modules
 
 - `daemon/pdfium_doc.py`: every PDFium call. Page sizes, outline, metadata,
@@ -285,3 +352,57 @@ cannot recreate the entry.
 `bench/reader/` scores the reader against PDFium over the local corpus: opens,
 page count, visual difference, copy exactness, find recall and highlight
 alignment. See its README.
+
+## Local files and live reload
+
+Local opens capture a stable parsed snapshot; the reader never renders a half-written
+original. Tabs poll `/local-file/check` every 0.5 seconds (a stat, no filesystem
+watcher). A changed stamp must persist across two polls before a validated `/read`
+open. Current position, marks and zoom are saved before transferring to the new
+hash and replacing the tab's URL. Invalid/incomplete saves and missing files leave
+the last good view intact and retry. Page numbers clamp when the document shrinks.
+No focus calls or new keyboard handlers are installed. Polling aborts on pagehide,
+resumes on pageshow, and stops entirely when the tab closes. `:livereload off`
+disables it globally for that browser origin; default is on.
+
+The extension reports Chrome's `isAllowedFileSchemeAccess` at worker start and on
+its sync alarm. `/healthz` exposes `file_scheme_access` (null until reported) and
+`file_access_hint`; the library shows that hint when permission is off. Switch on
+**Allow access to file URLs** in the extension settings for automatic file opens.
+A disabled symlink alias is kept as a file URL via the extension navigation signal,
+since Chromium blocks ordinary HTTP-to-file redirects.
+
+### Local lifecycle verification (generated PDFs, November 2026)
+
+Baseline `96d81f4`, isolated daemon on port 7444: a reportlab 4-page file
+rewritten at the same path as 2 pages retained the same hash and state; an
+already-open tab still had 4 page frames after four seconds. No automatic
+revision cleanup occurred, and the old entry remained after opening the changed
+bytes under a renamed path. Thus same-path state was not lost: identity was
+stale. Renamed changed content got a new hash with no continuity. Both raw-file
+and query opens reached the same entry. A disabled symlink returned
+`application/pdf` at the HTTP raw-file route, losing its file URL. After source
+deletion, a fresh request to its reader returned 404. A truncated rewrite returned
+502. Unicode names and a roughly 400-character nested path opened with HTTP 200.
+Baseline load averages were 43.35/21.74/11.43 (initial route probe) and
+21.92/21.21/14.64 (browser probe); these are correctness checks, not benchmarks.
+
+After the change, headless Chromium on the same generated 4→2-page scenario
+retained the tab during an incomplete save and reloaded a complete replacement
+in 4.95–5.13 seconds, clamping position and marks to page 2. Preference off/on,
+zero page errors, and no further polling after tab close passed. Exact proof:
+
+```
+source scripts/lib/playwright.sh
+resolve_playwright
+NODE_PATH="$PW_NODE_PATH" node daemon/tests/verify_local_reload.cjs
+uv run --directory daemon python -m unittest discover -s tests
+scripts/verify-extension.sh
+scripts/verify-vimium.sh --engine reader
+```
+
+The local proof requires an already-running scratch reader on port 7444 (override
+with `PDFV_TEST_BASE`), never the personal daemon. The extension harness passed
+all 9 checks and the real-Vimium harness all 49 checks. Comet and the owner's real
+extension profile were not touched. `smoke-viewer.sh` is deliberately not run:
+it hardcodes the personal cache/port, violating this task's isolation boundary.

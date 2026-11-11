@@ -281,13 +281,14 @@ class RawFileRouteTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp) / "cache"
             pdf = pathlib.Path(tmp) / "My Notes.pdf"
-            pdf.write_bytes(b"%PDF-1.4 local")
+            from test_reader import LINKS_PDF
+            pdf.write_bytes(LINKS_PDF)
             query = pdf.resolve().as_uri().encode()
             with patch.object(main, "catalog", CacheCatalog(root)), \
                     patch.dict("os.environ", {"PDF_VIEWER_ENGINE": "reader"}):
                 response = main.view_file_raw(raw_request(query), BackgroundTasks())
                 self.assertEqual(response.status_code, 307)
-                self.assertRegex(response.headers["location"], r"^/r/[a-f0-9]{16}/$")
+                self.assertRegex(response.headers["location"], r"^/r/[a-f0-9]{16}/\?local=")
             with patch.object(main, "catalog", CacheCatalog(root)), \
                     patch.dict("os.environ", {"PDF_VIEWER_ENGINE": "pdf2htmlex"}):
                 response = main.view_file_raw(raw_request(query), BackgroundTasks())

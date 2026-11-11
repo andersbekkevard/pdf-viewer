@@ -23,8 +23,8 @@ export function createCommandSurface(core) {
     var KEY_SECTIONS = [
         { title: 'Viewer', rows: [
             [[['⌘', '.'], ['⌘', 'B']], 'Toggle sidebar'],
-            [[['Ctrl', 'J'], ['Ctrl', 'K'], ['↓'], ['↑']], 'Sidebar: move Outline / Pages selector; Enter jumps'],
-            [[['←', 'h'], ['→', 'l']], 'Sidebar: Outline / Pages tab (when open)'],
+            [[['Ctrl', 'J'], ['Ctrl', 'K'], ['↓'], ['↑']], 'Sidebar: move Outline / Pages / Pins selector; Enter jumps'],
+            [[['←', 'h'], ['→', 'l']], 'Outline: collapse / expand branch; Ctrl-←/→ switches tabs'],
             [[['e'], ['q'], ['E']], 'Next / prev page (count prefix: 10e); a selection extends pagewise'],
             [[['→'], ['←']], 'Next / prev page (sidebar closed)'],
             [[['↓'], ['↑']], 'Scroll'],
@@ -32,6 +32,7 @@ export function createCommandSurface(core) {
             [[['⌘', '+'], ['⌘', '−'], ['⌘', '0']], 'Zoom in / out / back to fit-width'],
             [[['⌘', 'Z'], ['⌘', '⇧', 'Z']], 'Back to before the last jump / forward again'],
             [[['Space'], ['⇧', 'Space']], 'Scroll one screen down / up'],
+            [[['Ctrl', '⇧', 'P'], ['Ctrl', '⇧', 'O']], 'Drop pin / return to latest pin'],
             [[['⌘', '⇧', '.']], 'Toggle page counter'],
         ] },
         { title: 'Modes', rows: [
@@ -56,6 +57,7 @@ export function createCommandSurface(core) {
         var bg = document.createElement('div');
         bg.id = 'pdf2html-cheatsheet';
         bg.innerHTML = cheatsheetHTML();
+        bg.querySelector('.close').addEventListener('click', closeHelp);
         bg.addEventListener('click', function (ev) { if (ev.target === bg) bg.remove(); });
         document.body.appendChild(bg);
     }
@@ -86,8 +88,8 @@ export function createCommandSurface(core) {
         return '<div id="pdf2html-cheatsheet-panel">'
             + '<div class="pdf2html-cheatsheet-head">'
             +   '<div><div class="title">Keyboard reference</div><div class="subtitle">pdf_viewer</div></div>'
-            +   '<span class="close"><span class="pdf2html-kbd sm">?</span> or '
-            +     '<span class="pdf2html-kbd sm">Esc</span> to close</span>'
+            +   '<button type="button" class="close" aria-label="Close keyboard reference"><span class="pdf2html-kbd sm">?</span> or '
+            +     '<span class="pdf2html-kbd sm">Esc</span> to close</button>'
             + '</div>'
             + '<div class="pdf2html-cheatsheet-body" tabindex="-1">'
             +   '<div class="pdf2html-cheatsheet-section">' + keys + '</div>'
@@ -146,6 +148,16 @@ export function createCommandSurface(core) {
     }
 
     var COMMANDS = [
+        { name: 'pin', aliases: [], usage: 'pin [1-9]', help: 'Drop a return pin, or jump to its number',
+          requiresArg: true, handler: function (a) { if (a) core.pins.jump(a.trim()); else core.pins.drop(); } },
+        { name: 'unpin', aliases: [], usage: 'unpin N', help: 'Remove a return pin',
+          requiresArg: true, handler: function (a) { core.pins.remove(a); } },
+        { name: 'pins', aliases: [], usage: 'pins', help: 'Open the Pins sidebar', handler: function () { core.showPins(); } },
+        { name: 'livereload', aliases: [], usage: 'livereload [on|off]', help: 'Toggle local PDF live reload',
+          handler: function (a) {
+              var on = a === 'on' ? prefs.set('liveReload', true) : a === 'off' ? prefs.set('liveReload', false) : prefs.toggle('liveReload');
+              notify('Local PDF live reload ' + (on ? 'on' : 'off'));
+          } },
         { name: 'page', aliases: ['p'], usage: 'page N', help: 'Go to page N',
           desc: 'goto page N', requiresArg: true,
           handler: function (a) { if (a) navigation.gotoPage(parseInt(a, 10), true); } },
@@ -193,7 +205,7 @@ export function createCommandSurface(core) {
               var mark = navigation.clearMark(a);
               notify(mark ? 'Mark ' + mark.letter + ' cleared' : 'No such mark', { error: !mark });
           } },
-        { name: 'pin', aliases: [], usage: 'pin', help: 'Toggle pin-to-center',
+        { name: 'cursorpin', aliases: [], usage: 'cursorpin', help: 'Toggle cursor pin-to-center',
           desc: function () { return 'turn pin-to-center ' + onOff(prefs.get('pinned')); },
           handler: function () { prefs.toggle('pinned'); } },
         { name: 'scrolloff', aliases: ['so'], usage: 'scrolloff N', help: 'Scrolloff band at N% (0–50)',

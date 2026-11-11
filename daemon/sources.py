@@ -107,3 +107,52 @@ def download(url: str, target_dir: pathlib.Path) -> str:
                     directory.rmdir()
                 except OSError:
                     pass
+
+
+class Upload:
+    """A PDF arriving in pieces (the extension's chunked upload) into
+    target_dir. The first bytes must be `%PDF`; the whole stays under
+    MAX_BYTES. Nothing is visible under target_dir until finish(); abort()
+    removes the partial file and any directory this upload created."""
+
+    def __init__(self, target_dir: pathlib.Path, tag: str):
+        self.target_dir = target_dir
+        self.size = 0
+        self._created = [d for d in (target_dir.parent, target_dir) if not d.exists()]
+        self._tmp = target_dir / f".upload.{tag}.{os.getpid()}.tmp"
+        self._head = b""
+        self.aborted = False
+
+    def append(self, chunk: bytes) -> None:
+        if self.aborted:
+            raise SourceError("upload abandoned")
+        if len(self._head) < 4:
+            self._head += chunk[:4 - len(self._head)]
+            if len(self._head) >= 4 and self._head != b"%PDF":
+                raise SourceError("bytes are not a PDF (a sign-in page?)")
+        if self.size + len(chunk) > MAX_BYTES:
+            raise SourceError("source larger than 512 MB")
+        self.target_dir.mkdir(parents=True, exist_ok=True)
+        with self._tmp.open("ab") as out:
+            out.write(chunk)
+        self.size += len(chunk)
+
+    def finish(self, url: str, content_disposition: str) -> str:
+        if self._head != b"%PDF":
+            self.abort()
+            raise SourceError("bytes are not a PDF (a sign-in page?)")
+        name = filename_for(url, content_disposition)
+        self._tmp.replace(self.target_dir / name)
+        return name
+
+    def abort(self) -> None:
+        self.aborted = True
+        try:
+            self._tmp.unlink()
+        except OSError:
+            pass
+        for directory in reversed(self._created):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass

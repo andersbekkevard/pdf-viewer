@@ -1,3 +1,4 @@
+import './overlay-timing.js';
 // ============================================================================
 // pdf_viewer overlay — runtime layer on top of pdf2htmlEX's output.
 //
@@ -12,6 +13,7 @@
 // ============================================================================
 
 import { el, isInputTarget } from './overlay-dom.js';
+import { createLiveReload } from './overlay-livereload.js';
 import { createPreferences } from './overlay-prefs.js';
 import { createDocumentState } from './overlay-state.js';
 import { createDocumentModel } from './overlay-document.js';
@@ -29,6 +31,7 @@ import { createFinger } from './overlay-finger.js';
 import { createLibrary } from './overlay-library.js';
 import { createSettings } from './overlay-settings.js';
 import { createFocusRouting } from './overlay-focus.js';
+import { createPins } from './overlay-pins.js';
 import { createSidebar } from './overlay-sidebar.js';
 import { createPageCounter } from './overlay-pageno.js';
 import { createCommandSurface } from './overlay-commands.js';
@@ -102,9 +105,11 @@ preparePdf2htmlEx({ document: document, window: window });
             fetch: fetch.bind(window), entryHash: entryHash, notify: toast.show });
         var settings = createSettings({ document: document, prefs: prefs, zoom: zoom });
         var focus = createFocusRouting(base);
+        var pins = createPins(withBase({ documentState: documentState, documentModel: documentModel,
+            navigation: navigation, notify: toast.show }));
         var commands = null;
         var sidebar = createSidebar(withBase({
-            fetch: fetch.bind(window), prefs: prefs, focus: focus, navigation: navigation,
+            fetch: fetch.bind(window), prefs: prefs, focus: focus, navigation: navigation, pins: pins, documentState: documentState,
             documentModel: documentModel, entryHash: entryHash, openSettings: settings.toggle,
             toggleCheatsheet: function () { commands.toggleCheatsheet(); },
         }));
@@ -112,6 +117,7 @@ preparePdf2htmlEx({ document: document, window: window });
             documentModel: documentModel, isInputTarget: isInputTarget });
         commands = createCommandSurface({ document: document, window: window, location: location,
             prefs: prefs, zoom: zoom, navigation: navigation, text: text, library: library,
+            pins: pins, showPins: function () { sidebar.showPins(); },
             finger: finger, settings: settings, isInputTarget: isInputTarget, notify: toast.show,
             jumpBack: function () { jump(navigation.back, 'Back', 'Nothing to go back to'); },
             jumpForward: function () { jump(navigation.forward, 'Forward', 'Nothing to go forward to'); } });
@@ -127,6 +133,7 @@ preparePdf2htmlEx({ document: document, window: window });
         // measures pages, and the sidebar before focus routing hooks into it.
         pdf2htmlex.adaptDocument();
         zoom.mount();
+        rememberViewport(documentModel);
         pdf2htmlex.adaptRuntime();
         var textFit = createTextFit(withBase({ documentModel: documentModel }));
         textFit.mount();
@@ -137,9 +144,12 @@ preparePdf2htmlEx({ document: document, window: window });
             entryHash: entryHash })).mount();
         scrollOff.mount();
         search.mount();
+        pins.mount();
         sidebar.mount();
         pageCounter.mount();
         navigation.init();
+        createLiveReload({ window: window, prefs: prefs, fetch: fetch.bind(window),
+            documentState: documentState, entryHash: entryHash });
         focus.mount();
         commands.init();
         registerEscapeHandler(commands, finger, settings, sidebar, prefs);
@@ -190,6 +200,18 @@ preparePdf2htmlEx({ document: document, window: window });
                 e.stopPropagation();
             }
         }, true);
+    }
+
+    // The daemon repeats the first-raster arithmetic from this cookie and
+    // starts rendering (and preloading) that page image with the shell, before
+    // any script has run (daemon/main.py, _first_raster).
+    function rememberViewport(documentModel) {
+        try {
+            var root = documentModel.container();
+            if (!root || !root.clientWidth) return;
+            document.cookie = 'pdfv_vp=' + root.clientWidth + 'x' + (window.devicePixelRatio || 1)
+                + '; path=/; max-age=31536000; samesite=lax';
+        } catch (e) {}
     }
 
     // ⌘/Ctrl with + − 0 zooms the pages, never the browser: browser zoom

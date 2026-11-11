@@ -28,6 +28,9 @@ Routes:
     POST   /signal/fetch        ask the extension to fetch a source PDF with browser cookies
     PUT    /fetch/<id>          extension upload of those bytes (memory only)
     GET    /fetch/<id>          convert-script collection of those bytes
+    POST   /extension/open      extension claims a held reader open of a sign-in-gated URL
+    PUT    /extension/open/<id> extension upload of that URL's bytes (or its fetch error)
+    GET    /extension/open/<id> holding-page poll for where the tab goes next
     GET    /entry/<hash>/state  per-document position, marks and zoom (PUT .../state/<key>)
     DELETE /mapping/<hash>      drop the mapping row, rmtree the dir, forget visits and state
     PUT    /entry/<hash>/name   rename a cache entry's HTML file (changes search name)
@@ -46,8 +49,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import html as html_lib
+import json
 import os
 import pathlib
+import math
+import threading
 import time
 import urllib.parse
 from typing import Optional
@@ -57,7 +64,9 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import pdfium_doc
 import sources
+import opens
 import state
 import visits
 from reader import Reader
@@ -98,6 +107,8 @@ app = FastAPI(title="pdf_viewer", version="0.1.0", lifespan=_lifespan)
 # Per-document position, marks and zoom (daemon/state.py). Included before
 # the static mounts at the end of this file, which catch every other path.
 app.include_router(state_router)
+app.add_middleware(opens.OpenMiddleware, catalog=catalog)
+opens.configure_logging()
 
 
 def _prefer_reader() -> bool:
@@ -250,6 +261,7 @@ def _public_signal(signal: dict) -> dict:
 async def signal_navigate_wait(
     timeout: float = Query(25.0, ge=0.0, le=60.0),
     since: int | None = Query(None, ge=0),
+    claims_opens: int = Query(0, ge=0, le=1, alias="open"),
 ):
     """Long-poll for signals.
 
@@ -258,7 +270,11 @@ async def signal_navigate_wait(
     every listening browser or profile gets each signal and acts only on its
     own tabs. Without `since` (older extension builds), each signal goes to the
     first such poller only, as before, while cursor pollers still receive it.
+    `open=1` says the poller claims browser opens (/extension/open).
     """
+    if claims_opens:
+        global _extension_open_seen
+        _extension_open_seen = time.monotonic()
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while True:
@@ -461,6 +477,7 @@ def _store_relayed_source(hash_: str, source_ref: str, body: bytes, disposition:
     catalog.register(hash_, source_ref, pathlib.PurePath(name).stem)
 
 
+@opens.relay
 async def _relay_source(hash_: str, tab_url: str, source_ref: str, base_url: str) -> bool:
     loop = asyncio.get_running_loop()
     waits = list(_RELAY_ANSWER_WAIT_SEC)
@@ -510,8 +527,442 @@ async def _relay_source(hash_: str, tab_url: str, source_ref: str, base_url: str
         return False
     if catalog.is_disabled(hash_):
         return False
+    _remember_gated_host(source_ref)
     _queue_navigate_signal(tab_url, f"{base_url}/r/{hash_}/")
     return True
+
+
+_file_scheme_access: Optional[bool] = None
+_FILE_ACCESS_HINT = 'Enable “Allow access to file URLs” in the PDF viewer extension settings to open local PDFs automatically.'
+
+
+@app.post("/extension/file-access")
+async def extension_file_access(request: Request):
+    global _file_scheme_access
+    body = await request.json()
+    if not isinstance(body, dict) or type(body.get("allowed")) is not bool:
+        raise HTTPException(400, "allowed must be a boolean")
+    _file_scheme_access = body["allowed"]
+    return {"ok": True}
+
+
+# -----------------------------------------------------------------------------
+# Browser opens — a sign-in-gated PDF goes straight to the reader.
+#
+# The relay above shows the browser's own viewer first and swaps the tab
+# seconds later. With an extension that speaks this protocol (0.4.0+), the
+# daemon instead holds the tab's `/view-raw` navigation open while the
+# extension downloads the URL with the browser's session and uploads it:
+#
+#   1. The tab's request reaches `/view-raw?<url>`. The extension sees the
+#      same request (webRequest, main frame) and asks `POST /extension/open`
+#      whether the daemon wants its bytes.
+#   2. A host that needed the session before (`_gated_hosts.json`) skips the
+#      daemon's own cookie-less download; any other host is tried first, and
+#      a PDF from it opens the reader as before.
+#   3. The open is claimed by that question; the extension fetches the URL
+#      with credentials and PUTs the bytes to `/extension/open/<id>` in
+#      pieces of a few MB as they arrive (`?offset=`, the last `&done=1`),
+#      which the daemon appends to a temporary file in `_source/`.
+#   4. The held response becomes a 307 to `/r/<hash>/`, so the tab goes from
+#      the link to the reader without any viewer in between. A sign-in page,
+#      a non-PDF answer or an HTTP error becomes a 307 to the original URL
+#      with the passthrough marker: the site's own page or the browser's
+#      viewer, never a loop.
+#   5. A transfer still running after `_OPEN_HOLD_SEC` gets a small holding
+#      page instead, which waits for the open and replaces itself with the
+#      same target.
+#
+# Without a claim (an older extension, no extension, a service worker that
+# did not wake) the open falls back to the relay. The extension fetches only
+# a URL its own tab is navigating to, and the daemon accepts bytes only for
+# an open it is holding, so neither side can be made to fetch or store an
+# arbitrary page. The claim is a JSON POST and the upload a PUT, which a web
+# page cannot send cross-origin without a preflight the daemon never answers.
+# -----------------------------------------------------------------------------
+
+# How long a held open waits for the extension's claim, once it wants bytes.
+_OPEN_CLAIM_GRACE_SEC = 1.0
+# An extension that long-polled with `open=1` this recently can claim; when
+# none has, the daemon falls back at once instead of waiting for a claim.
+_OPEN_LISTENER_TTL_SEC = 120.0
+# How long the navigation itself is held before the holding page is served.
+_OPEN_HOLD_SEC = 2.0
+# A claimed transfer that makes no progress this long sends the tab to its
+# fallback (service worker killed, network stalled).
+_OPEN_STALL_SEC = 60.0
+# The extension uploads in pieces of at most this size, so neither side holds
+# a whole large PDF in memory.
+_OPEN_CHUNK_MAX = 16 * 1024 * 1024
+# How long a claim waits for the matching `/view-raw` request to arrive and
+# for the daemon's own download to finish or fail.
+_OPEN_CLAIM_WAIT_SEC = 3.0
+_OPEN_DECIDE_WAIT_SEC = 65.0
+# Finished opens stay readable this long for holding pages.
+_OPEN_RESULT_TTL_SEC = 120.0
+_GATED_HOSTS_FILE = "_gated_hosts.json"
+_GATED_HOSTS_MAX = 500
+
+_opens_cond = threading.Condition()
+_opens: dict[str, "_Open"] = {}            # active opens by hash
+_open_results: dict[int, "_Open"] = {}     # finished opens by id
+_extension_open_seen = 0.0                 # monotonic time of the last open=1 poll
+
+
+class _Open:
+    """One URL the daemon is opening through the browser. States: deciding
+    (the daemon tries its own download), want (it needs the browser's bytes),
+    claimed (the extension is fetching), done (target set)."""
+
+    def __init__(self, hash_: str, url: str, source_ref: str):
+        self.hash = hash_
+        self.url = url
+        self.source_ref = source_ref
+        self.id = _next_nav_signal_id()
+        self.state = "deciding"
+        self.started = time.monotonic()
+        self.want_at: Optional[float] = None
+        self.claimed_at: Optional[float] = None
+        self.finished_at: Optional[float] = None
+        self.target: Optional[str] = None
+        self.from_browser = False
+        self.upload: Optional[sources.Upload] = None
+        self.upload_lock = threading.Lock()
+        self.progress_at = 0.0
+
+
+def _host_of(url: str) -> str:
+    return urllib.parse.urlparse(url).netloc.lower()
+
+
+def _gated_hosts_path() -> pathlib.Path:
+    return CACHE_DIR / _GATED_HOSTS_FILE
+
+
+def _gated_hosts() -> list[str]:
+    try:
+        hosts = json.loads(_gated_hosts_path().read_text(encoding="utf-8")).get("hosts", [])
+    except (OSError, ValueError, AttributeError):
+        return []
+    return [h for h in hosts if isinstance(h, str)]
+
+
+def _is_gated_host(url: str) -> bool:
+    return _host_of(url) in _gated_hosts()
+
+
+def _remember_gated_host(url: str) -> None:
+    """Record that this URL's host answered the daemon with a sign-in page
+    while the browser got the PDF: later opens skip the cookie-less try."""
+    host = _host_of(url)
+    if not host:
+        return
+    with _opens_cond:
+        hosts = _gated_hosts()
+        if host in hosts:
+            return
+        hosts = (hosts + [host])[-_GATED_HOSTS_MAX:]
+        path = _gated_hosts_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps({"hosts": sorted(hosts)}, indent=2) + "\n", encoding="utf-8")
+            tmp.replace(path)
+        except OSError as error:
+            print(f"browser open: could not record gated host: {error}", flush=True)
+
+
+def _extension_listening() -> bool:
+    return (_extension_open_seen > 0
+            and time.monotonic() - _extension_open_seen < _OPEN_LISTENER_TTL_SEC)
+
+
+def _purge_open_results() -> None:
+    cutoff = time.monotonic() - _OPEN_RESULT_TTL_SEC
+    for open_id in [k for k, v in _open_results.items() if (v.finished_at or 0) < cutoff]:
+        del _open_results[open_id]
+
+
+def _finish_open(op: _Open, target: str) -> None:
+    """Set the tab's destination; call with _opens_cond held."""
+    if op.state == "done":
+        return
+    if op.upload is not None and not target.startswith("/r/"):
+        op.upload.abort()
+    op.state = "done"
+    op.target = target
+    op.finished_at = time.monotonic()
+    ms = lambda t: f"{(t - op.started) * 1000:.0f}" if t else "-"  # noqa: E731
+    print(f"browser open {op.hash}: want {ms(op.want_at)} ms, claimed {ms(op.claimed_at)} ms, "
+          f"done {ms(op.finished_at)} ms → {'reader' if target.startswith('/r/') else 'original URL'}",
+          flush=True)
+    if _opens.get(op.hash) is op:
+        del _opens[op.hash]
+    _purge_open_results()
+    _open_results[op.id] = op
+    _opens_cond.notify_all()
+
+
+def _reader_target(hash_: str) -> str:
+    return f"/r/{hash_}/"
+
+
+_HOLDING_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Opening…</title>
+<link rel="icon" type="image/svg+xml" href="/_assets/favicon.svg">
+<style>
+  :root {{ color-scheme: light dark; }}
+  body {{ margin: 0; font: 15px/1.5 -apple-system, BlinkMacSystemFont, sans-serif;
+         display: grid; place-items: center; min-height: 100vh; background: Canvas; color: CanvasText; }}
+  main {{ max-width: 34em; padding: 16px; text-align: center; }}
+  a {{ color: LinkText; }}
+</style></head>
+<body><main>
+<p>Fetching the PDF through your browser session…</p>
+<p><a id="original" href="{fallback}">Open the original instead</a></p>
+</main>
+<script>
+(() => {{
+  const id = {open_id};
+  const fallback = {fallback_js};
+  let failures = 0;
+  async function wait() {{
+    try {{
+      const resp = await fetch(`/extension/open/${{id}}?wait=20`, {{ cache: 'no-store' }});
+      if (resp.status === 404) {{ location.replace(fallback); return; }}
+      const body = await resp.json();
+      if (body.target) {{ location.replace(body.target); return; }}
+      failures = 0;
+    }} catch (_) {{
+      if (++failures >= 3) {{ location.replace(fallback); return; }}
+      await new Promise((r) => setTimeout(r, 1000));
+    }}
+    wait();
+  }}
+  wait();
+}})();
+</script>
+</body></html>
+"""
+
+
+def _holding_page(op: _Open, fallback: str) -> Response:
+    body = _HOLDING_PAGE.format(
+        open_id=op.id,
+        fallback=html_lib.escape(fallback, quote=True),
+        fallback_js=json.dumps(fallback).replace("</", "<\\/"),
+    )
+    return Response(body, media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-store"})
+
+
+def _open_through_browser(url: str, hash_: str, source_ref: str, base_url: Optional[str]):
+    """Reader open of a remote URL with no stored source: the daemon's own
+    download, else the extension's bytes (see the section comment)."""
+    fallback = with_passthrough(url)
+    arrived = time.monotonic()
+    with _opens_cond:
+        op = _opens.get(hash_)
+        joined = op is not None
+        if not joined:
+            op = _Open(hash_, strip_passthrough(url), source_ref)
+            _opens[hash_] = op
+            _opens_cond.notify_all()
+    if not joined:
+        gated = _is_gated_host(url)
+        if not gated:
+            try:
+                name = sources.download(url, CACHE_DIR / hash_ / "_source")
+            except sources.SourceError as error:
+                opens.hint(error)
+                print(f"reader: download failed for {source_ref}: {error}", flush=True)
+            else:
+                catalog.register(hash_, source_ref, pathlib.PurePath(name).stem)
+                with _opens_cond:
+                    _finish_open(op, _reader_target(hash_))
+                return RedirectResponse(_reader_target(hash_), status_code=307)
+        with _opens_cond:
+            op.state = "want"
+            op.want_at = time.monotonic()
+            op.from_browser = not gated
+            _opens_cond.notify_all()
+            grace = _OPEN_CLAIM_GRACE_SEC if _extension_listening() else 0.0
+            _opens_cond.wait_for(lambda: op.state != "want", timeout=grace)
+            unclaimed = op.state == "want"
+            if unclaimed:
+                _finish_open(op, fallback)
+        if unclaimed:
+            # No extension took it: the browser's own viewer, then the relay.
+            if base_url:
+                _request_relay(hash_, fallback, source_ref, base_url)
+            return RedirectResponse(fallback, status_code=307)
+
+    with _opens_cond:
+        _opens_cond.wait_for(lambda: op.state == "done",
+                             timeout=max(0.0, arrived + _OPEN_HOLD_SEC - time.monotonic()))
+        if op.state == "done":
+            return RedirectResponse(op.target, status_code=307)
+    return _holding_page(op, fallback)
+
+
+class ExtensionOpenRequest(BaseModel):
+    url: str
+
+
+@app.post("/extension/open")
+def extension_open(body: ExtensionOpenRequest):
+    """The extension saw a tab navigate to `/view-raw?<url>` and asks whether
+    the daemon wants the browser's bytes. Waits until that open has decided:
+    {"fetch": true, "id": n} claims it, {"fetch": false} means the daemon has
+    the source, is not opening it, or another tab already claimed it."""
+    url = strip_passthrough(body.url)
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(400, "only http(s) URLs can be opened")
+    if not _prefer_reader():
+        return {"fetch": False}
+    hash_ = url_hash(url)
+    if catalog.is_disabled(hash_) or catalog.source_pdf(hash_) is not None:
+        return {"fetch": False}
+    start = time.monotonic()
+    with _opens_cond:
+        # The question can arrive before the tab's own request.
+        _opens_cond.wait_for(lambda: hash_ in _opens, timeout=_OPEN_CLAIM_WAIT_SEC)
+        op = _opens.get(hash_)
+        if op is None:
+            return {"fetch": False}
+        _opens_cond.wait_for(lambda: op.state != "deciding",
+                             timeout=max(0.0, start + _OPEN_DECIDE_WAIT_SEC - time.monotonic()))
+        if op.state != "want":
+            return {"fetch": False}
+        op.state = "claimed"
+        op.claimed_at = time.monotonic()
+        _opens_cond.notify_all()
+        open_id = op.id
+    _watch_claimed_open(op)
+    return {"fetch": True, "id": open_id}
+
+
+def _watch_claimed_open(op: _Open) -> None:
+    """Bound a claimed transfer by its progress: a browser that stops
+    uploading (service worker killed, tab closed mid-download) sends the tab
+    to its fallback."""
+    op.progress_at = time.monotonic()
+
+    def watch() -> None:
+        with _opens_cond:
+            while op.state == "claimed":
+                idle = time.monotonic() - op.progress_at
+                if idle >= _OPEN_STALL_SEC:
+                    print(f"browser open: upload of {op.source_ref} stalled", flush=True)
+                    _finish_open(op, with_passthrough(op.url))
+                    break
+                _opens_cond.wait(timeout=_OPEN_STALL_SEC - idle)
+    threading.Thread(target=watch, name=f"open-{op.id}", daemon=True).start()
+
+
+def _claimed_open(open_id: int) -> Optional[_Open]:
+    with _opens_cond:
+        return next((op for op in _opens.values() if op.id == open_id and op.state == "claimed"), None)
+
+
+def _append_browser_open(op: _Open, offset: int, chunk: bytes) -> None:
+    """Append one uploaded piece; raises SourceError on a gap or bad bytes."""
+    with op.upload_lock:
+        if op.upload is None:
+            op.upload = sources.Upload(catalog.root / op.hash / "_source", str(op.id))
+        if offset != op.upload.size:
+            raise sources.SourceError(f"upload piece at {offset}, expected {op.upload.size}")
+        op.upload.append(chunk)
+    with _opens_cond:
+        if op.state == "done" and not (op.target or "").startswith("/r/"):
+            # Given up meanwhile (stall bound): drop what this piece wrote.
+            op.upload.abort()
+        op.progress_at = time.monotonic()
+        _opens_cond.notify_all()
+
+
+def _store_browser_open(op: _Open, disposition: str) -> str:
+    """Move a complete upload into place and return the tab's target."""
+    try:
+        with op.upload_lock:
+            if op.upload is None:
+                raise sources.SourceError("empty upload")
+            existing = catalog.cached_source(op.hash)
+            if existing:
+                # Stored meanwhile (another tab, the relay): that copy wins.
+                op.upload.abort()
+                name = existing.name
+            else:
+                name = op.upload.finish(op.source_ref, disposition)
+        catalog.register(op.hash, op.source_ref, pathlib.PurePath(name).stem)
+    except (sources.SourceError, OSError, InvalidCatalogInput) as error:
+        print(f"browser open: could not store {op.source_ref}: {error}", flush=True)
+        return with_passthrough(op.url)
+    if op.from_browser:
+        _remember_gated_host(op.source_ref)
+    return _reader_target(op.hash)
+
+
+@app.put("/extension/open/{open_id}")
+async def extension_open_put(
+    open_id: int,
+    request: Request,
+    offset: int = Query(0, ge=0),
+    done: int = Query(0, ge=0, le=1),
+):
+    """The extension's answer for a claimed open: the PDF in pieces, each
+    PUT carrying the bytes from `offset` and the last one `done=1`, or with an
+    `X-Fetch-Error` header the reason it has none (signed out, not a PDF)."""
+    op = _claimed_open(open_id)
+    if op is None:
+        return JSONResponse({"accepted": False}, status_code=404)
+    error = request.headers.get("x-fetch-error")
+    if error:
+        print(f"browser open: extension could not fetch {op.source_ref}: {error[:300]}", flush=True)
+        with _opens_cond:
+            _finish_open(op, with_passthrough(op.url))
+        return {"accepted": True}
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > _OPEN_CHUNK_MAX:
+            with _opens_cond:
+                _finish_open(op, with_passthrough(op.url))
+            raise HTTPException(413, "upload piece too large")
+    try:
+        await asyncio.to_thread(_append_browser_open, op, offset, bytes(body))
+    except (sources.SourceError, OSError) as error:
+        print(f"browser open: could not store {op.source_ref}: {error}", flush=True)
+        with _opens_cond:
+            _finish_open(op, with_passthrough(op.url))
+        return {"accepted": False}
+    if not done:
+        return {"accepted": True}
+    target = await asyncio.to_thread(
+        _store_browser_open, op, request.headers.get("x-source-content-disposition", ""))
+    with _opens_cond:
+        _finish_open(op, target)
+    return {"accepted": True}
+
+
+@app.get("/extension/open/{open_id}")
+def extension_open_status(open_id: int, wait: float = Query(0.0, ge=0.0, le=30.0)):
+    """Holding-page poll: {"target": url} once the open has finished."""
+    deadline = time.monotonic() + wait
+    with _opens_cond:
+        def find() -> Optional[_Open]:
+            return _open_results.get(open_id) or next(
+                (op for op in _opens.values() if op.id == open_id), None)
+        op = find()
+        if op is None:
+            raise HTTPException(404, "unknown or expired open")
+        _opens_cond.wait_for(lambda: op.state == "done",
+                             timeout=max(0.0, deadline - time.monotonic()))
+        if op.state == "done":
+            return {"state": "done", "target": op.target}
+        return {"state": op.state}
 
 
 @app.get("/healthz")
@@ -524,6 +975,8 @@ def healthz():
         )
     return {
         "status": "ok",
+        "file_scheme_access": _file_scheme_access,
+        "file_access_hint": _FILE_ACCESS_HINT if _file_scheme_access is False else None,
         "cache_dir": str(CACHE_DIR),
         "cache_exists": CACHE_DIR.is_dir(),
         "entries": entries,
@@ -653,7 +1106,16 @@ def view_raw(request: Request, background: BackgroundTasks):
 @app.get("/view-file-raw")
 def view_file_raw(request: Request, background: BackgroundTasks):
     """Local file view route for the extension's generic file:// rule."""
-    return _view_path(_raw_file_path(request), background, light=_prefer_light_from_environment(),
+    path = pathlib.Path(_raw_file_path(request))
+    previous = catalog.local_entry(path)
+    if previous and catalog.is_disabled(previous):
+        # The browser cannot follow an HTTP redirect to file:. Let the
+        # extension navigate, preserving the exact symlink URL it received.
+        catalog.register(previous, catalog.local_path(path), path.stem)
+        _queue_extension_sync_signal(previous, "local-alias")
+        _queue_navigate_signal(str(request.url), path.as_uri())
+        return Response("Opening local PDF in the native viewer…", media_type="text/plain")
+    return _view_path(str(path), background, light=_prefer_light_from_environment(),
                       reader_first=_prefer_reader())
 
 
@@ -667,23 +1129,54 @@ def view_canonical_raw(request: Request, background: BackgroundTasks):
     return _view_url(_raw_url(request), background, light=False)
 
 
-def _open_local_in_reader(pdf: pathlib.Path, hash_: str):
-    """Register a local PDF (no conversion) and send the tab to its reader."""
-    catalog.register(hash_, str(pdf), pdf.stem)
-    return RedirectResponse(f"/r/{hash_}/", status_code=307)
+def _open_local_in_reader(pdf: pathlib.Path, hash_: str = ""):
+    try:
+        hash_, stamp = catalog.open_local(pdf,
+            lambda snapshot: reader._run(pdfium_doc.page_sizes, str(snapshot)), state.inherit_local)
+    except (OSError, ValueError, InvalidCatalogInput) as error:
+        raise HTTPException(409, str(error)) from error
+    except Exception as error:
+        raise HTTPException(409, "local PDF is not ready to read; retry after saving") from error
+    query = urllib.parse.urlencode({"local": catalog.local_path(pdf), "stamp": stamp})
+    return RedirectResponse(f"/r/{hash_}/?{query}", status_code=307)
+
+
+@app.get("/local-file/current")
+def local_file_current(hash: str):
+    manifest = catalog.manifests().get(hash, {})
+    source = manifest.get("source_ref", "")
+    stamp = manifest.get("local_stamps", {}).get(source)
+    return {"path": source if stamp else None, "stamp": stamp}
+
+
+@app.get("/local-file/check")
+def local_file_check(path: str, stamp: str = ""):
+    # No watcher or retained subscription: closing the tab stops all work.
+    p = pathlib.Path(path)
+    if not catalog.local_entry(p):
+        raise HTTPException(404, "local path is not registered")
+    try:
+        current = catalog.local_stamp(p)
+        return {"status": "unchanged" if current == stamp else "changed", "stamp": current}
+    except OSError:
+        return {"status": "missing", "stamp": None}
 
 
 def _view_path(path: str, background: BackgroundTasks, *, light: bool, reader_first: bool = False):
     try:
-        p = pathlib.Path(path).expanduser().resolve(strict=True)
-    except FileNotFoundError:
+        p = pathlib.Path(catalog.local_path(pathlib.Path(path)))
+        p.stat()
+    except (OSError, ValueError):
         raise HTTPException(404, f"file not found: {path}")
     if not p.is_file():
         raise HTTPException(400, f"not a regular file: {path}")
 
+    if reader_first:
+        previous = catalog.local_entry(p)
+        if not previous or not catalog.is_disabled(previous):
+            return _open_local_in_reader(p)
     resolved = catalog.resolve_source(p, prefer_light=light)
-    if reader_first and resolved.hash and not resolved.disabled:
-        return _open_local_in_reader(p, resolved.hash)
+    opens.resolved(resolved)
     if resolved.representation is not None:
         if resolved.disabled:
             return FileResponse(
@@ -712,20 +1205,12 @@ def _view_url(url: str, background: BackgroundTasks, *, light: bool, reader_firs
         resolved = catalog.resolve_source(url, prefer_light=light)
     except InvalidCatalogInput as error:
         raise HTTPException(400, str(error)) from error
+    opens.resolved(resolved)
     if reader_first and not resolved.disabled:
         if catalog.source_pdf(resolved.hash) is None:
-            try:
-                name = sources.download(url, CACHE_DIR / resolved.hash / "_source")
-            except sources.SourceError as error:
-                # No bytes (sign-in page, network): the browser's own viewer
-                # opens the original URL, and the relay fetches it from that
-                # tab's session to swap the tab to the reader.
-                print(f"reader: download failed for {resolved.source_ref}: {error}", flush=True)
-                fallback = with_passthrough(url)
-                if base_url:
-                    _request_relay(resolved.hash, fallback, resolved.source_ref, base_url)
-                return RedirectResponse(fallback, status_code=307)
-            catalog.register(resolved.hash, resolved.source_ref, pathlib.PurePath(name).stem)
+            # The daemon's own download, else the browser's bytes through the
+            # extension, else the browser's viewer and the relay.
+            return _open_through_browser(url, resolved.hash, resolved.source_ref, base_url)
         elif resolved.hash not in catalog.mappings():
             cached = catalog.source_pdf(resolved.hash)
             catalog.register(resolved.hash, resolved.source_ref, cached.stem if cached else resolved.hash)
@@ -766,16 +1251,68 @@ def _saved_page(hash_: str) -> Optional[int]:
     return page if isinstance(page, int) and page > 1 else None
 
 
+_VIEWPORT_COOKIE = "pdfv_vp"
+
+
+def _first_raster(hash_: str, pdf: pathlib.Path, viewport: Optional[str]) -> Optional[tuple[int, int]]:
+    """(page, device width) of the raster the overlay will ask for first.
+
+    The overlay leaves the pages' container width and the pixel ratio of its
+    last load in a cookie; with the saved page and zoom that is enough to
+    repeat its arithmetic (overlay-zoom.js autoFit, overlay-document.js
+    sourceFor). A wrong guess costs one unused render, nothing else."""
+    try:
+        container, _, ratio = (viewport or "").partition("x")
+        container_width, ratio = float(container), float(ratio)
+        if not (200 <= container_width <= 10000 and 0.5 <= ratio <= 4):
+            return None
+        sizes = reader.sizes(pdf)
+        saved = state.get_all(hash_)
+        page = saved.get("position", {}).get("value", {}).get("page")
+        page = page if isinstance(page, int) and 1 <= page <= len(sizes) else 1
+        zoom = saved.get("zoom", {}).get("value")
+        try:
+            zoom = float(zoom)
+            if not 0.25 <= zoom <= 10:
+                raise ValueError
+        except (TypeError, ValueError):
+            zoom = min(4 / 3, max(0.5, 0.85 * container_width / round(sizes[0][0], 2)))
+        # Widths as the shell declares them (two decimals).
+        return page, max(64, math.floor(round(sizes[page - 1][0], 2) * zoom * ratio + 0.5))
+    except Exception:
+        return None
+
+
+def _prewarm_first_raster(hash_: str, pdf: pathlib.Path, viewport: Optional[str]) -> Optional[str]:
+    """Start rendering that raster now; returns its URL for a preload header."""
+    first = _first_raster(hash_, pdf, viewport)
+    if first is None:
+        return None
+    page, width = first
+
+    def render():
+        try:
+            reader.raster(hash_, pdf, page, width)
+        except Exception:
+            pass
+    threading.Thread(target=render, daemon=True).start()
+    return f"/r/{hash_}/p/{page}/{width}.png"
+
+
 @app.get("/r/{hash_}/")
-def reader_shell(hash_: str, background: BackgroundTasks):
+def reader_shell(hash_: str, background: BackgroundTasks, request: Request = None):
     pdf = _reader_source(hash_)
     saved = _saved_page(hash_)
+    preload = _prewarm_first_raster(hash_, pdf, request.cookies.get(_VIEWPORT_COOKIE)) if request else None
     try:
         shell = reader.shell(hash_, pdf, catalog.entry_name(hash_), near_pages=(saved,) if saved else ())
     except Exception as error:
         raise HTTPException(502, f"could not read PDF: {error}") from error
     background.add_task(visits.record, hash_, "reader")
     headers = {"Cache-Control": "no-cache"}
+    if preload:
+        # The browser fetches the first page image while the overlay scripts load.
+        headers["Link"] = f"<{preload}>; rel=preload; as=image"
     if isinstance(shell, str):
         # Text still loading: the overlay fetches the rest by range.
         return Response(shell, media_type="text/html; charset=utf-8", headers=headers)
@@ -1101,12 +1638,30 @@ def library():
 @app.get("/stats")
 def stats():
     s = visits.summary()
+    s["opens"] = opens.summary()
     mappings = catalog.mappings()
     for row in s["top"]:
         mapping = mappings.get(row["hash"])
         row["name"] = mapping.name if mapping else row["hash"]
         row["source_ref"] = mapping.source_ref if mapping else None
     return s
+
+
+@app.post("/entry/{hash_}/timing")
+async def entry_timing(hash_: str, request: Request):
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > 4096:
+            raise HTTPException(413, "timing too large")
+    try:
+        import json
+        await asyncio.to_thread(opens.timing, hash_, json.loads(body))
+    except (ValueError, TypeError):
+        raise HTTPException(400, "invalid timing")
+    except (OSError, opens.sqlite3.Error):
+        pass  # Observability must never interfere with reading.
+    return Response(status_code=204)
 
 
 @app.get("/stats/recent")

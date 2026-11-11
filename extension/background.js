@@ -24,6 +24,14 @@
 //
 // Service workers in MV3 can be terminated, so we use chrome.alarms (survives
 // suspension) rather than setInterval.
+//
+// Sign-in-gated PDFs (daemon 0.4 protocol, see "Browser opens" below): the
+// daemon holds a `/view-raw` navigation it cannot download itself, and this
+// worker, which sees the same request through webRequest, fetches the URL
+// with the browser's session and uploads the bytes, so the tab goes from the
+// link straight to the reader. While the daemon is unreachable a session
+// allow rule switches every redirect off, so PDFs open natively instead of
+// on a connection error page.
 
 // The service worker talks to the daemon on 127.0.0.1; redirected documents
 // open on VIEWER, the origin the static rule, the convert script and the
@@ -84,6 +92,7 @@ async function _runSync() {
     let engine;
     try {
         const health = await fetch(`${DAEMON}/healthz`, { cache: 'no-store' });
+        setDaemonDown(false);
         if (!health.ok) {
             console.warn(`pdf_viewer: /healthz returned ${health.status}`);
             return;
@@ -98,8 +107,10 @@ async function _runSync() {
         entries = await resp.json();
     } catch (e) {
         // Daemon down, or CORS / network error. Leave any previously-installed
-        // rules in place — stale is better than an empty ruleset.
+        // rules in place — stale is better than an empty ruleset — and let
+        // the session allow rule keep them from sending tabs to a dead port.
         console.warn('pdf_viewer: /cache-urls fetch failed —', e.message);
+        setDaemonDown(true);
         return;
     }
 
@@ -427,8 +438,14 @@ async function startNavPollLoop() {
     try {
         while (true) {
             try {
+                // After a failure, a quick health probe turns redirects back
+                // on without waiting for a whole long-poll to come back.
+                if (_daemonDown) {
+                    const health = await fetch(`${DAEMON}/healthz`, { cache: 'no-store' });
+                    if (health.ok) await setDaemonDown(false);
+                }
                 const resp = await fetch(
-                    `${DAEMON}/signal/navigate/wait?timeout=${NAV_POLL_TIMEOUT_SEC}&since=${_navCursor}`,
+                    `${DAEMON}/signal/navigate/wait?timeout=${NAV_POLL_TIMEOUT_SEC}&since=${_navCursor}&open=1`,
                     { cache: 'no-store' }
                 );
                 if (!resp.ok) {
@@ -438,6 +455,7 @@ async function startNavPollLoop() {
                     await new Promise(r => setTimeout(r, NAV_POLL_ERROR_BACKOFF_MS));
                     continue;
                 }
+                setDaemonDown(false);
                 const signals = await resp.json();
                 for (const sig of signals) {
                     if (typeof sig.id === 'number' && sig.id > _navCursor) _navCursor = sig.id;
@@ -447,6 +465,7 @@ async function startNavPollLoop() {
                 // Daemon down / network hiccup. Back off before retry so we
                 // don't pin CPU if the daemon is hard-down.
                 console.warn('pdf_viewer: nav poll fetch failed —', e.message);
+                setDaemonDown(true);
                 await new Promise(r => setTimeout(r, NAV_POLL_ERROR_BACKOFF_MS));
             }
         }
@@ -454,6 +473,271 @@ async function startNavPollLoop() {
         _navPollRunning = false;
     }
 }
+
+// -----------------------------------------------------------------------------
+// Browser opens — a sign-in-gated PDF goes straight to the reader.
+//
+// A redirect rule sends the tab to `/view-raw?<url>`. This listener sees that
+// request (webRequest, main frame, observe-only) the moment it starts, which
+// also wakes a suspended service worker, and asks the daemon whether it wants
+// the browser's bytes (`POST /extension/open`). The daemon answers once it
+// knows: no when it has the source or downloaded it itself, yes for a host
+// that needs the session. Then this worker fetches exactly that URL, the one
+// its own tab is navigating to, with the browser's cookies, and uploads the
+// bytes; the daemon's held response sends the tab to the reader. A sign-in
+// page or other non-PDF answer is reported as an error and the daemon sends
+// the tab to the original URL instead. The cookies never leave the browser:
+// the daemon sees only the PDF bytes, over 127.0.0.1.
+// -----------------------------------------------------------------------------
+
+const PASSTHROUGH = '_pdfvw=passthrough';
+const OPEN_ROUTES = new Set(['/view-raw', '/read-raw']);
+const MAX_SOURCE_BYTES = 512 * 1024 * 1024;
+// The bytes go to the daemon in pieces of about this size as they arrive, so
+// the worker never holds a whole large PDF: a service worker buffering a few
+// hundred MB was killed mid-upload in Chromium.
+const UPLOAD_PIECE_BYTES = 4 * 1024 * 1024;
+// Extension API calls reset the service worker's idle timer; a download
+// longer than its ~30 s budget would otherwise be cut off.
+const KEEPALIVE_MS = 20000;
+
+function stripPassthrough(url) {
+    const q = url.indexOf('?');
+    if (q < 0) return url;
+    const hash = url.indexOf('#', q);
+    const query = url.slice(q + 1, hash < 0 ? undefined : hash);
+    const kept = query.split('&').filter((item) => item !== PASSTHROUGH);
+    const rest = hash < 0 ? '' : url.slice(hash);
+    return url.slice(0, q) + (kept.length ? `?${kept.join('&')}` : '') + rest;
+}
+
+function withPassthrough(url) {
+    const clean = stripPassthrough(url);
+    const hash = clean.indexOf('#');
+    const base = hash < 0 ? clean : clean.slice(0, hash);
+    const frag = hash < 0 ? '' : clean.slice(hash);
+    return `${base}${base.includes('?') ? '&' : '?'}${PASSTHROUGH}${frag}`;
+}
+
+// The URL a tab was going to before a redirect rule sent it to the daemon.
+function originalUrl(daemonUrl) {
+    let parsed;
+    try {
+        parsed = new URL(daemonUrl);
+    } catch (_) {
+        return null;
+    }
+    const raw = daemonUrl.slice(daemonUrl.indexOf('?') + 1);
+    if (!parsed.search) return null;
+    if (OPEN_ROUTES.has(parsed.pathname) || parsed.pathname === '/view-file-raw') {
+        return /^(https?|file):\/\//.test(raw) ? raw : null;
+    }
+    if (parsed.pathname === '/view' || parsed.pathname === '/read') {
+        const url = parsed.searchParams.get('url');
+        if (url && /^https?:\/\//.test(url)) return url;
+        const file = parsed.searchParams.get('path');
+        if (file && file.startsWith('/')) {
+            return `file://${file.split('/').map(encodeURIComponent).join('/')}`;
+        }
+    }
+    return null;
+}
+
+let _activeTransfers = 0;
+let _keepalive = null;
+
+function transferStarted() {
+    if (_activeTransfers++ === 0) {
+        _keepalive = setInterval(() => chrome.runtime.getPlatformInfo(() => {}), KEEPALIVE_MS);
+    }
+}
+
+function transferEnded() {
+    if (--_activeTransfers === 0) {
+        clearInterval(_keepalive);
+        _keepalive = null;
+    }
+}
+
+// Resolves true when the daemon still wants more of this open.
+async function putOpen(id, body, headers, { offset = 0, done = true } = {}) {
+    const resp = await fetch(`${DAEMON}/extension/open/${id}?offset=${offset}&done=${done ? 1 : 0}`, {
+        method: 'PUT', headers, body,
+    });
+    if (!resp.ok) return false;
+    const answer = await resp.json().catch(() => ({}));
+    return answer.accepted !== false;
+}
+
+function concatBytes(parts, total) {
+    const out = new Uint8Array(total);
+    let at = 0;
+    for (const part of parts) {
+        out.set(part, at);
+        at += part.byteLength;
+    }
+    return out;
+}
+
+const isPdfMagic = (b) => b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46;
+
+// Stream a fetch response to the daemon in pieces. Throws on a non-PDF.
+async function uploadResponse(id, resp) {
+    const headers = {
+        'X-Source-Content-Type': resp.headers.get('content-type') || '',
+        'X-Source-Content-Disposition': resp.headers.get('content-disposition') || '',
+    };
+    const reader = resp.body.getReader();
+    let parts = [];
+    let pending = 0;
+    let offset = 0;
+    let checked = false;
+    // One piece uploads while the next is read: at most two in memory.
+    let inflight = Promise.resolve(true);
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (value && value.byteLength) {
+                parts.push(value);
+                pending += value.byteLength;
+            }
+            if (!checked && (pending >= 4 || done)) {
+                const head = concatBytes(parts, pending);
+                if (head.byteLength < 4 || !isPdfMagic(head)) {
+                    throw new Error(`got ${headers['X-Source-Content-Type'] || 'unknown content'}, not a PDF (signed out?)`);
+                }
+                checked = true;
+            }
+            if (offset + pending > MAX_SOURCE_BYTES) throw new Error('source larger than 512 MB');
+            if (pending >= UPLOAD_PIECE_BYTES || done) {
+                const piece = concatBytes(parts, pending);
+                parts = [];
+                if (!(await inflight)) throw new Error('the daemon gave up on this open');
+                inflight = putOpen(id, piece, headers, { offset, done });
+                offset += pending;
+                pending = 0;
+            }
+            if (done) {
+                if (!(await inflight)) throw new Error('the daemon gave up on this open');
+                return offset;
+            }
+        }
+    } finally {
+        reader.cancel().catch(() => {});
+    }
+}
+
+async function openThroughBrowser(daemonUrl) {
+    const target = originalUrl(daemonUrl);
+    if (!target || !/^https?:\/\//.test(target)) return;
+    const url = stripPassthrough(target);
+    let claim;
+    try {
+        const resp = await fetch(`${DAEMON}/extension/open`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url }),
+            cache: 'no-store',
+        });
+        if (!resp.ok) return;
+        claim = await resp.json();
+    } catch (e) {
+        // Daemon down: the tab's own request fails too; see onErrorOccurred.
+        return;
+    }
+    if (!claim || !claim.fetch) return;
+    console.log(`pdf_viewer: daemon wants the browser's bytes for ${url}`);
+    transferStarted();
+    try {
+        const started = Date.now();
+        const resp = await fetch(url, { credentials: 'include', cache: 'no-store' });
+        const contentType = resp.headers.get('content-type') || '';
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const length = Number(resp.headers.get('content-length') || 0);
+        if (length > MAX_SOURCE_BYTES) throw new Error('source larger than 512 MB');
+        const size = await uploadResponse(claim.id, resp);
+        console.log(`pdf_viewer: opened ${size} bytes through the browser in ${Date.now() - started} ms`);
+    } catch (e) {
+        console.warn('pdf_viewer: browser open failed —', e.message);
+        try {
+            const reason = String(e.message).replace(/[^\x20-\x7e]/g, '?');
+            await putOpen(claim.id, '', { 'X-Fetch-Error': reason || 'fetch failed' });
+        } catch (_) {
+            // Daemon gone; its held request is gone with it.
+        }
+    } finally {
+        transferEnded();
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Daemon down — PDFs open natively instead of on an error page.
+//
+// While the daemon cannot be reached, a session rule allows every main-frame
+// request ahead of all redirect rules (priority above the dynamic ones), so
+// no tab is sent to a dead port. A tab that was sent there before the worker
+// noticed is put back on the URL it was going to.
+// -----------------------------------------------------------------------------
+
+const DAEMON_DOWN_RULE_ID = 900;
+let _daemonDown = null;   // unknown after a service-worker start
+let _daemonDownUpdate = Promise.resolve();
+
+function setDaemonDown(down) {
+    if (_daemonDown === down) return _daemonDownUpdate;
+    _daemonDown = down;
+    _daemonDownUpdate = _daemonDownUpdate.then(() => chrome.declarativeNetRequest.updateSessionRules({
+        removeRuleIds: [DAEMON_DOWN_RULE_ID],
+        addRules: down ? [{
+            id: DAEMON_DOWN_RULE_ID,
+            priority: 100,
+            action: { type: 'allow' },
+            condition: { resourceTypes: ['main_frame'] },
+        }] : [],
+    })).then(() => {
+        console.log(`pdf_viewer: daemon ${down ? 'unreachable — redirects off' : 'reachable — redirects on'}`);
+    }).catch((e) => console.warn('pdf_viewer: daemon-down rule update failed —', e.message));
+    return _daemonDownUpdate;
+}
+
+// Tab id → time of the last bounce, so a tab is never bounced in a loop.
+const _bounced = new Map();
+const BOUNCE_COOLDOWN_MS = 10000;
+
+async function bounceFromDeadDaemon(details) {
+    const target = originalUrl(details.url);
+    if (!target) return;
+    const last = _bounced.get(details.tabId) || 0;
+    if (Date.now() - last < BOUNCE_COOLDOWN_MS) return;
+    _bounced.set(details.tabId, Date.now());
+    await setDaemonDown(true);
+    try {
+        await chrome.tabs.update(details.tabId, {
+            url: target.startsWith('file:') ? target : withPassthrough(target),
+        });
+        console.log(`pdf_viewer: daemon unreachable (${details.error}) — tab ${details.tabId} back to ${target}`);
+    } catch (e) {
+        console.warn('pdf_viewer: bounce failed —', e.message);
+    }
+}
+
+const DAEMON_PAGES = { urls: [`${VIEWER}/*`, `${DAEMON}/*`], types: ['main_frame'] };
+
+chrome.webRequest.onBeforeRequest.addListener((details) => {
+    let path;
+    try {
+        path = new URL(details.url).pathname;
+    } catch (_) {
+        return;
+    }
+    if (OPEN_ROUTES.has(path)) openThroughBrowser(details.url);
+}, DAEMON_PAGES);
+
+chrome.webRequest.onErrorOccurred.addListener((details) => {
+    // ERR_ABORTED is the user or a redirect moving on, not a dead daemon.
+    if (details.tabId < 0 || /ERR_ABORTED|ERR_BLOCKED/.test(details.error)) return;
+    bounceFromDeadDaemon(details);
+}, DAEMON_PAGES);
 
 async function toggleCurrentPdf(tab) {
     if (!tab || !tab.id || !tab.url) {
@@ -516,3 +800,17 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // was terminated and got woken up by an event other than the ones above).
 syncCachedRules();
 startNavPollLoop();
+
+// Isolated from rule sync and the sign-in relay for easy independent merging.
+function reportFileSchemeAccess() {
+    chrome.extension.isAllowedFileSchemeAccess((allowed) => {
+        fetch(DAEMON + '/extension/file-access', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ allowed }),
+        }).catch(() => {});
+    });
+}
+reportFileSchemeAccess();
+chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === SYNC_ALARM) reportFileSchemeAccess();
+});

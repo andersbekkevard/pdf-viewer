@@ -37,6 +37,7 @@ preserving ADR 0004's accepted daemon/compute split.
 ├── log                  timestamped convert / download / server events
 ├── mappings.tsv         pdf-source ↔ hash ↔ html-path index (grep-friendly)
 ├── disabled.json        per-hash custom-viewer disable list
+├── _gated_hosts.json    hosts whose PDFs need the browser's session (docs/reader.md)
 ├── visits.db            SQLite event log (hash, ts, kind) — see below
 ├── state.db             per-document viewer state (position, marks, zoom) — see below
 ├── <hash>/              one dir per unique document
@@ -203,6 +204,14 @@ or invokes Docker
   viewer but Chromium blocks http→file redirects, so we stream
   instead.
 
+With `PDF_VIEWER_ENGINE=reader` a remote miss is opened instead: the daemon
+downloads the source into `_source/`, or, for a host behind a sign-in, holds
+the navigation while the extension supplies the bytes from the browser's
+session ([reader.md](reader.md), "Sign-in-gated sources"). `_gated_hosts.json`
+(`{"hosts": [...]}`, at most 500) lists the hosts for which that was needed, so
+their later opens skip the cookie-less download. Deleting the file only costs
+one cookie-less attempt per host.
+
 ## Native fallback / disabled entries
 
 `disabled.json` stores a sorted list of cache-entry hashes whose source PDFs
@@ -308,3 +317,24 @@ The source canonical HTML and its visible text markup are preserved.
 
 Regenerate an affected entry's light artifact to obtain this metadata; older
 artifacts remain compatible through the converter's original initialization.
+
+## Local file revisions
+
+Reader opens validate an immutable `_source/source.pdf` snapshot before publishing
+its content hash. The local path (absolute, symlink components preserved) is
+tracked in `entry.json` with `source_refs`, `local_stamps` and page count. Reopening
+a changed registered path copies position, marks and zoom to newly seen content;
+page numbers stay the same and clamp to the new final page. Existing target-content
+state wins, preventing an unrelated source from overwriting it. Opening an unrelated
+path never copies state from another path. Identical bytes still share hash state.
+Both `/read?path=` and `/view-file-raw?<file-url>` use this registration path.
+
+A superseded entry is deleted, including its rasters, text, OCR and source snapshot,
+only when no other registered source refers to it. Old state rows remain available
+to late writers, but are never used for an unrelated path. A moved/renamed file with
+unchanged bytes shares its hash. Deleted originals leave the last valid snapshot
+readable. Invalid, truncated or changing saves return 409 without replacing it.
+Snapshots cost one additional copy of local PDF bytes. Stability uses size, inode,
+mtime and ctime, followed by a 600 ms quiet window, EOF and PDFium parse checks in
+a worker; it cannot predict a writer that pauses longer than the quiet window.
+EOF is required within the final 2 KB; unusually padded PDFs may need resaving.

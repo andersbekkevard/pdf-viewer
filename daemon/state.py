@@ -29,7 +29,7 @@ DB_PATH = pathlib.Path(
     or pathlib.Path.home() / ".cache" / "pdf_viewer" / "state.db"
 )
 
-KEYS = ("position", "marks", "zoom")
+KEYS = ("position", "marks", "zoom", "pins", "outline")
 MAX_VALUE_BYTES = 64 * 1024
 _HASH_RE = re.compile(r"^[a-f0-9]{6,32}$")
 _LETTER_RE = re.compile(r"^[a-z]$")
@@ -173,3 +173,29 @@ def forget(hash_: str) -> int:
             return cur.rowcount or 0
     except sqlite3.Error:
         return 0
+
+
+def inherit_local(previous: str, current: str, pages: int) -> None:
+    """Copy only along a registered path edge. Keep page numbers, clamp removals.
+
+    Never replace state already belonging to the target content hash.
+    """
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if not conn.execute("SELECT 1 FROM state WHERE hash=?", (current,)).fetchone():
+                for key, encoded, ts in conn.execute("SELECT key,value,ts FROM state WHERE hash=?", (previous,)).fetchall():
+                    value = json.loads(encoded)
+                    def clamp(mark):
+                        if isinstance(mark, dict) and isinstance(mark.get("page"), (int, float)):
+                            mark["page"] = max(1, min(pages, mark["page"]))
+                    if key == "position":
+                        clamp(value)
+                    elif key in ("marks", "pins"):
+                        for mark in (value.values() if isinstance(value, dict) else value):
+                            clamp(mark)
+                    _write(conn, current, key, json.dumps(value), ts)
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise

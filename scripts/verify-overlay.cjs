@@ -2,7 +2,7 @@
 /*
  * Overlay behavior proof against a real cached document.
  *
- * Usage: verify-overlay.cjs <viewer-url-or-path> [--only <group,...>]
+ * Usage: verify-overlay.cjs <viewer-url-or-path> [--base URL] [--only <group,...>]
  *   e.g. /7319a537e6c3b9da/kompendium.light.html
  *
  * Groups (all by default):
@@ -14,6 +14,8 @@
  *   sidebar     outline + thumbnail keyboard commits, one active outline row
  *   commands    palette commands, preferences, settings, cheatsheet, yank
  *   search      `/` search, Enter lands inside the scrolloff band, n cycles
+ *   interaction arrows, paging/history/zoom keys, dark, counter, quote, state
+ *   smoke       boot, raster readiness (reader), find, assets, console
  *
  * The document should have an outline and internal links. This is a
  * supplement to the real Comet + Vimium check, not a replacement: synthetic
@@ -23,13 +25,15 @@
 
 const { chromium } = require('playwright');
 
-const BASE = 'http://localhost:7435';
+let BASE = process.env.PDFV_BASE || 'http://localhost:7435';
 const VIEWPORT = { width: 1440, height: 1000 };
 const TOL = 1.5;
 const PAGE_LEAD = 8;
 
 const args = process.argv.slice(2);
-const target = args.find((a) => !a.startsWith('--'));
+const target = args[0] && !args[0].startsWith('--') ? args[0] : null;
+const baseIdx = args.indexOf('--base');
+if (baseIdx >= 0 && args[baseIdx + 1]) BASE = args[baseIdx + 1].replace(/\/$/, '');
 const onlyIdx = args.indexOf('--only');
 const only = onlyIdx >= 0 && args[onlyIdx + 1] ? new Set(args[onlyIdx + 1].split(',')) : null;
 if (!target) {
@@ -38,6 +42,8 @@ if (!target) {
 }
 const URL = /^https?:/.test(target) ? target : BASE + (target.startsWith('/') ? '' : '/') + target;
 
+BASE = new globalThis.URL(URL).origin;
+let activeBrowser;
 const results = [];
 function record(name, ok, detail) {
   results.push({ name, ok, detail });
@@ -96,6 +102,13 @@ function installProbe() {
     // Screen y (relative to the viewport top) of a pdf2htmlEX link's XYZ
     // destination, or null when it has none.
     destY(a) {
+      const reader = a.getAttribute('data-reader-dest');
+      if (reader) {
+        const d = JSON.parse(reader), pf = this.page(d[0]);
+        const r = pf.getBoundingClientRect();
+        return {page: pf.id, y: r.top + d[3] * r.height / parseFloat(pf.style.height) - pc.getBoundingClientRect().top,
+          atEnd: pc.scrollTop >= pc.scrollHeight - pc.clientHeight - 1};
+      }
       const v = window.pdf2htmlEX.defaultViewer;
       let dest;
       try { dest = JSON.parse(a.getAttribute('data-dest-detail')); } catch (e) { return null; }
@@ -113,7 +126,7 @@ function installProbe() {
         atEnd: pc.scrollTop >= pc.scrollHeight - pc.clientHeight - 1,
       };
     },
-    outlineLinks() { return Array.from(document.querySelectorAll('#outline a.l[data-dest-detail]')); },
+    outlineLinks() { return Array.from(document.querySelectorAll('#outline a.l[data-dest-detail], #outline a.l[data-reader-dest]')); },
     activeOutline() { return Array.from(document.querySelectorAll('#outline a.pdf2html-active')); },
     zoomVar() { return parseFloat(getComputedStyle(pc).getPropertyValue('--pdf2html-zoom')); },
     clips: [],
@@ -124,11 +137,15 @@ function installProbe() {
 }
 
 async function main() {
-  const browser = await chromium.launch({ headless: true });
+  const browser = activeBrowser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ viewport: VIEWPORT });
-  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: BASE });
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new globalThis.URL(URL).origin });
   const page = await context.newPage();
   const errors = [];
+  const failedAssets = [];
+  page.on('requestfailed', r => {if(r.url().includes('/_assets/')) failedAssets.push(r.url());});
+  page.on('response', r => {if(r.url().includes('/_assets/') && r.status()>=400) failedAssets.push(r.url());});
+  let reader = false;
   page.on('pageerror', (err) => errors.push(err.message));
   page.on('console', (msg) => { if (msg.type() === 'error') errors.push(msg.text()); });
 
@@ -153,9 +170,11 @@ async function main() {
     const resp = await page.goto(URL, { waitUntil: 'load', timeout: 60000 });
     if (!resp || !resp.ok()) throw new Error(`viewer did not load: ${URL}`);
     await page.waitForSelector('#pdf2html-pageno-current', { state: 'attached', timeout: 30000 });
-    await page.waitForFunction(() => window.pdf2htmlEX && window.pdf2htmlEX.defaultViewer
+    await page.waitForFunction(() => (document.querySelector('[data-reader-raster]') || (window.pdf2htmlEX && window.pdf2htmlEX.defaultViewer))
       && document.getElementById('page-container').style.getPropertyValue('--pdf2html-zoom'),
       null, { timeout: 30000, polling: 100 });
+    reader = await page.evaluate(() => !!document.querySelector('[data-reader-raster]'));
+    if (reader) await page.waitForFunction(() => document.documentElement.dataset.readerText === 'complete', null, {timeout: 60000});
     await page.evaluate(installProbe);
     total = await probe(() => window.__probe.pages.length);
     await settle();
@@ -181,6 +200,108 @@ async function main() {
   // work: pick(n) is n clamped to the document, minus a margin at the end.
   let total = 0;
   const pick = (n, margin = 3) => Math.max(2, Math.min(n, total - margin));
+
+  if (run('interaction') && process.env.PDFV_SYNTHETIC === '1') {
+    let release;
+    const gate = new Promise(r => {release=r;});
+    let ranges = 0;
+    await page.route('**/r/*/text/**', async route => {ranges++; await gate; await route.continue();});
+    try {
+      await page.goto(URL, {waitUntil:'load'});
+      await page.waitForSelector('.pf[data-pdf2html-raster-state="ready"]', {timeout:30000});
+      await probe(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
+      record('[reader] first raster paints before all text', await probe(() => document.documentElement.dataset.readerText==='loading' && document.querySelectorAll('[data-reader-pending]').length>0));
+    } finally {release();}
+    await page.waitForFunction(() => document.documentElement.dataset.readerText==='complete', null, {timeout:60000});
+    record('[reader] progressive ranges complete the text layer', ranges>0 && await probe(() => !document.querySelector('[data-reader-pending]') && document.querySelector('#pf9f .t')!==null));
+    await page.unroute('**/r/*/text/**');
+  }
+
+  if (run('smoke')) {
+    await load({reset: true});
+    record('overlay boots with pages and sidebar', (process.env.PDFV_FIXTURE_PAGES ? total === +process.env.PDFV_FIXTURE_PAGES : total > 0) && await page.locator('#sidebar').count() === 1);
+    if (reader) {
+      await page.waitForSelector('.pf[data-pdf2html-raster-state="ready"]', {timeout:30000});
+      record('[reader] first raster is ready', true);
+    }
+    record('native find works', await probe(() => window.find('heading')));
+    if (!reader) record('[pdf2htmlEX] render loop stopped', await probe(() => window.pdf2htmlEX.defaultViewer.render_timer === null));
+  }
+
+  if (run('interaction')) {
+    await load({reset: true});
+    {
+      const top = () => probe(() => window.__probe.pc.scrollTop);
+      const pageTop = n => probe(n => window.__probe.pageTop(window.__probe.page(n)), n);
+      await palette('5');
+      await blurToDocument();
+      await page.keyboard.press('ArrowRight'); await settle();
+      record('ArrowRight advances a page', near(await pageTop(6), PAGE_LEAD));
+      await page.keyboard.press('ArrowLeft'); await settle();
+      record('ArrowLeft goes back a page', near(await pageTop(5), PAGE_LEAD));
+      for (const [key, amount] of [['ArrowDown',60], ['ArrowUp',-60], ['Space',900], ['Shift+Space',-900], ['PageDown',900], ['PageUp',-900]]) {
+        const before = await top();
+        await page.keyboard.press(key); await settle();
+        record(key + ' scrolls the document', near((await top()) - before, amount));
+      }
+      await page.keyboard.press('End'); await settle();
+      record('End reaches document end', await probe(() => {const p=window.__probe.pc; return p.scrollTop >= p.scrollHeight-p.clientHeight-1;}));
+      await page.keyboard.press('Home'); await settle();
+      record('Home reaches document start', near(await top(),0));
+      await palette('5'); await palette('12'); await blurToDocument();
+      await page.keyboard.press('Meta+z'); await settle();
+      record('Cmd-Z restores the previous jump', near(await pageTop(5),PAGE_LEAD));
+      await page.keyboard.press('Meta+Shift+z'); await settle();
+      record('Cmd-Shift-Z redoes the jump', near(await pageTop(12),PAGE_LEAD));
+      await page.keyboard.press('Meta+b'); await page.waitForTimeout(900);
+      const sizes = () => probe(() => ({sidebar:document.getElementById('sidebar').getBoundingClientRect().width, page:window.__probe.pages[0].getBoundingClientRect().width}));
+      for (const mod of ['Meta','Control']) {
+        await palette('zoom 1');
+        const a=await sizes();
+        await blurToDocument(); await page.keyboard.press(mod+'+Equal'); await settle();
+        const b=await sizes();
+        record(mod+' plus zooms pages without changing sidebar width', b.page>a.page && near(a.sidebar,b.sidebar));
+        await page.keyboard.press(mod+'+Minus'); await settle();
+        const c=await sizes();
+        record(mod+' minus shrinks pages without changing sidebar width', c.page<b.page && near(a.sidebar,c.sidebar));
+        await page.keyboard.press(mod+'+Digit0'); await settle();
+        record(mod+' 0 restores auto zoom', await probe(() => Object.keys(localStorage).some(k=>k.startsWith('pdf2html-zoom:') && localStorage[k]==='auto')));
+      }
+      await page.keyboard.press('Escape');
+      await palette('dark');
+      record(':dark enables dark pages', await probe(() => document.body.classList.contains('pdf2html-dark-pages')));
+      if (reader) record('[reader] text remains transparent in dark mode', await probe(() => getComputedStyle(document.querySelector('.t')).color === 'rgba(0, 0, 0, 0)'));
+      await palette('dark');
+      record(':dark disables dark pages', !await probe(() => document.body.classList.contains('pdf2html-dark-pages')));
+      await palette('counter brief');
+      record(':counter brief hides the persistent counter', await probe(() => localStorage.getItem('pdf2html-pageno-brief')==='1' && document.body.classList.contains('pageno-hidden')));
+      await palette('5');
+      record('brief counter flashes on page change', await probe(() => document.body.classList.contains('pageno-flash')));
+      await page.waitForTimeout(1800);
+      record('brief counter flash expires', !await probe(() => document.body.classList.contains('pageno-flash')));
+      await probe(() => {const r=document.createRange(); r.selectNodeContents(window.__probe.page(5).querySelector('.t')); getSelection().removeAllRanges(); getSelection().addRange(r);});
+      // Palette opening must preserve the selected quote.
+      await page.keyboard.press(':'); await page.keyboard.type('yank quote'); await page.keyboard.press('Enter');
+      await page.waitForTimeout(300);
+      const quote=await probe(() => window.__probe.clips.at(-1)||'');
+      record(':yank quote copies selection and page reference', quote.includes('Page 5 heading') && quote.includes('5'));
+      record('copy toast is visible and accessible', await probe(() => {const t=document.getElementById('pdf2html-toast'); return t && t.classList.contains('shown') && t.getAttribute('role')==='status' && /copied/i.test(t.textContent);}));
+      await page.waitForTimeout(2000);
+      record('toast expires', !await probe(() => document.getElementById('pdf2html-toast').classList.contains('shown')));
+      await palette('5'); await palette('mark b'); await palette('zoom 1.5'); await palette('12');
+      await page.waitForTimeout(1500);
+      const hash = /^\/(?:r\/)?([a-f0-9]+)\//.exec(new globalThis.URL(URL).pathname)[1];
+      const state = await (await context.request.get(BASE+'/entry/'+hash+'/state')).json();
+      record('daemon stores position, zoom and marks', state.position?.value.page===12 && state.zoom?.value==='1.5' && state.marks?.value.b.page===5);
+      await page.goto(BASE+'/healthz', {waitUntil:'networkidle'});
+      await page.evaluate(() => localStorage.clear());
+      await load();
+      record('daemon restores position without localStorage', near(await pageTop(12),PAGE_LEAD));
+      record('daemon restores zoom without localStorage', near(await probe(() => window.__probe.zoomVar()),1.5,.001));
+      await palette('jump b');
+      record('daemon restores marks without localStorage', near(await pageTop(5),PAGE_LEAD));
+    }
+  }
 
   // ===================================================================== geometry
   if (run('geometry')) {
@@ -219,7 +340,7 @@ async function main() {
     const links = await probe(async () => {
       const p = window.__probe;
       const out = [];
-      for (const a of p.pc.querySelectorAll('a.l[data-dest-detail]')) {
+      for (const a of p.pc.querySelectorAll('a.l[data-dest-detail], a.l[data-reader-dest]')) {
         if (out.length >= 4) break;
         if (!p.destY(a)) continue;
         p.pc.scrollTop = 0;
@@ -241,11 +362,11 @@ async function main() {
     await probe(() => window.__probe.scrollToPage(4, 0.6));
     await page.waitForTimeout(200);
     const current = await probe(() => ({
-      runtime: window.pdf2htmlEX.defaultViewer.cur_page_idx + 1,
+      runtime: window.pdf2htmlEX ? window.pdf2htmlEX.defaultViewer.cur_page_idx + 1 : null,
       overlap: window.__probe.mostVisible(),
       counter: +document.getElementById('pdf2html-pageno-current').textContent,
     }));
-    record('pdf2htmlEX current page matches viewport overlap', current.runtime === current.overlap,
+    record(reader ? '[reader] counter matches viewport overlap' : '[pdf2htmlEX] current page matches viewport overlap', (reader ? current.counter : current.runtime) === current.overlap,
       `runtime=${current.runtime}, overlap=${current.overlap}`);
 
     const zoomCase = async (label, act) => {
@@ -264,8 +385,8 @@ async function main() {
     record(':zoom 1.2 applies the zoom', near(await probe(() => window.__probe.zoomVar()), 1.2, 0.001));
     await zoomCase(':zoom auto', () => palette('zoom auto'));
     const autoZoom = await probe(() => window.__probe.zoomVar());
-    await zoomCase('Cmd+= (pdf2htmlEX rescale key)', async () => { await blurToDocument(); await page.keyboard.press('Meta+Equal'); });
-    const plus = await probe(() => ({ z: window.__probe.zoomVar(), scale: window.pdf2htmlEX.defaultViewer.scale }));
+    await zoomCase('Cmd+= (page zoom; pdf2htmlEX also keeps its private scale at 1)', async () => { await blurToDocument(); await page.keyboard.press('Meta+Equal'); });
+    const plus = await probe(() => ({ z: window.__probe.zoomVar(), scale: (window.pdf2htmlEX ? window.pdf2htmlEX.defaultViewer.scale : 1) }));
     record('Cmd+= raises the one page zoom', plus.z > autoZoom + 0.01 && plus.scale === 1,
       `zoom ${autoZoom.toFixed(3)} -> ${plus.z.toFixed(3)}, pdf2htmlEX scale ${plus.scale}`);
     await zoomCase('Cmd+0 (back to auto-fit)', async () => { await page.keyboard.press('Meta+Digit0'); });
@@ -366,7 +487,7 @@ async function main() {
     await page.waitForTimeout(500);
     const hasOutline = (await probe(() => window.__probe.outlineLinks().length)) > 2;
     // Outline tab: Ctrl-j twice, Enter.
-    await page.keyboard.press('h');
+    await page.locator('[data-tab=outline]').click();
     await page.keyboard.press('Control+j');
     await page.keyboard.press('Control+j');
     const selected = await probe(() => {
@@ -391,7 +512,7 @@ async function main() {
     }
 
     // Thumbnails tab: from the current page, Ctrl-j twice, Enter.
-    await page.keyboard.press('l');
+    await page.keyboard.press('Control+ArrowRight');
     await page.waitForTimeout(200);
     const start = await probe(() => window.__probe.mostVisible());
     await page.keyboard.press('Control+j');
@@ -423,12 +544,12 @@ async function main() {
   // ===================================================================== commands
   if (run('commands')) {
     await load({ reset: true });
-    await palette('pin');
+    await palette('cursorpin');
     const pin = await probe(() => ({
       stored: localStorage.getItem('pdf2html-pinned'),
       css: document.getElementById('page-container').style.getPropertyValue('--pdf2html-scrolloff'),
     }));
-    record(':pin toggles pin-to-center off', pin.stored === '0' && pin.css.trim() === '25%', JSON.stringify(pin));
+    record(':cursorpin toggles pin-to-center off', pin.stored === '0' && pin.css.trim() === '25%', JSON.stringify(pin));
     await palette('so 10');
     const so = await probe(() => ({
       stored: localStorage.getItem('pdf2html-scrolloff'),
@@ -520,6 +641,87 @@ async function main() {
     await page.keyboard.press('Escape');
   }
 
+  if (run('pins')) {
+    await load({reset:true});
+    await page.keyboard.press('Control+Shift+P');
+    record('pin chord drops a numbered pin and toast', await page.locator('.pdf2html-pin-marker').count() === 1 && /Pin 1/.test(await page.locator('#pdf2html-toast').innerText()));
+    const quote = await probe(() => {const t=document.querySelector('#pf1 .t'),r=document.createRange();r.selectNodeContents(t);getSelection().removeAllRanges();getSelection().addRange(r);return t.textContent.trim();});
+    await page.keyboard.press('Control+Shift+P');
+    await palette('pins');
+    record('selection supplies a single-line pin title', (await page.locator('.pdf2html-pin-copy strong').nth(1).innerText()).includes(quote));
+    await page.keyboard.press('Control+j'); await page.keyboard.press('Enter');
+    record('Pins keyboard selector commits the second row', await page.locator('.pdf2html-pin-row').count()===2);
+    await palette('unpin 2'); await page.keyboard.press('Escape');
+    const before = await probe(() => window.__probe.anchor());
+    await palette('page 8');
+    await page.keyboard.press('Control+Shift+O'); await settle();
+    const after = await probe(() => window.__probe.anchor());
+    record('latest-pin chord restores exact anchor', before.id===after.id && near(before.frac,after.frac,.005));
+    await page.keyboard.press('Meta+z'); await settle();
+    record('pin jump records a single undo', await probe(() => window.__probe.mostVisible())===8);
+    await palette('pins');
+    record('Pins third tab shows thumbnail and remove control', await page.locator('.pdf2html-pin-jump img').count()===1 && await page.locator('.pdf2html-pin-remove').count()===1);
+    if (process.env.PDFV_SCREENSHOTS) { await page.locator('.pdf2html-pin-jump').click(); await settle(); await page.waitForTimeout(500); await page.screenshot({path:process.env.PDFV_SCREENSHOTS+'/pins.png'}); }
+    await page.locator('.pdf2html-pin-remove').click();
+    record('remove leaves an explanatory empty state', /:pin/.test(await page.locator('#pdf2html-pins').innerText()));
+    if (process.env.PDFV_SCREENSHOTS) await page.screenshot({path:process.env.PDFV_SCREENSHOTS+'/pins-empty.png'});
+    await page.keyboard.press('Escape');
+    await palette('page 1'); await page.keyboard.press('Control+Shift+P');
+    await page.waitForTimeout(1100);
+    await probe(() => localStorage.clear());
+    await page.reload(); await page.waitForSelector('.pdf2html-pin-marker');
+    record('daemon restores pin after clearing localStorage', await page.locator('.pdf2html-pin-marker').count()===1);
+    if (process.env.PDFV_SCREENSHOTS) await page.screenshot({path:process.env.PDFV_SCREENSHOTS+'/pin-marker.png'});
+  }
+  if (run('hierarchy') && reader) {
+    // Generated shell only: replace its outline before the model reads it.
+    await page.route(URL, async route => {
+      const r = await route.fetch(); let html = await r.text();
+      const children = Array.from({length:1998}, (_,i)=>'<li><a href="#pf8">Detail '+i+'</a></li>').join('');
+      html = html.replace(/<div id="outline">[\s\S]*?<\/div>/, '<div id="outline"><ul><li><a href="#pf1">Chapter</a><ul><li><a href="#pf4">Section</a><ul>'+children+'</ul></li></ul></li></ul></div>');
+      await route.fulfill({response:r,body:html});
+    });
+    async function keyboardCost() {
+      return probe(() => {
+        const times=[];
+        for(let i=0;i<10;i++) {
+          const t=performance.now();
+          document.getElementById('pdf2html-sidebar-body').dispatchEvent(new KeyboardEvent('keydown',{key:'j',ctrlKey:true,bubbles:true}));
+          void document.getElementById('outline').offsetHeight;
+          times.push(performance.now()-t);
+        }
+        return times.sort((a,b)=>a-b)[5];
+      });
+    }
+    if (process.env.PDFV_BASELINE_SIDEBAR) {
+      await page.route('**/overlay-sidebar.js*', route=>route.fulfill({contentType:'text/javascript',body:require('fs').readFileSync(process.env.PDFV_BASELINE_SIDEBAR,'utf8')}));
+      await load({reset:true}); await page.keyboard.press('Meta+b'); await page.waitForTimeout(300);
+      record('2000-entry baseline keyboard median',true,(await keyboardCost()).toFixed(2)+' ms');
+      await page.unroute('**/overlay-sidebar.js*');
+    }
+    const start = Date.now(); await load({reset:true});
+    await page.keyboard.press('Meta+b'); await page.waitForTimeout(300);
+    record('2000-entry tree starts below level two collapsed', await page.locator('#outline a').count()===2000 && await page.locator('#outline ul[hidden]').count()===1, 'load through mounted sidebar '+(Date.now()-start)+' ms (includes network/raster)');
+    if (process.env.PDFV_SCREENSHOTS) await page.screenshot({path:process.env.PDFV_SCREENSHOTS+'/outline-collapsed.png'});
+    await page.keyboard.press('h');
+    record('h collapses selected outline branch', await page.locator('#outline > ul > li > ul[hidden]').count()===1);
+    await page.keyboard.press('l');
+    record('l expands selected outline branch', await page.locator('#outline > ul > li > ul[hidden]').count()===0);
+    record('2000-entry tree keyboard median',true,(await keyboardCost()).toFixed(2)+' ms');
+    const timing = await probe(() => { const b=document.querySelectorAll('.pdf2html-disclosure')[1], t=performance.now(); b.click(); return performance.now()-t; });
+    record('2000-entry disclosure stays below 100 ms', timing<100, timing.toFixed(2)+' ms');
+    if (process.env.PDFV_SCREENSHOTS) await page.screenshot({path:process.env.PDFV_SCREENSHOTS+'/outline-expanded.png'});
+    await page.locator('.pdf2html-disclosure').nth(1).click();
+    await page.waitForTimeout(1100); await page.reload(); await page.waitForSelector('.pdf2html-disclosure', {state:'attached'}); await page.evaluate(installProbe);
+    record('collapsed state persists', await page.locator('#outline ul[hidden]').count()===1);
+    await palette('page 8');
+    record('current branch opens automatically', await page.locator('#outline ul[hidden]').count()===0);
+    await palette('counter');
+    record('counter prefers top-level chapter with deep hover', await page.locator('#pdf2html-pageno').innerText().then(t=>t.includes('Chapter')&&!t.includes('Detail')) && await page.locator('#pdf2html-pageno').getAttribute('title').then(t=>t.includes('Detail')));
+    await page.unroute(URL);
+  }
+
+  record('no failed asset requests', failedAssets.length===0, failedAssets.join(' | '));
   record('no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));
   await browser.close();
 }
@@ -534,7 +736,8 @@ setTimeout(() => {
 
 main()
   .catch((err) => record('harness ran to completion', false, err.stack || String(err)))
-  .finally(() => {
+  .finally(async () => {
+    if (activeBrowser) await activeBrowser.close();
     const failed = results.filter((r) => !r.ok).length;
     console.log(`verify-overlay: ${failed ? 'FAIL' : 'PASS'} — ${results.length - failed}/${results.length} checks`);
     process.exitCode = failed ? 1 : 0;
