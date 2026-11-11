@@ -412,5 +412,18 @@ export function createSearch(core) {
         updateSearchCount();
     }
 
-    return { mount: mount, close: closeSearch, refresh: refresh };
+    // Open the bar holding `text`, with its hits on the visible pages marked;
+    // returns how many there are. Quick open's "Find" row starts here.
+    function find(text) {
+        if (!document.getElementById('pdf2html-search')) openSearch();
+        var input = document.getElementById('pdf2html-search-input');
+        if (!input) return 0;
+        input.value = text;
+        searchState.entered = false;
+        searchState.activeIdx = -1;
+        refresh(text);
+        return searchState.hits.length;
+    }
+
+    return { mount: mount, close: closeSearch, refresh: refresh, find: find };
 }
