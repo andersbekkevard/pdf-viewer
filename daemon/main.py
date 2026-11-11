@@ -541,7 +541,9 @@ async def _relay_source(hash_: str, tab_url: str, source_ref: str, base_url: str
 #      daemon's own cookie-less download; any other host is tried first, and
 #      a PDF from it opens the reader as before.
 #   3. The open is claimed by that question; the extension fetches the URL
-#      with credentials and PUTs the bytes to `/extension/open/<id>`.
+#      with credentials and PUTs the bytes to `/extension/open/<id>` in
+#      pieces of a few MB as they arrive (`?offset=`, the last `&done=1`),
+#      which the daemon appends to a temporary file in `_source/`.
 #   4. The held response becomes a 307 to `/r/<hash>/`, so the tab goes from
 #      the link to the reader without any viewer in between. A sign-in page,
 #      a non-PDF answer or an HTTP error becomes a 307 to the original URL
@@ -566,8 +568,12 @@ _OPEN_CLAIM_GRACE_SEC = 1.0
 _OPEN_LISTENER_TTL_SEC = 120.0
 # How long the navigation itself is held before the holding page is served.
 _OPEN_HOLD_SEC = 2.0
-# Bound on the browser's download once claimed.
-_OPEN_TRANSFER_SEC = 300.0
+# A claimed transfer that makes no progress this long sends the tab to its
+# fallback (service worker killed, network stalled).
+_OPEN_STALL_SEC = 60.0
+# The extension uploads in pieces of at most this size, so neither side holds
+# a whole large PDF in memory.
+_OPEN_CHUNK_MAX = 16 * 1024 * 1024
 # How long a claim waits for the matching `/view-raw` request to arrive and
 # for the daemon's own download to finish or fail.
 _OPEN_CLAIM_WAIT_SEC = 3.0
@@ -600,6 +606,9 @@ class _Open:
         self.finished_at: Optional[float] = None
         self.target: Optional[str] = None
         self.from_browser = False
+        self.upload: Optional[sources.Upload] = None
+        self.upload_lock = threading.Lock()
+        self.progress_at = 0.0
 
 
 def _host_of(url: str) -> str:
@@ -658,6 +667,8 @@ def _finish_open(op: _Open, target: str) -> None:
     """Set the tab's destination; call with _opens_cond held."""
     if op.state == "done":
         return
+    if op.upload is not None and not target.startswith("/r/"):
+        op.upload.abort()
     op.state = "done"
     op.target = target
     op.finished_at = time.monotonic()
@@ -813,16 +824,21 @@ def extension_open(body: ExtensionOpenRequest):
 
 
 def _watch_claimed_open(op: _Open) -> None:
-    """Bound a claimed transfer: a browser that never uploads (service worker
-    killed, tab closed mid-download) sends the tab to its fallback."""
-    def expire() -> None:
+    """Bound a claimed transfer by its progress: a browser that stops
+    uploading (service worker killed, tab closed mid-download) sends the tab
+    to its fallback."""
+    op.progress_at = time.monotonic()
+
+    def watch() -> None:
         with _opens_cond:
-            if op.state == "claimed":
-                print(f"browser open: no upload for {op.source_ref} in time", flush=True)
-                _finish_open(op, with_passthrough(op.url))
-    timer = threading.Timer(_OPEN_TRANSFER_SEC, expire)
-    timer.daemon = True
-    timer.start()
+            while op.state == "claimed":
+                idle = time.monotonic() - op.progress_at
+                if idle >= _OPEN_STALL_SEC:
+                    print(f"browser open: upload of {op.source_ref} stalled", flush=True)
+                    _finish_open(op, with_passthrough(op.url))
+                    break
+                _opens_cond.wait(timeout=_OPEN_STALL_SEC - idle)
+    threading.Thread(target=watch, name=f"open-{op.id}", daemon=True).start()
 
 
 def _claimed_open(open_id: int) -> Optional[_Open]:
@@ -830,12 +846,35 @@ def _claimed_open(open_id: int) -> Optional[_Open]:
         return next((op for op in _opens.values() if op.id == open_id and op.state == "claimed"), None)
 
 
-def _store_browser_open(op: _Open, body: bytes, disposition: str) -> str:
-    """Store uploaded bytes for a claimed open and return the tab's target."""
+def _append_browser_open(op: _Open, offset: int, chunk: bytes) -> None:
+    """Append one uploaded piece; raises SourceError on a gap or bad bytes."""
+    with op.upload_lock:
+        if op.upload is None:
+            op.upload = sources.Upload(catalog.root / op.hash / "_source", str(op.id))
+        if offset != op.upload.size:
+            raise sources.SourceError(f"upload piece at {offset}, expected {op.upload.size}")
+        op.upload.append(chunk)
+    with _opens_cond:
+        if op.state == "done" and not (op.target or "").startswith("/r/"):
+            # Given up meanwhile (stall bound): drop what this piece wrote.
+            op.upload.abort()
+        op.progress_at = time.monotonic()
+        _opens_cond.notify_all()
+
+
+def _store_browser_open(op: _Open, disposition: str) -> str:
+    """Move a complete upload into place and return the tab's target."""
     try:
-        existing = catalog.cached_source(op.hash)
-        name = existing.name if existing else sources.save(
-            body, op.source_ref, disposition, catalog.root / op.hash / "_source")
+        with op.upload_lock:
+            if op.upload is None:
+                raise sources.SourceError("empty upload")
+            existing = catalog.cached_source(op.hash)
+            if existing:
+                # Stored meanwhile (another tab, the relay): that copy wins.
+                op.upload.abort()
+                name = existing.name
+            else:
+                name = op.upload.finish(op.source_ref, disposition)
         catalog.register(op.hash, op.source_ref, pathlib.PurePath(name).stem)
     except (sources.SourceError, OSError, InvalidCatalogInput) as error:
         print(f"browser open: could not store {op.source_ref}: {error}", flush=True)
@@ -846,8 +885,14 @@ def _store_browser_open(op: _Open, body: bytes, disposition: str) -> str:
 
 
 @app.put("/extension/open/{open_id}")
-async def extension_open_put(open_id: int, request: Request):
-    """The extension's answer for a claimed open: the PDF bytes, or with an
+async def extension_open_put(
+    open_id: int,
+    request: Request,
+    offset: int = Query(0, ge=0),
+    done: int = Query(0, ge=0, le=1),
+):
+    """The extension's answer for a claimed open: the PDF in pieces, each
+    PUT carrying the bytes from `offset` and the last one `done=1`, or with an
     `X-Fetch-Error` header the reason it has none (signed out, not a PDF)."""
     op = _claimed_open(open_id)
     if op is None:
@@ -861,12 +906,21 @@ async def extension_open_put(open_id: int, request: Request):
     body = bytearray()
     async for chunk in request.stream():
         body.extend(chunk)
-        if len(body) > sources.MAX_BYTES:
+        if len(body) > _OPEN_CHUNK_MAX:
             with _opens_cond:
                 _finish_open(op, with_passthrough(op.url))
-            raise HTTPException(413, "too large")
+            raise HTTPException(413, "upload piece too large")
+    try:
+        await asyncio.to_thread(_append_browser_open, op, offset, bytes(body))
+    except (sources.SourceError, OSError) as error:
+        print(f"browser open: could not store {op.source_ref}: {error}", flush=True)
+        with _opens_cond:
+            _finish_open(op, with_passthrough(op.url))
+        return {"accepted": False}
+    if not done:
+        return {"accepted": True}
     target = await asyncio.to_thread(
-        _store_browser_open, op, bytes(body), request.headers.get("x-source-content-disposition", ""))
+        _store_browser_open, op, request.headers.get("x-source-content-disposition", ""))
     with _opens_cond:
         _finish_open(op, target)
     return {"accepted": True}

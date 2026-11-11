@@ -493,6 +493,10 @@ async function startNavPollLoop() {
 const PASSTHROUGH = '_pdfvw=passthrough';
 const OPEN_ROUTES = new Set(['/view-raw', '/read-raw']);
 const MAX_SOURCE_BYTES = 512 * 1024 * 1024;
+// The bytes go to the daemon in pieces of about this size as they arrive, so
+// the worker never holds a whole large PDF: a service worker buffering a few
+// hundred MB was killed mid-upload in Chromium.
+const UPLOAD_PIECE_BYTES = 4 * 1024 * 1024;
 // Extension API calls reset the service worker's idle timer; a download
 // longer than its ~30 s budget would otherwise be cut off.
 const KEEPALIVE_MS = 20000;
@@ -555,8 +559,72 @@ function transferEnded() {
     }
 }
 
-async function putOpen(id, body, headers) {
-    await fetch(`${DAEMON}/extension/open/${id}`, { method: 'PUT', headers, body });
+// Resolves true when the daemon still wants more of this open.
+async function putOpen(id, body, headers, { offset = 0, done = true } = {}) {
+    const resp = await fetch(`${DAEMON}/extension/open/${id}?offset=${offset}&done=${done ? 1 : 0}`, {
+        method: 'PUT', headers, body,
+    });
+    if (!resp.ok) return false;
+    const answer = await resp.json().catch(() => ({}));
+    return answer.accepted !== false;
+}
+
+function concatBytes(parts, total) {
+    const out = new Uint8Array(total);
+    let at = 0;
+    for (const part of parts) {
+        out.set(part, at);
+        at += part.byteLength;
+    }
+    return out;
+}
+
+const isPdfMagic = (b) => b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46;
+
+// Stream a fetch response to the daemon in pieces. Throws on a non-PDF.
+async function uploadResponse(id, resp) {
+    const headers = {
+        'X-Source-Content-Type': resp.headers.get('content-type') || '',
+        'X-Source-Content-Disposition': resp.headers.get('content-disposition') || '',
+    };
+    const reader = resp.body.getReader();
+    let parts = [];
+    let pending = 0;
+    let offset = 0;
+    let checked = false;
+    // One piece uploads while the next is read: at most two in memory.
+    let inflight = Promise.resolve(true);
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (value && value.byteLength) {
+                parts.push(value);
+                pending += value.byteLength;
+            }
+            if (!checked && (pending >= 4 || done)) {
+                const head = concatBytes(parts, pending);
+                if (head.byteLength < 4 || !isPdfMagic(head)) {
+                    throw new Error(`got ${headers['X-Source-Content-Type'] || 'unknown content'}, not a PDF (signed out?)`);
+                }
+                checked = true;
+            }
+            if (offset + pending > MAX_SOURCE_BYTES) throw new Error('source larger than 512 MB');
+            if (pending >= UPLOAD_PIECE_BYTES || done) {
+                const piece = concatBytes(parts, pending);
+                parts = [];
+                if (!(await inflight)) throw new Error('the daemon gave up on this open');
+                inflight = putOpen(id, piece, headers, { offset, done });
+                offset += pending;
+                pending = 0;
+            }
+            if (done) {
+                if (!(await inflight)) throw new Error('the daemon gave up on this open');
+                return offset;
+            }
+        }
+    } finally {
+        reader.cancel().catch(() => {});
+    }
 }
 
 async function openThroughBrowser(daemonUrl) {
@@ -578,6 +646,7 @@ async function openThroughBrowser(daemonUrl) {
         return;
     }
     if (!claim || !claim.fetch) return;
+    console.log(`pdf_viewer: daemon wants the browser's bytes for ${url}`);
     transferStarted();
     try {
         const started = Date.now();
@@ -586,16 +655,8 @@ async function openThroughBrowser(daemonUrl) {
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const length = Number(resp.headers.get('content-length') || 0);
         if (length > MAX_SOURCE_BYTES) throw new Error('source larger than 512 MB');
-        const body = await resp.arrayBuffer();
-        const magic = new TextDecoder().decode(new Uint8Array(body, 0, Math.min(4, body.byteLength)));
-        if (magic !== '%PDF') {
-            throw new Error(`got ${contentType || 'unknown content'}, not a PDF (signed out?)`);
-        }
-        await putOpen(claim.id, body, {
-            'X-Source-Content-Type': contentType,
-            'X-Source-Content-Disposition': resp.headers.get('content-disposition') || '',
-        });
-        console.log(`pdf_viewer: opened ${body.byteLength} bytes through the browser in ${Date.now() - started} ms`);
+        const size = await uploadResponse(claim.id, resp);
+        console.log(`pdf_viewer: opened ${size} bytes through the browser in ${Date.now() - started} ms`);
     } catch (e) {
         console.warn('pdf_viewer: browser open failed —', e.message);
         try {

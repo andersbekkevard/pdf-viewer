@@ -85,9 +85,10 @@ class BrowserOpenTests(unittest.IsolatedAsyncioTestCase):
     async def claim(self, url: str = SOURCE) -> dict:
         return await asyncio.to_thread(main.extension_open, main.ExtensionOpenRequest(url=url))
 
-    async def answer(self, claim: dict, body: bytes = PDF, headers: dict | None = None) -> dict:
+    async def answer(self, claim: dict, body: bytes = PDF, headers: dict | None = None,
+                     *, offset: int = 0, done: int = 1) -> dict:
         response = await main.extension_open_put(claim["id"], upload(body, headers or {
-            "X-Source-Content-Disposition": DISPOSITION}))
+            "X-Source-Content-Disposition": DISPOSITION}), offset=offset, done=done)
         return response if isinstance(response, dict) else json.loads(response.body)
 
     def gated_hosts(self) -> list[str]:
@@ -229,11 +230,48 @@ class BrowserOpenTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_claimed_open_without_upload_expires_to_the_original_url(self):
         main._remember_gated_host(SOURCE)
-        with patch.object(main, "_OPEN_TRANSFER_SEC", 0.2), patch.object(main, "_OPEN_HOLD_SEC", 2.0):
+        with patch.object(main, "_OPEN_STALL_SEC", 0.2), patch.object(main, "_OPEN_HOLD_SEC", 2.0):
             tab = self.tab()
             await asyncio.wait_for(self.claim(), 3)
             response = await asyncio.wait_for(tab, 3)
         self.assertEqual(response.headers["location"], FALLBACK)
+
+    async def test_upload_in_pieces_keeps_a_slow_transfer_alive(self):
+        main._remember_gated_host(SOURCE)
+        body = PDF + bytes(range(256)) * 40
+        pieces = [body[i:i + 1000] for i in range(0, len(body), 1000)]
+        with patch.object(main, "_OPEN_STALL_SEC", 0.3), patch.object(main, "_OPEN_HOLD_SEC", 3.0):
+            tab = self.tab()
+            got = await asyncio.wait_for(self.claim(), 3)
+            offset = 0
+            for n, piece in enumerate(pieces):
+                await asyncio.sleep(0.1)   # slower in total than the stall bound
+                last = int(n == len(pieces) - 1)
+                self.assertEqual(await self.answer(got, piece, offset=offset, done=last), {"accepted": True})
+                offset += len(piece)
+            response = await asyncio.wait_for(tab, 3)
+        self.assertEqual(response.headers["location"], f"/r/{self.hash}/")
+        self.assertEqual((self.root / self.hash / "_source" / "Week 3 Notes.pdf").read_bytes(), body)
+        self.assertEqual([p.name for p in (self.root / self.hash / "_source").iterdir()], ["Week 3 Notes.pdf"])
+
+    async def test_a_gap_in_the_pieces_fails_the_open_and_leaves_nothing(self):
+        main._remember_gated_host(SOURCE)
+        tab = self.tab()
+        got = await asyncio.wait_for(self.claim(), 3)
+        await self.answer(got, PDF, done=0)
+        self.assertEqual(await self.answer(got, b"more", offset=len(PDF) + 10), {"accepted": False})
+        response = await asyncio.wait_for(tab, 3)
+        self.assertEqual(response.headers["location"], FALLBACK)
+        self.assertFalse((self.root / self.hash).exists())
+
+    async def test_a_non_pdf_first_piece_fails_at_once(self):
+        main._remember_gated_host(SOURCE)
+        tab = self.tab()
+        got = await asyncio.wait_for(self.claim(), 3)
+        self.assertEqual(await self.answer(got, b"<!doctype html>", done=0), {"accepted": False})
+        response = await asyncio.wait_for(tab, 3)
+        self.assertEqual(response.headers["location"], FALLBACK)
+        self.assertFalse((self.root / self.hash).exists())
 
     async def test_gated_hosts_survive_a_corrupt_file(self):
         (self.root / main._GATED_HOSTS_FILE).write_text("not json")
