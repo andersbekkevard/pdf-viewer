@@ -14,7 +14,7 @@ Routes:
     GET    /r/<hash>/text/<k>.json  text and link markup of one range of pages
     GET    /r/<hash>/ocr?pages=1-4&wait=s  recognized text of scanned pages (ocr.py)
     GET    /native?...          the original PDF for a hash, path or url
-    GET    /library             cached docs by frecency (overlay :open, ⌘K)
+    GET    /library             cached docs by frecency (home page; view=finder: ⌘P, ⌘K, :open)
     GET    /cache-urls          redirect rules for the browser extension
     POST   /signal/navigate     queue a tab navigation for the extension
     GET    /signal/navigate/wait  extension long-poll for queued signals
@@ -1588,13 +1588,17 @@ def home():
 
 
 @app.get("/library")
-def library():
-    """All cached docs, sorted by zoxide-style frecency. Drives `:open`.
+def library(view: str = "", current: str = ""):
+    """All cached docs, sorted by frecency (visits.all_frecency).
 
-    palette command. Joins mappings.tsv (authoritative source ref) with
-    visit-derived frecency metrics. Entries whose on-disk dir is gone are
-    dropped.
+    Joins mappings.tsv (authoritative source ref) with visit-derived
+    frecency metrics. Entries whose on-disk dir is gone are dropped. The home
+    page reads the full rows; `view=finder` returns the overlay's compact
+    quick-open rows with each document's saved page and, relative to the
+    `current` hash, the previous document (catalog.finder_entries).
     """
+    if view == "finder":
+        return catalog.finder_entries(state.positions(), current, prefer_reader=_prefer_reader())
     return catalog.list_entries(prefer_reader=_prefer_reader())
 
 

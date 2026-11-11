@@ -88,8 +88,12 @@ Cached-document runs reset the target's preferences and per-document state, so u
 a disposable document/cache. They require enough pages, text, outline and internal
 links for the requested groups; absent outline/link cases are explicitly reported.
 
-The shared geometry, navigation, sidebar, commands, search, smoke and interaction
-groups run on both engines. Interaction covers arrows, Space/Shift-Space,
+The shared geometry, navigation, sidebar, commands, search, quickopen, smoke and
+interaction groups run on both engines. Quickopen also generates an outline-less
+second document (`PDFV_OTHER_URL`) for `⌘P` and the page-list fallback; it checks
+that a preview and `Esc` (or a blur, or a click outside) restore the exact
+position, that `Enter` adds one history entry, prefixes, fuzzy ranking, Find,
+marks, the sidebar case and `:print`. Interaction covers arrows, Space/Shift-Space,
 PageUp/PageDown/Home/End, Cmd-Z/Cmd-Shift-Z, Cmd/Ctrl plus/minus/0 (page width changes
 while sidebar width stays fixed), dark pages, the brief counter, quote copying,
 accessible expiring toasts, and position/zoom/marks restored from daemon state after

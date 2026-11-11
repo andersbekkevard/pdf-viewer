@@ -422,6 +422,8 @@ export function createNavigation(core) {
         back: back,
         forward: forward,
         remember: function () { remember(); },
+        // The next scroll is not a jump to record (quick open's previews).
+        quiet: quiet,
         gotoChapter: gotoChapter,
         gotoChapterBy: gotoChapterBy,
         marks: marks,

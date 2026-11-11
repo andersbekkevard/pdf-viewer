@@ -10,18 +10,38 @@ export function createLibrary(core) {
     var currentHash = entryHash();
     var entries = null;
 
-    function load() {
-        if (entries !== null) return;
-        fetch('/library', { cache: 'no-store' })
-            .then(function (r) { return r.ok ? r.json() : []; })
-            .catch(function () { return []; })
-            .then(function (d) { entries = Array.isArray(d) ? d : []; });
+    // Rows of /library?view=finder (catalog.finder_entries): frecency order,
+    // each document's saved page, and the previous document relative to this
+    // one. Loaded at startup and refreshed whenever quick open opens, so the
+    // previous document and positions follow reading in other tabs.
+    var inflight = null;
+    var listeners = [];
+    function fetchRows() {
+        if (inflight) return inflight;
+        var url = '/library?view=finder' + (currentHash ? '&current=' + encodeURIComponent(currentHash) : '');
+        inflight = fetch(url, { cache: 'no-store' })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .catch(function () { return null; })
+            .then(function (d) {
+                inflight = null;
+                if (!Array.isArray(d)) { if (entries === null) entries = []; }
+                else if (entries === null || JSON.stringify(d) !== JSON.stringify(entries)) entries = d;
+                else return entries;
+                listeners.forEach(function (fn) { try { fn(entries); } catch (_) {} });
+                return entries;
+            });
+        return inflight;
     }
+    function load() { if (entries === null) fetchRows(); }
+    function refresh() { return fetchRows(); }
+    function loaded() { return entries !== null; }
+    function onChange(fn) { listeners.push(fn); }
 
     function recencyLabel(entry) {
         var n = entry && entry.rank != null ? entry.rank : (entry && entry.count);
-        if (!entry || !entry.last_seen) return n ? n + 'x' : '';
-        var ageSec = (Date.now() / 1000) - entry.last_seen;
+        var last = entry && (entry.last_read || entry.last_seen);
+        if (!last) return n ? n + 'x' : '';
+        var ageSec = (Date.now() / 1000) - last;
         var ago;
         if (ageSec < 60) ago = 'now';
         else if (ageSec < 3600) ago = Math.round(ageSec / 60) + 'm';
@@ -34,7 +54,8 @@ export function createLibrary(core) {
     function searchText(entry) {
         if (!entry) return '';
         if (entry.search_text) return normalize(entry.search_text);
-        return normalize([entry.name, entry.source_ref].filter(Boolean).join(' '));
+        return normalize([entry.title, entry.name, entry.author, entry.file, entry.host, entry.source_ref]
+            .filter(Boolean).join(' '));
     }
     function matches(entry, query) {
         var q = normalize(query);
@@ -122,8 +143,7 @@ export function createLibrary(core) {
             if (!info) return;
             notify(info.renamed === false ? 'Name unchanged' : 'Renamed to ' + (info.new_name || name));
             document.title = info.new_name || name;
-            entries = null;
-            load();
+            refresh();
             if (info.href) try { history.replaceState(null, '', info.href); } catch (_) {}
         });
     }
@@ -143,7 +163,8 @@ export function createLibrary(core) {
     }
     function all() { return entries || []; }
 
-    return { load: load, all: all, recencyLabel: recencyLabel, searchText: searchText,
+    return { load: load, refresh: refresh, loaded: loaded, onChange: onChange, all: all,
+        recencyLabel: recencyLabel, searchText: searchText,
         isCurrent: isCurrent, complete: complete, open: open,
         currentName: currentName, currentSourceRef: currentSourceRef, disableCurrent: disableCurrent,
         renameCurrent: renameCurrent, deleteCurrent: deleteCurrent };

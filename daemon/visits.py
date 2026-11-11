@@ -75,9 +75,8 @@ def boost(hash_: str, n: int = 3) -> int:
     """Bump frecency by N effective opens — once per entry, ever.
 
     Inserts `n` rows spaced one session-window apart so each lands in a
-    distinct 15-min bucket — the rank query (`COUNT(DISTINCT ts /
-    SESSION_WINDOW_SEC)`) then sees +n. The newest row is at `now`, so
-    the recency multiplier becomes 4.0 immediately and decays normally.
+    distinct 15-min bucket, so `all_frecency` counts n sessions. The newest
+    row is at `now`, so the boost counts in full now and decays normally.
     Tagged kind="boost" to distinguish from real opens in stats.
 
     Idempotent per hash: if any kind="boost" row already exists for this
@@ -161,12 +160,21 @@ def _zoxide_multiplier(age_sec: int) -> float:
     return 0.25
 
 
-def all_frecency(now: int | None = None) -> dict[str, dict]:
-    """hash → sessionized zoxide-style frecency metrics.
+# Each session counts in full when it is new and half as much every
+# HALF_LIFE_SEC after: "recently and often" as one number. A document read
+# three times a week keeps about four points; one opened once today has one.
+HALF_LIFE_SEC = 7 * 86400
 
-    Rank is one effective open per 15-minute wall-clock bucket. Raw visits
-    stay available for diagnostics/display, but reloads and browser restores
-    inside the same bucket do not inflate the score.
+
+def all_frecency(now: int | None = None) -> dict[str, dict]:
+    """hash -> sessionized frecency metrics.
+
+    A session is one 15-minute wall-clock bucket with at least one visit, so
+    reloads and browser restores inside a bucket do not inflate the score.
+    `frecency_score` is the sum over sessions of 0.5 ** (age / HALF_LIFE_SEC);
+    `rank` is the session count and `raw_count` the visit count, kept for
+    display and diagnostics. `age_multiplier` is the older zoxide step for the
+    newest visit, kept for diagnostics only.
     """
     if now is None:
         now = int(time.time())
@@ -174,30 +182,25 @@ def all_frecency(now: int | None = None) -> dict[str, dict]:
         with _connect() as conn:
             rows = conn.execute(
                 """
-                SELECT
-                    hash,
-                    COUNT(*) AS raw_count,
-                    COUNT(DISTINCT CAST(ts / ? AS INTEGER)) AS rank,
-                    MAX(ts) AS last_seen
+                SELECT hash, COUNT(*), MAX(ts)
                 FROM visits
-                GROUP BY hash
+                GROUP BY hash, CAST(ts / ? AS INTEGER)
                 """,
                 (SESSION_WINDOW_SEC,),
             ).fetchall()
     except sqlite3.Error:
         return {}
 
-    out = {}
-    for hash_, raw_count, rank, last_seen in rows:
-        age_sec = max(0, now - last_seen)
-        multiplier = _zoxide_multiplier(age_sec)
-        out[hash_] = {
-            "raw_count": raw_count,
-            "rank": rank,
-            "last_seen": last_seen,
-            "age_multiplier": multiplier,
-            "frecency_score": rank * multiplier,
-        }
+    out: dict[str, dict] = {}
+    for hash_, visits_in_session, session_ts in rows:
+        row = out.setdefault(hash_, {"raw_count": 0, "rank": 0, "last_seen": 0, "frecency_score": 0.0})
+        row["raw_count"] += visits_in_session
+        row["rank"] += 1
+        row["last_seen"] = max(row["last_seen"], session_ts)
+        row["frecency_score"] += 0.5 ** (max(0, now - session_ts) / HALF_LIFE_SEC)
+    for row in out.values():
+        row["age_multiplier"] = _zoxide_multiplier(max(0, now - row["last_seen"]))
+        row["frecency_score"] = round(row["frecency_score"], 4)
     return out
 
 
