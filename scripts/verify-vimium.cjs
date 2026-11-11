@@ -125,7 +125,7 @@ function copyExtension(dir, port) {
     recursive: true,
     filter: (src) => !src.includes(`${path.sep}_metadata`),
   });
-  for (const [file, count] of [['background.js', 2], ['rules.json', 1]]) {
+  for (const [file, count] of [['background.js', 2], ['rules.json', 2]]) {
     const target = path.join(dir, file);
     const text = fs.readFileSync(target, 'utf8');
     const replaced = (text.match(/(127\.0\.0\.1|localhost):7435/g) || []).length;
@@ -814,6 +814,24 @@ async function runEngine(ctx, spec) {
     await probe(() => { const el = document.getElementById('pdf2html-search'); if (el) el.remove(); });
     await escFromInput('`:` palette', ':', 'pdf2html-palette-input', 'pdf2html-palette');
     await escFromInput('`/` search bar', '/', 'pdf2html-search-input', 'pdf2html-search');
+    for (const [label, key] of [['⌘O sections', 'Meta+o'], ['⌘P documents', 'Meta+p'], ['⌘K quick open', 'Meta+k']]) {
+      await escFromInput(label, key, 'pdf2html-finder-input', 'pdf2html-finder');
+    }
+    {
+      // A ⌘O preview moves the document; Vimium's Escape (a blur) puts it back.
+      await blur();
+      const before = await probe(() => window.__vp.pc.scrollTop);
+      await press('Meta+o');
+      await page.waitForSelector('#pdf2html-finder-input', { timeout: 2000 }).catch(() => {});
+      await press('ArrowDown');
+      await page.waitForTimeout(150);
+      const moved = await probe(() => window.__vp.pc.scrollTop);
+      await press('Escape');
+      await page.waitForTimeout(200);
+      const after = await probe(() => ({ top: window.__vp.pc.scrollTop, open: !!document.getElementById('pdf2html-finder') }));
+      check('5 ⌘O preview moves the document; one Esc closes and restores it', moved !== before && !after.open && Math.abs(after.top - before) < 0.5,
+        `before ${fmt(before)}, preview ${fmt(moved)}, after ${fmt(after.top)}${after.open ? ', still open' : ''}`);
+    }
     await probe(() => window.__vp.pc.dispatchEvent(new Event('scroll')));
     await page.keyboard.press('Escape'); // clear any search highlights left behind
     await clearSelection();

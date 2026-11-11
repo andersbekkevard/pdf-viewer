@@ -27,6 +27,11 @@ PY
 make_overlay_fixture() {
     uv run --quiet --no-project --with reportlab python "$REPO_DIR/scripts/lib/overlay-fixture.py" "$OVERLAY_TMP/fixture.pdf" 'Overlay regression fixture' "${PDFV_FIXTURE_PAGES:-160}"
     OVERLAY_URL=$(curl -fsS -o /dev/null -w '%{redirect_url}' --get --data-urlencode "path=$OVERLAY_TMP/fixture.pdf" "$PDFV_BASE/read")
+    # A second document, without an outline: quick open's previous document
+    # and its page-list fallback (verify-overlay.cjs, group quickopen).
+    uv run --quiet --no-project --with reportlab python "$REPO_DIR/scripts/lib/overlay-fixture.py" "$OVERLAY_TMP/plain.pdf" 'Plain fixture without outline' 24 none
+    PDFV_OTHER_URL=$(curl -fsS -o /dev/null -w '%{redirect_url}' --get --data-urlencode "path=$OVERLAY_TMP/plain.pdf" "$PDFV_BASE/read")
+    export PDFV_OTHER_URL
 }
 convert_overlay_fixture() {
     source "$REPO_DIR/scripts/lib/pipeline.sh"
