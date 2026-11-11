@@ -212,11 +212,85 @@ for fractions (plan §5). Inside the band the verdict is *noise*. Engines
 alternate order between repetitions so slow drift hits both. Each trial
 records the load average at its start.
 
+## Results (2026-11-11, new-headless)
+
+Documents by sha256 prefix: 3a22c08d7c0f (3 p), 6bbca166322c (18 p, image
+slides), fa9b7cc99c1e (27 p, vector figures), 6045f88e2eca (127 p),
+7319a537e6c3 (342 p), 3b592f92ab8c (1,677 p). Mac16,8 (M4 Pro), Chromium for
+Testing 1243 (`chromium-1243`), window 1300×820, DPR 2, 3 trials per engine
+and document. *Before* is the reader at a37d683 (the base of this work plus the
+reviewed harness); *after* is the raster work merged with the lead's branch
+(first-raster preload). Other work on the machine (Xcode builds, iOS
+simulators) pushed the 1-minute load above 100 during parts of the runs; each
+trial's load is in the JSON, and the full runs were gated at load 8 and 10.
+
+Medians over documents (each document's median over its trials), full runs:
+
+| metric | reader before | reader after | Chrome's viewer | target |
+|---|---:|---:|---:|---|
+| far jump: legible (ms) | 99 | 46 | 44 | ≤ 100 |
+| far jump: sharp (ms) | 99 | 74 | 44 | ≤ 400 |
+| zoom step: at the new size (ms) | 24 | 26 | 35 | ≤ 50 |
+| zoom step: sharp (ms) | 236 | 201 | 35 | ≤ 300 |
+| zoom burst, last of 4 steps: sharp (ms) | 183 | 189 | 34 | |
+| raster widths requested during a 4-step burst | 1–4 | 1 | | |
+| open, warm (ms) | 130 | 122 | 255 | no regression |
+| held scroll: last input to crisp (ms) | 20 | 20 | 287 | no regression |
+
+- **Jump.** Legible within 100 ms on every document except 6bbca166322c, whose
+  jump target is within three screens: `scrollToPage` scrolls there smoothly
+  (about 690 ms, before and after); that is the navigation's animation, not a
+  raster wait. The preview tier is worth about 15 ms: with it off, legible was
+  62–64 ms against 44–48 ms on the same documents in the same session.
+- **Zoom.** The new size is in the next frame or two (18–35 ms), except on the
+  1,677-page book (34 ms before, 53 ms after, under heavier load): the step
+  relayouts every page and its text. Sharp in 150–280 ms, of which 120 ms is
+  the deliberate wait for the zoom to settle. Before, a burst asked for 2–4
+  widths and 10–19 rasters, after for one width and 2–8 rasters, none stale.
+- **Cold open, first page legible** (`open_cold_first_page_ms`), trials at load
+  below 20 only, pooled over documents: 208 ms before (n = 15), 381 ms on the
+  lead's branch alone (n = 11), 182 ms after (n = 11); Chrome's viewer about
+  300–700 ms. In the lead's-branch trials the `/read` registration and the
+  shell response took longer than before (not investigated here; outside
+  this work); the JPEG tier, the preload of the exact first URL, the reserved
+  worker, the half-width preview and the mount-time request bring the first
+  page back below the base. Including loaded trials the medians are 223, 391
+  and 288 ms: the cold open is the metric most sensitive to load. The goal of
+  halving it against the base is not reached by this work alone.
+
+Memory moves with the session (see Not measured), so it is compared only
+between runs taken back to back, here on three documents:
+
+| browser memory (MB) | 6bbca166322c | fa9b7cc99c1e | 6045f88e2eca |
+|---|---:|---:|---:|
+| reader before, after the journey | 225 | 618 | 648 |
+| reader after, after the journey | 222 | 598 | 607 |
+| Chrome's viewer, after the journey | 267 | 322 | 332 |
+| reader before, after the zooms | 357 | 772 | 769 |
+| reader after, after the zooms | 305 | 725 | 728 |
+| Chrome's viewer, after the zooms | 288 | 334 | 311 |
+
+The target of at most 1.1× Chrome's viewer is **not met** on text documents
+(about 1.9× at 27–127 pages, and in the full runs 3.7× at 1,677 pages); on the
+image deck the reader uses less. What limits it, measured with the 127-page
+document in a bare probe: with every raster request blocked, the reader's
+renderer is already about 170 MB above an empty tab (the text layer: 11 k
+lines and 26 k nodes kept in layout for native find; 157 k nodes at 1,677
+pages, about 600 MB). With rasters, the GPU process holds another 150–250 MB
+of decoded images that it does not give back when an image is released, and
+it was no smaller with 4 mounted rasters than with 7, nor with grayscale or
+4:2:0 JPEGs. Bounding mounted rasters (7 → 4) and decoding before the swap
+changed it by less than the noise between identical trials.
+
+Raw results stay outside the repository (`~/.cache/pdf_viewer-bench/results/`:
+`baseline.json`, `after.json`, `lead.json`, `ab-*.json`).
+
 ## Privacy and cleanup
 
 Corpus documents are mostly private. The result JSON holds numbers, sha256
 prefixes, page counts and manifest labels only. Frames are written to
-`/tmp/pdfv-perf/work/<trial>/` and deleted after the trial is scored. The
+`~/.cache/pdf_viewer-bench/perf-work/<trial>/` (`--work`) and deleted after
+the trial is scored. The
 reader trial's cache entry is deleted before each cold open and after the
 last trial of each document (`DELETE /mapping/<hash>`, which also forgets
 reading state).
@@ -229,4 +303,7 @@ reading state).
 - The native viewer's memory for documents it has to download from the web
   (the PDF comes from loopback).
 - GPU memory as such: `footprint` of the GPU process includes IOSurfaces, but
-  the per-process numbers move by ±50 MB between identical trials.
+  it moves by ±100 MB between identical trials and its level shifts between
+  sessions with what else the machine runs (an idle Chromium's GPU process
+  went from 315 to 465 MB at `about:blank`). Compare memory only between runs
+  taken back to back in one session.

@@ -75,7 +75,7 @@ are medians of three cold opens (no `<hash>/reader/`) on a running daemon,
 | Uncached arXiv URL to reader | native viewer until converted | 0.3 s |
 | Page markup, 342 pages | 8.7 MB, 29.6 k lines / 191 k spans | 2.5 MB, 17.5 k lines |
 | Raster width at fit-width, 2× display | 1191 px, upscaled | exact device px (2720) |
-| One page render, 2720 px wide | — | 70–150 ms, in parallel workers |
+| One page raster, 2720 px wide (render + encode) | — | 70–150 ms as PNG; 25–60 ms as JPEG q90 4:4:4 (render 10–40 ms, encode about 13 ms against 60–70 ms), in parallel workers |
 | Text extraction, 1,677-page book | — | 5.4 s CPU over the workers (10.5 s before the per-page work was shared between text and links) |
 
 Scorecard over the 57 tier-1 corpus documents present locally
@@ -139,7 +139,13 @@ scripts, and the manual step on a cache miss.
 
 - Deleting the pdf2htmlEX path. It stays until the reader has been the
   default for some days of real use.
-- Tiling and the image format; see the open beads.
+- Tiling. The image format is decided: page rasters are JPEG quality 90
+  without chroma subsampling (42–53 dB against the PNG, a fifth of the encode
+  time; `docs/reader.md`, "Rasters"). Tiles were not tried: the browser
+  memory the reader uses beyond Chrome's viewer is mostly the text layer in
+  the DOM (about 170 MB of renderer for 127 pages with no raster loaded) and
+  the GPU process's decoded-image cache, which did not fall with fewer
+  mounted rasters (`bench/perf/README.md`, Results).
 
 ## Related
 

@@ -219,7 +219,30 @@ hold one, from three intersection observers on `#page-container`:
 | visible | none | is fetched first |
 | near | one viewport above and below | is fetched at the current width |
 | kept | three viewports | keeps what it has; nothing new is fetched |
-| beyond | | holds no image (released), so decoded rasters stay bounded |
+| beyond | | holds the placeholder (released), so decoded rasters stay bounded |
+
+- **First raster.** The overlay keeps `pdfv_vp=<container width>x<pixel
+  ratio>` as a cookie (`overlay.js`). From it, the saved page and the zoom,
+  the shell request (`/r/<hash>/`) works out the URL the overlay will ask
+  for first, exactly as `want` in `overlay-document.js` computes it
+  (`Math.round(cssWidth × (zoom × ratio))`, `.jpg`), starts that render
+  and sends `Link: <…>; rel=preload; as=image`, so the browser's preloaded
+  response is the one the page's image uses. At mount the pages on screen
+  are found by bisection and asked for at once, a frame before the
+  observers report.
+- **Preview.** A page on screen with nothing to show (first open, far
+  jump, scrollbar drag) also gets a raster at half its width, which renders
+  and decodes several times faster; the sharp one replaces it and cancels
+  it if it is still on its way. A page that already shows a raster (zoom)
+  never gets one.
+- **Placeholder, never no source.** A page without a raster holds a 1 px
+  transparent GIF. Chromium can give an image that receives its source
+  while its page is still content-visibility-skipped no layout box when the
+  page comes back on screen a frame later: the raster is loaded and decoded
+  but the page stays white, and waiting does not clear it. Removing `src`
+  to release a raster led there (returning to a pin, history back after a
+  far jump, `raster-no-box` in the scorecard). Going from one image to
+  another does not. `verify-overlay.cjs`, group `paint`, checks it.
 
 - **Order and cap.** At most three raster requests are in flight. Pages on
   screen go first, then outward from them; a page on screen never waits
@@ -246,6 +269,9 @@ hold one, from three intersection observers on `#page-container`:
 - **States.** `data-pdf2html-raster-state` on the `.pf`: `ready` (the raster
   at the current width is shown), `loading`, `error` (retried when the page
   comes near again), `unloaded`.
+- **Workers.** Background work (text ranges, OCR preparation) never takes
+  the last free worker, so a raster asked for while a book's text is being
+  extracted, on every first open, starts at once.
 - **Disk.** The daemon counts the raster cache once and then per write, and
   evicts least-recently-used rasters to 80 % of `PDF_VIEWER_RASTER_CACHE_MB`
   as soon as a write takes it over.
