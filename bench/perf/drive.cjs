@@ -12,7 +12,9 @@
  *   jump       type the middle page number and press Enter (reader palette `:n`, native toolbar page field)
  *   scroll5    wheel through ~5 more pages
  *   memory     screencast stopped, 3 s idle, footprint of every browser process (+ daemon tree for the reader)
- *   zoom       one zoom-in step (native toolbar "Zoom in" 150 % -> 175 %; reader `:zoom` to the same factor)
+ *   zoom       one zoom-in step (native toolbar "Zoom in", 125 % -> 150 %; reader ⌘+, the key the owner uses, ×1/0.9)
+ *   zoom_burst four zoom-out steps 60 ms apart (native toolbar "Zoom out"; reader ⌘−), timed from the last
+ *   memory     footprint again after the zoom phases (memory.afterZoom)
  *
  * Every phase is timed from the screencast: frames are saved with their
  * compositor timestamps and run.py decides from the pixels when the viewport
@@ -93,7 +95,8 @@ function startServer() {
             fs.createReadStream(spec.pdfPath).pipe(res);
         }
     });
-    return new Promise((resolve) => server.listen(spec.nativePort, '127.0.0.1', () => resolve(server)));
+    // Port 0 (the default) takes a free port, so parallel benches never collide.
+    return new Promise((resolve) => server.listen(spec.nativePort || 0, '127.0.0.1', () => resolve(server)));
 }
 
 // ---------------------------------------------------------- in-page helpers
@@ -157,6 +160,35 @@ async function nativeState(page) {
             sidenav: sidenav ? sidenav.getBoundingClientRect().width : null,
         };
     }).catch(() => null);
+}
+
+// ------------------------------------------------------------- input clock
+// Playwright spends tens of ms between being asked for a key or click and the
+// event reaching the page (actionability checks, scrolling, CDP round trips),
+// and more for a click into the native viewer's frame than for a key. Latency
+// is therefore timed from the event itself: a capture listener in the frame
+// that receives the input records performance.timeOrigin + event.timeStamp,
+// the same epoch clock as the screencast's frame timestamps.
+const INPUT_CLOCK = () => {
+    if (window.__pdfvInputs) return;
+    window.__pdfvInputs = [];
+    for (const type of ['keydown', 'pointerdown']) {
+        window.addEventListener(type, (e) => {
+            window.__pdfvInputs.push({ type, key: e.key || null, t: performance.timeOrigin + e.timeStamp });
+        }, true);
+    }
+};
+// The frame that gets the input: the reader's document, or the native viewer's extension frame.
+function inputFrame(page) {
+    return spec.engine === 'native' ? (nativeFrame(page) || page.mainFrame()) : page.mainFrame();
+}
+async function armInputClock(page) {
+    await inputFrame(page).evaluate(INPUT_CLOCK).catch(() => {});
+}
+// Input events of `type` at or after wall-clock t0 (5 ms slack for clock rounding).
+async function inputsSince(page, t0, type, key) {
+    const all = await inputFrame(page).evaluate(() => window.__pdfvInputs || []).catch(() => []);
+    return all.filter((e) => e.t >= t0 - 5 && e.type === type && (!key || e.key === key)).map((e) => e.t);
 }
 
 // ------------------------------------------------------------------ main
@@ -310,7 +342,8 @@ async function main() {
     out.memory.baseline = measureTree(browserPid);
     if (spec.daemonPid) out.memory.daemonBefore = measureTree(spec.daemonPid);
 
-    const openUrl = spec.engine === 'reader' ? spec.readUrl : `http://127.0.0.1:${spec.nativePort}/doc.pdf#zoom=${spec.nativeZoom}`;
+    const openUrl = spec.engine === 'reader' ? spec.readUrl
+        : `http://127.0.0.1:${server.address().port}/doc.pdf#zoom=${spec.nativeZoom}`;
     const open = async (name, maxMs) => {
         out.phases[name] = { name };
         watch(page);
@@ -389,8 +422,10 @@ async function main() {
         await page.keyboard.type(String(spec.jumpPage));
     }
     await sleep(500);
+    await armInputClock(page);
     out.phases.jump.tAction = Date.now();
     await page.keyboard.press('Enter');
+    out.phases.jump.tInput = (await inputsSince(page, out.phases.jump.tAction, 'keydown', 'Enter'))[0] || null;
     await settle(page, 'jump', out.phases.jump.tAction, spec.phaseMaxMs);
     out.phases.jump.state = spec.engine === 'reader' ? await readerVisiblePage(page) : await nativeState(page);
 
@@ -421,28 +456,54 @@ async function main() {
         out.nativeState = await nativeState(page);
     }
 
-    // ---- one zoom-in step
+    // ---- one zoom-in step, then a burst of zoom-out steps
+    // The reader gets the key its owner presses (⌘+ / ⌘−, overlay.js); the
+    // native viewer its toolbar buttons (its next preset). Playwright's
+    // synthetic keys reach the page's handlers, never browser zoom.
     await pump(page, true);
     await startScreencast(page);
     await sleep(500);
-    out.phases.zoom = { name: 'zoom', before: spec.engine === 'reader' ? await readerVisiblePage(page) : await nativeState(page) };
+    const stateNow = () => (spec.engine === 'reader' ? readerVisiblePage(page) : nativeState(page));
+    const zoomButton = (label) => nativeFrame(page).locator(`viewer-toolbar cr-icon-button[aria-label="${label}"]`);
+    out.phases.zoom = { name: 'zoom', before: await stateNow() };
+    await armInputClock(page);
     if (spec.engine === 'reader') {
-        await page.keyboard.press(':');
-        await page.waitForSelector('#pdf2html-palette-input', { timeout: 3000 });
-        await page.keyboard.type(`zoom ${Number(spec.readerZoomStep).toFixed(4)}`);
+        await page.mouse.move(spec.pointer.x, spec.pointer.y);
         await sleep(300);
         out.phases.zoom.tAction = Date.now();
-        await page.keyboard.press('Enter');
+        await page.keyboard.press('Meta+Equal');
     } else {
-        const btn = nativeFrame(page).locator('viewer-toolbar cr-icon-button[aria-label="Zoom in"]');
+        const btn = zoomButton('Zoom in');
         await btn.hover();
         await sleep(300);
         out.phases.zoom.tAction = Date.now();
         await btn.click();
     }
+    out.phases.zoom.tLastInput = Date.now();
+    out.phases.zoom.tInput = (await inputsSince(page, out.phases.zoom.tAction, spec.engine === 'native' ? 'pointerdown' : 'keydown'))[0] || null;
     await settle(page, 'zoom', out.phases.zoom.tAction, spec.phaseMaxMs);
-    out.phases.zoom.state = spec.engine === 'reader' ? await readerVisiblePage(page) : await nativeState(page);
+    out.phases.zoom.state = await stateNow();
+
+    const burst = spec.zoomBurst || 4;
+    out.phases.zoom_burst = { name: 'zoom_burst', steps: burst, intervalMs: spec.zoomBurstIntervalMs, before: await stateNow() };
+    const btnOut = spec.engine === 'native' ? zoomButton('Zoom out') : null;
+    if (btnOut) await btnOut.hover();
+    await sleep(300);
+    out.phases.zoom_burst.tAction = Date.now();
+    for (let i = 0; i < burst; i++) {
+        if (i) await sleep(Math.max(0, out.phases.zoom_burst.tAction + i * spec.zoomBurstIntervalMs - Date.now()));
+        if (btnOut) await btnOut.click(); else await page.keyboard.press('Meta+Minus');
+    }
+    out.phases.zoom_burst.tLastInput = Date.now();
+    const burstInputs = await inputsSince(page, out.phases.zoom_burst.tAction, spec.engine === 'native' ? 'pointerdown' : 'keydown');
+    out.phases.zoom_burst.inputs = burstInputs;
+    out.phases.zoom_burst.tInput = burstInputs.length === burst ? burstInputs[burst - 1] : null;
+    await settle(page, 'zoom_burst', out.phases.zoom_burst.tLastInput, spec.phaseMaxMs);
+    out.phases.zoom_burst.state = await stateNow();
     await stopScreencast();
+    await pump(page, false);
+    await sleep(spec.idleMs);
+    out.memory.afterZoom = measureTree(browserPid);
 
     await Promise.all(writes);
     out.frames = frames.map((f) => ({ t: Math.round(f.t * 10) / 10, arrived: f.arrived, file: path.basename(f.file) }));

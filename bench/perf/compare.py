@@ -31,11 +31,33 @@ METRICS = [
     ("scroll_stall_fraction", "held scroll: input periods with no new frame", "frac", False),
     ("scroll_long_frames", "held scroll: frames longer than 2 input periods", "n", False),
     ("scroll_fps", "held scroll: frames presented per s (information)", "fps", True),
-    ("jump_ms", "far jump to crisp (ms)", "ms", False),
-    ("zoom_ms", "zoom step to crisp (ms)", "ms", False),
-    ("memory_browser_mb", "memory: browser processes (MB)", "MB", False),
+    ("jump_legible_ms", "far jump to legible (ms)", "ms", False),
+    ("jump_ms", "far jump to sharp (ms)", "ms", False),
+    ("zoom_applied_ms", "zoom step: visibly at the new size (ms)", "ms", False),
+    ("zoom_ms", "zoom step to sharp (ms)", "ms", False),
+    ("zoom_burst_applied_ms", "zoom burst (4 steps): last input to new size (ms)", "ms", False),
+    ("zoom_burst_ms", "zoom burst (4 steps): last input to sharp (ms)", "ms", False),
+    ("memory_browser_mb", "memory: browser processes after the journey (MB)", "MB", False),
+    ("memory_after_zoom_mb", "memory: browser processes after the zooms (MB)", "MB", False),
     ("memory_total_mb", "memory: browser + daemon growth (MB)", "MB", False),
 ]
+
+# Where each metric lives in a scored trial, and the phase whose timeout or
+# missing change invalidates it.
+PATHS = {
+    "open_cold_ms": (("phases", "open_cold", "complete_ms"), "open_cold"),
+    "open_warm_ms": (("phases", "open_warm", "complete_ms"), "open_warm"),
+    "scroll_settle_ms": (("phases", "scroll5", "complete_ms"), "scroll5"),
+    "scroll_fps": (("phases", "scroll10", "trace", "fps"), None),
+    "scroll_stall_fraction": (("phases", "scroll10", "trace", "stall_fraction"), None),
+    "scroll_long_frames": (("phases", "scroll10", "trace", "long_frames"), None),
+    "jump_legible_ms": (("phases", "jump", "coarse_ms"), "jump"),
+    "jump_ms": (("phases", "jump", "complete_ms"), "jump"),
+    "zoom_applied_ms": (("phases", "zoom", "coarse_ms"), "zoom"),
+    "zoom_ms": (("phases", "zoom", "complete_ms"), "zoom"),
+    "zoom_burst_applied_ms": (("phases", "zoom_burst", "coarse_ms"), "zoom_burst"),
+    "zoom_burst_ms": (("phases", "zoom_burst", "complete_ms"), "zoom_burst"),
+}
 
 
 def floor(unit: str, native: float) -> float:
@@ -50,36 +72,33 @@ def floor(unit: str, native: float) -> float:
     return 0.01
 
 
+def dig(d, *path):
+    for k in path:
+        d = d.get(k) if isinstance(d, dict) else None
+    return d
+
+
 def values(trials: list[dict], metric: str) -> list[float]:
-    def dig(d, *path):
-        for k in path:
-            d = d.get(k) if isinstance(d, dict) else None
-        return d
     out = []
     for t in trials:
         if t.get("fatal"):
             continue
-        ph = t.get("phases", {})
         mem = t.get("memory", {}) or {}
-        v = {
-            "open_cold_ms": dig(ph, "open_cold", "complete_ms"),
-            "open_warm_ms": dig(ph, "open_warm", "complete_ms"),
-            "scroll_settle_ms": dig(ph, "scroll5", "complete_ms"),
-            "scroll_fps": dig(ph, "scroll10", "trace", "fps"),
-            "scroll_stall_fraction": dig(ph, "scroll10", "trace", "stall_fraction"),
-            "scroll_long_frames": dig(ph, "scroll10", "trace", "long_frames"),
-            "jump_ms": dig(ph, "jump", "complete_ms"),
-            "zoom_ms": dig(ph, "zoom", "complete_ms"),
-            "memory_browser_mb": mem.get("browser_delta") / 1e6 if mem.get("browser_delta") is not None else None,
-            "memory_total_mb": ((mem.get("browser_delta") or 0) + max(0, mem.get("daemon_delta") or 0)) / 1e6
-            if mem.get("browser_delta") is not None else None,
-        }[metric]
-        # A phase that hit its timeout or never changed the screen has no valid time.
+        ph = t.get("phases", {})
+        if metric in PATHS:
+            path, phase = PATHS[metric]
+            v = dig(t, *path)
+            # A phase that hit its timeout or never changed the screen has no valid time.
+            if phase and (dig(ph, phase, "timed_out") or dig(ph, phase, "no_change")):
+                v = None
+        elif metric == "memory_browser_mb":
+            v = mem.get("browser_delta") / 1e6 if mem.get("browser_delta") is not None else None
+        elif metric == "memory_after_zoom_mb":
+            v = mem.get("browser_after_zoom_delta") / 1e6 if mem.get("browser_after_zoom_delta") is not None else None
+        else:  # memory_total_mb
+            v = (((mem.get("browser_delta") or 0) + max(0, mem.get("daemon_delta") or 0)) / 1e6
+                 if mem.get("browser_delta") is not None else None)
         if metric.startswith("scroll") and (t.get("pages") or 0) < MIN_SCROLL_PAGES:
-            v = None
-        name = {"open_cold_ms": "open_cold", "open_warm_ms": "open_warm", "jump_ms": "jump", "zoom_ms": "zoom",
-                "scroll_settle_ms": "scroll5"}.get(metric)
-        if name and (dig(ph, name, "timed_out") or dig(ph, name, "no_change")):
             v = None
         if v is not None:
             out.append(float(v))
