@@ -26,7 +26,7 @@ export function createSettings(core) {
         var card = el('div', { class: 'pdf2html-settings-card' });
         card.appendChild(el('div', { class: 'pdf2html-settings-head' }, [
             el('div', {}, [el('h2', {}, 'Settings'), el('div', { class: 'sub' }, ':set  ·  persisted locally')]),
-            el('span', { class: 'close', html: '<span class="pdf2html-kbd sm">Esc</span> to close' }),
+            el('button', { type: 'button', class: 'close', onClick: close, 'aria-label': 'Close settings', html: '<span class="pdf2html-kbd sm">Esc</span> to close' }),
         ]));
 
         var body = el('div', { class: 'pdf2html-settings-body', tabindex: '-1' });
@@ -54,7 +54,7 @@ export function createSettings(core) {
             row('Page counter visible', 'Top pill; toggles with ⌘⇧. or :counter', prefSwitch('pageCounterVisible')),
             row('Page counter on page change', ':counter brief · shows it for a moment while hidden', prefSwitch('pageCounterBrief')),
             row('Scrolloff', 'Auto-scroll when cursor enters ±N% band (:so N)', scrollOffSlider.wrap),
-            row('Pin cursor to center', ':pin · locks scrolloff to 50%', prefSwitch('pinned', syncScrollOff)),
+            row('Pin cursor to center', ':cursorpin · locks scrolloff to 50%', prefSwitch('pinned', syncScrollOff)),
             row('Case-sensitive search', ':case · / matches exact casing', prefSwitch('searchCaseSensitive')),
             row('Escape clears selection', 'Esc with no overlay open clears the text selection', prefSwitch('escClearsSelection')),
         ]));

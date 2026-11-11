@@ -1,4 +1,4 @@
-// Sidebar: toggle, header, Outline / Pages tabs, keyboard list navigation,
+// Sidebar: toggle, header, Outline / Pages / Pins tabs, keyboard list navigation,
 // and the page shift that keeps pages clear of it.
 //
 //   #sidebar                       (pdf2htmlEX)
@@ -9,7 +9,7 @@
 //       #pdf2html-thumbs           page cards
 //     #pdf2html-sidebar-footer     Settings + Help buttons
 //
-// Both tabs follow the reading position (active row) and offer a second,
+// Outline and Pages follow the reading position (active row) and offer a second,
 // temporary keyboard selection: Ctrl-j/k or ↓/↑ move it, Enter jumps to it.
 // The selection is only drawn while it differs from the active row.
 import { el, svgIcon, ICONS, isInputTarget } from './overlay-dom.js';
@@ -37,7 +37,7 @@ export function createSidebar(core) {
     function tabVisible(name) { return isShown() && currentTab() === name; }
 
     function setTab(name) {
-        name = name === 'thumbs' ? 'thumbs' : 'outline';
+        name = ['outline', 'thumbs', 'pins'].indexOf(name) >= 0 ? name : 'outline';
         prefs.set('sidebarTab', name);
         document.body.setAttribute('data-sidebar-tab', name);
         var tabs = document.querySelectorAll('#pdf2html-sidebar-tabs .pdf2html-sidebar-tab');
@@ -73,12 +73,14 @@ export function createSidebar(core) {
                 html: svgIcon(ICONS.grid, 13) + '<span>Pages</span>',
                 onClick: function () { setTab('thumbs'); },
             }),
+            el('button', { class: 'pdf2html-sidebar-tab', dataset: { tab: 'pins' }, onClick: function () { setTab('pins'); } }, 'Pins'),
         ]);
         // tabindex=-1 makes the body a valid activeElement target, so Vimium's
         // j/k scroll scopes to the sidebar (see overlay-focus.js).
         bodyEl = el('div', { id: 'pdf2html-sidebar-body', tabindex: '-1' });
         if (outline && outline.parentElement === sidebar) bodyEl.appendChild(outline);
         bodyEl.appendChild(el('div', { id: 'pdf2html-thumbs' }));
+        bodyEl.appendChild(el('div', { id: 'pdf2html-pins' }));
 
         var footer = el('div', { id: 'pdf2html-sidebar-footer' }, [
             el('button', {
@@ -132,21 +134,63 @@ export function createSidebar(core) {
         var entries = navigation.entries();
         if (!outline || !bodyEl || !entries.length) return null;
 
+        var collapsed = core.documentState.get('outline') || {};
+        var branches = new Map(), parents = new Map(), byLi = new Map(), visibleCache = null;
+        entries.forEach(function (e) { byLi.set(e.link.closest('li'), e); });
+        entries.forEach(function (e) {
+            var li = e.link.closest('li'), ul = li && Array.from(li.children).find(function (c) { return c.tagName === 'UL'; });
+            var parent = li && li.parentElement.closest('li');
+            parents.set(e, byLi.get(parent));
+            if (!ul) return;
+            var depth = 0, ancestor = parent;
+            while (ancestor) { depth++; ancestor = ancestor.parentElement.closest('li'); }
+            var key = String(e.index);
+            var button = el('button', { class: 'pdf2html-disclosure', title: 'Expand or collapse ' + e.label,
+                onClick: function (ev) { ev.stopPropagation(); toggleBranch(e); } });
+            li.insertBefore(button, e.link); li.classList.add('pdf2html-branch');
+            branches.set(e, { ul: ul, button: button, key: key, defaultClosed: depth >= 1 });
+        });
+        function applyBranches() {
+            visibleCache = null;
+            branches.forEach(function (b) {
+                var closed = Object.prototype.hasOwnProperty.call(collapsed, b.key) ? collapsed[b.key] : b.defaultClosed;
+                b.ul.hidden = closed; b.button.textContent = closed ? '▸' : '▾';
+                b.button.setAttribute('aria-expanded', String(!closed));
+            });
+        }
+        function toggleBranch(e, closed) {
+            var b = branches.get(e); if (!b) return false;
+            collapsed[b.key] = closed == null ? !b.ul.hidden : closed;
+            applyBranches(); core.documentState.set('outline', collapsed); return true;
+        }
+        function visibleEntries() { return visibleCache || (visibleCache = entries.filter(function (e) { return !e.link.closest('ul[hidden]'); })); }
+        core.documentState.onChange('outline', function (v) { collapsed = v || {}; applyBranches(); openAncestors(activeEntry); });
+        function openAncestors(e) {
+            var changed = false;
+            for (var parent = parents.get(e); parent; parent = parents.get(parent)) {
+                var b = branches.get(parent); if (b && b.ul.hidden) { collapsed[b.key] = false; changed = true; }
+            }
+            if (changed) applyBranches();
+        }
+        applyBranches();
         var activeEntry = null;
         var selected = null;
         var raf = null;
         var programmaticScrolls = 0;
 
+        var lastActive = null, lastSelected = null;
         function sync() {
-            for (var i = 0; i < entries.length; i++) {
-                var e = entries[i];
-                e.link.classList.toggle('pdf2html-active', e === activeEntry);
-                e.link.classList.toggle('pdf2html-selected', e === selected && e !== activeEntry);
-            }
+            [lastActive, lastSelected].forEach(function (e) {
+                if (e) e.link.classList.remove('pdf2html-active', 'pdf2html-selected');
+            });
+            if (activeEntry) activeEntry.link.classList.add('pdf2html-active');
+            if (selected && selected !== activeEntry) selected.link.classList.add('pdf2html-selected');
+            lastActive = activeEntry; lastSelected = selected;
         }
         function setActive(entry) {
             if (entry === activeEntry) return;
             activeEntry = entry;
+            openAncestors(entry);
             sync();
             if (entry) try { entry.link.scrollIntoView({ block: 'nearest' }); } catch (e) {}
         }
@@ -158,6 +202,7 @@ export function createSidebar(core) {
         function nearestToAnchor() {
             var box = bodyEl.getBoundingClientRect(), y = anchorY(), best = null, bestDist = Infinity;
             for (var i = 0; i < entries.length; i++) {
+                if (entries[i].link.closest('ul[hidden]')) continue;
                 var r = entries[i].link.getBoundingClientRect();
                 if (r.bottom < box.top || r.top > box.bottom) continue;
                 var dist = Math.abs(r.top + r.height / 2 - y);
@@ -199,6 +244,14 @@ export function createSidebar(core) {
         }, true);
 
         return {
+            branch: function (dir) {
+                var e = selected || activeEntry || entries[0], b = branches.get(e);
+                if (dir > 0 && b && b.ul.hidden) toggleBranch(e, false);
+                else if (dir < 0 && b && !b.ul.hidden) toggleBranch(e, true);
+                else if (dir < 0 && parents.get(e)) { selected = parents.get(e); sync(); scrollToAnchor(selected); }
+                else if (dir > 0 && b) { selected = visibleEntries()[visibleEntries().indexOf(e) + 1] || e; sync(); scrollToAnchor(selected); }
+                return true;
+            },
             onShow: function () {
                 selected = activeEntry;
                 sync();
@@ -206,8 +259,9 @@ export function createSidebar(core) {
             },
             move: function (dir) {
                 var from = selected || nearestToAnchor() || activeEntry || entries[0];
-                var idx = Math.max(0, Math.min(entries.length - 1, entries.indexOf(from) + dir));
-                selected = entries[idx];
+                var visible = visibleEntries();
+                var idx = Math.max(0, Math.min(visible.length - 1, visible.indexOf(from) + dir));
+                selected = visible[idx];
                 sync();
                 scrollToAnchor(selected);
             },
@@ -311,6 +365,33 @@ export function createSidebar(core) {
         };
     }
 
+    function mountPinsPanel() {
+        var host = document.getElementById('pdf2html-pins'), selected = 0;
+        function render() {
+            var pins = core.pins.list(); host.replaceChildren();
+            selected = Math.max(0, Math.min(selected, pins.length - 1));
+            if (!pins.length) host.appendChild(el('p', { class: 'pdf2html-pins-empty' }, 'No pins yet. Type :pin or press Ctrl-Shift-P to save this spot.'));
+            pins.forEach(function (p, idx) {
+                var hash = entryHash(), src = documentModel.isReader() ? '/r/' + hash + '/p/' + p.page + '/240.png' : '/' + hash + '/thumbs/' + p.page + '.jpg';
+                var jump = el('button', { class: 'pdf2html-pin-jump', title: 'Pin ' + p.number + ' · ' + p.title,
+                    onClick: function () { core.pins.jump(p.number); } }, [
+                    el('img', { src: src, loading: 'lazy', alt: '' }),
+                    el('span', { class: 'pdf2html-pin-copy' }, [
+                        el('strong', {}, p.number + ' · ' + p.title),
+                        el('span', {}, (p.section ? p.section + ' · ' : '') + 'p. ' + p.page),
+                    ]),
+                ]);
+                var row = el('div', { class: 'pdf2html-pin-row' + (idx === selected ? ' pdf2html-selected' : '') }, [jump,
+                    el('button', { class: 'pdf2html-pin-remove', title: 'Remove pin ' + p.number,
+                        onClick: function () { core.pins.remove(p.number); } }, '×')]);
+                host.appendChild(row);
+            });
+        }
+        core.pins.onChange(render); render();
+        return { onShow: render, move: function (dir) { selected += dir; render(); var row = host.children[selected]; if (row) row.scrollIntoView({ block: 'nearest' }); },
+            commit: function () { var p = core.pins.list()[selected]; if (!p) return false; core.pins.jump(p.number); return true; } };
+    }
+
     // ------------------------------------------------------------------- keys
     function mountKeys() {
         document.addEventListener('keydown', function (e) {
@@ -324,13 +405,15 @@ export function createSidebar(core) {
                 toggle();
                 return;
             }
-            // ←/→ (and h/l) switch tabs while the sidebar is open; otherwise
-            // arrows scroll and Vimium keeps h/l.
             var left = e.key === 'ArrowLeft' || e.key === 'h';
             var right = e.key === 'ArrowRight' || e.key === 'l';
-            if ((left || right) && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && isShown()) {
+            if ((left || right) && !e.metaKey && !e.altKey && !e.shiftKey && isShown()) {
                 e.preventDefault();
-                setTab(left ? 'outline' : 'thumbs');
+                if (!e.ctrlKey && currentTab() === 'outline' && focus.isSidebarScope() && panels.outline) panels.outline.branch(left ? -1 : 1);
+                else {
+                    var names = ['outline', 'thumbs', 'pins'], idx = names.indexOf(currentTab());
+                    setTab(names[(idx + (left ? 2 : 1)) % 3]);
+                }
             }
         });
 
@@ -396,6 +479,7 @@ export function createSidebar(core) {
         if (!mountChrome()) return;
         panels.outline = mountOutlinePanel();
         panels.thumbs = mountThumbsPanel();
+        panels.pins = mountPinsPanel();
         setTab(prefs.get('sidebarTab'));
         mountKeys();
         mountLayout();
@@ -410,5 +494,5 @@ export function createSidebar(core) {
         }).observe(document.body, { attributes: true, attributeFilter: ['class', 'data-sidebar-tab'] });
     }
 
-    return { mount: mount, toggle: toggle, isShown: isShown, close: function () { setShown(false); } };
+    return { showPins: function () { setShown(true); setTab('pins'); }, mount: mount, toggle: toggle, isShown: isShown, close: function () { setShown(false); } };
 }

@@ -29,7 +29,7 @@ DB_PATH = pathlib.Path(
     or pathlib.Path.home() / ".cache" / "pdf_viewer" / "state.db"
 )
 
-KEYS = ("position", "marks", "zoom")
+KEYS = ("position", "marks", "zoom", "pins", "outline")
 MAX_VALUE_BYTES = 64 * 1024
 _HASH_RE = re.compile(r"^[a-f0-9]{6,32}$")
 _LETTER_RE = re.compile(r"^[a-z]$")
@@ -191,8 +191,8 @@ def inherit_local(previous: str, current: str, pages: int) -> None:
                             mark["page"] = max(1, min(pages, mark["page"]))
                     if key == "position":
                         clamp(value)
-                    elif key == "marks":
-                        for mark in value.values():
+                    elif key in ("marks", "pins"):
+                        for mark in (value.values() if isinstance(value, dict) else value):
                             clamp(mark)
                     _write(conn, current, key, json.dumps(value), ts)
             conn.execute("COMMIT")
