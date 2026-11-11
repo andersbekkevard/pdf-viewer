@@ -154,6 +154,33 @@ class JobTest(unittest.TestCase):
         self.assertFalse(paths[0].is_file(), "the least recently used raster goes first")
 
 
+class RouteTest(unittest.IsolatedAsyncioTestCase):
+    """The async raster route lets go of a render when its request goes away."""
+
+    async def test_disconnect_releases_the_render(self):
+        import main
+
+        pending: concurrent.futures.Future = concurrent.futures.Future()
+        released = []
+
+        class FakeReader:
+            def raster_job(self, *args):
+                return pending, "key"
+
+            def raster_release(self, key):
+                released.append(key)
+
+        class Gone:
+            async def is_disconnected(self):
+                return True
+
+        with patch.object(main, "reader", FakeReader()), \
+                patch.object(main, "_reader_source", lambda hash_: pathlib.Path("/nonexistent.pdf")):
+            response = await main._reader_raster(Gone(), HASH, 1, 300, "jpg")
+        self.assertEqual(response.status_code, 499)
+        self.assertEqual(released, ["key"])
+
+
 def threading_sleep():
     import time
     time.sleep(0.01)
