@@ -7,6 +7,7 @@ export function createTextInteraction(core) {
     var navigation = core.navigation;
     var documentModel = core.documentModel;
     var scrollOff = core.scrollOff;
+    var readerText = core.readerText;
 
     // ---------------------------------------------------------------- selection
     function selectionPageSpan(sel) {
@@ -76,14 +77,20 @@ export function createTextInteraction(core) {
     // Each pdf2htmlEX visual line is a `.t`; documentModel.pageText joins them
     // with '\n' to keep the line structure that textContent would collapse.
     // Offscreen pages keep their DOM (content-visibility), so this reads the
-    // whole document.
+    // whole document. A reader document may still be loading text: wait for
+    // the pages first, and name any whose text could not be loaded rather
+    // than copy a partial document silently.
     function pageRangeText(startPage, endPageExcl) {
-        var out = [];
-        for (var p = startPage; p < endPageExcl; p++) {
-            var t = documentModel.pageText(p);
-            if (t) out.push(t);
-        }
-        return out.join('\n\n');
+        return readerText.whenLoaded(startPage, endPageExcl).then(function (loaded) {
+            var missing = loaded.missing || [];
+            var out = [];
+            for (var p = startPage; p < endPageExcl; p++) {
+                var t = missing.indexOf(p) >= 0 ? '[text of page ' + p + ' could not be loaded]'
+                    : documentModel.pageText(p);
+                if (t) out.push(t);
+            }
+            return out.join('\n\n');
+        });
     }
 
     function yankRef() {
@@ -92,17 +99,21 @@ export function createTextInteraction(core) {
         writeClip((chapter ? chapter + ' · ' : '') + 'p. ' + page);
     }
     function yankPage() {
-        writeClip(documentModel.pageText(navigation.page()));
+        var page = navigation.page();
+        pageRangeText(page, page + 1).then(writeClip);
     }
     function yankChapter() {
         var r = navigation.chapterRange(navigation.page());
         if (!r) return;
-        writeClip((r.label ? r.label + '\n\n' : '') + pageRangeText(r.start, r.end));
+        pageRangeText(r.start, r.end).then(function (body) {
+            writeClip((r.label ? r.label + '\n\n' : '') + body);
+        });
     }
     function yankDocument() {
-        var body = pageRangeText(1, documentModel.totalPages() + 1);
-        if (!body) return;
-        writeClip((document.title || 'Document').trim() + '\n\n' + body);
+        pageRangeText(1, documentModel.totalPages() + 1).then(function (body) {
+            if (!body) return;
+            writeClip((document.title || 'Document').trim() + '\n\n' + body);
+        });
     }
     function dispatchYank(kind) {
         var k = (kind || '').toLowerCase().trim();

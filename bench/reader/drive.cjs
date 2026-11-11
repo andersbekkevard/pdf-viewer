@@ -233,6 +233,12 @@ async function main() {
             const id = 'pf' + job.page.toString(16);
             try {
                 await inView(id);
+                // A first open loads text by range after the shell
+                // (overlay-readertext.js): wait for this page's text, and record how long.
+                const w0 = Date.now();
+                entry.textWait = await page.waitForFunction((pid) => !document.getElementById(pid).hasAttribute('data-reader-pending'),
+                    id, { timeout: spec.rasterWaitMs, polling: 20 }).then(() => 'ok', () => 'timeout');
+                entry.textWaitMs = Date.now() - w0;
                 // Text layer: lines joined by newline, and what a select-all of the page copies.
                 Object.assign(entry, await page.evaluate((pid) => {
                     const pc = document.querySelector('#' + pid + ' .pc');

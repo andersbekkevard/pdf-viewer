@@ -9,7 +9,8 @@
 //
 // Letter-spacing rather than a transform: segments are inline, so a line
 // stays one find run. Widths come from a canvas, so fitting never forces
-// layout, and offscreen pages are fitted while the browser is idle.
+// layout, and offscreen pages are fitted while the browser is idle. A page
+// whose text arrives late (overlay-readertext.js) is fitted when it lands.
 export function createTextFit(core) {
     var document = core.document;
     var window = core.window;
@@ -19,7 +20,7 @@ export function createTextFit(core) {
     var fitted = new WeakSet();
 
     function fitPage(pf) {
-        if (fitted.has(pf)) return;
+        if (fitted.has(pf) || documentModel.isTextPending(pf)) return;
         fitted.add(pf);
         var nodes = pf.querySelectorAll('[data-w]');
         var font = null;
@@ -62,6 +63,15 @@ export function createTextFit(core) {
         // A jump can land on a page the idle pass has not reached.
         document.addEventListener('pdf2html-page-change', function () {
             documentModel.visiblePages().forEach(fitPage);
+        });
+        // Late text: a range is a few dozen pages, quick enough to fit at
+        // once, before the browser paints or anything reads its geometry.
+        document.addEventListener('pdf2html-text-ready', function (e) {
+            var numbers = (e.detail && e.detail.pages) || [];
+            for (var i = 0; i < numbers.length; i++) {
+                var pf = documentModel.page(numbers[i]);
+                if (pf) fitPage(pf);
+            }
         });
     }
 

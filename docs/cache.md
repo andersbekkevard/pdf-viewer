@@ -49,7 +49,8 @@ preserving ADR 0004's accepted daemon/compute split.
 │   │   └── document.pdf
 │   ├── entry.json       name and source of an entry opened on demand (see below)
 │   ├── reader/          derived reader artifacts, safe to delete (docs/reader.md)
-│   │   ├── shell.html   page frames, text lines, links, outline
+│   │   ├── shell.html   page frames, text lines, links, outline (once all text exists)
+│   │   ├── text/<k>.json   text and link markup of pages 32k+1…32k+32
 │   │   └── px/<width>/<page>.png   rasters by device width, size-limited
 │   └── meta.json        pdfinfo fields + conversion provenance (see below)
 └── ...

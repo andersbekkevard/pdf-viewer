@@ -10,6 +10,7 @@ Routes:
     GET    /read?...            open any PDF in the reader, no conversion (also -raw)
     GET    /r/<hash>/           reader shell: PDFium rasters under transparent text
     GET    /r/<hash>/p/<n>/<w>.png  one page rendered at a device width
+    GET    /r/<hash>/text/<k>.json  text and link markup of one range of pages
     GET    /native?...          the original PDF for a hash, path or url
     GET    /library             cached docs by frecency (overlay :open, ⌘K)
     GET    /cache-urls          redirect rules for the browser extension
@@ -754,16 +755,42 @@ def _reader_source(hash_: str) -> pathlib.Path:
     return pdf
 
 
+def _saved_page(hash_: str) -> Optional[int]:
+    """The reading position the daemon holds for an entry, if any."""
+    try:
+        page = state.get_all(hash_).get("position", {}).get("value", {}).get("page")
+    except Exception:
+        return None
+    return page if isinstance(page, int) and page > 1 else None
+
+
 @app.get("/r/{hash_}/")
 def reader_shell(hash_: str, background: BackgroundTasks):
     pdf = _reader_source(hash_)
+    saved = _saved_page(hash_)
     try:
-        shell = reader.shell(hash_, pdf, catalog.entry_name(hash_))
+        shell = reader.shell(hash_, pdf, catalog.entry_name(hash_), near_pages=(saved,) if saved else ())
     except Exception as error:
         raise HTTPException(502, f"could not read PDF: {error}") from error
     background.add_task(visits.record, hash_, "reader")
-    return FileResponse(shell, media_type="text/html; charset=utf-8",
-                        headers={"Cache-Control": "no-cache"})
+    headers = {"Cache-Control": "no-cache"}
+    if isinstance(shell, str):
+        # Text still loading: the overlay fetches the rest by range.
+        return Response(shell, media_type="text/html; charset=utf-8", headers=headers)
+    return FileResponse(shell, media_type="text/html; charset=utf-8", headers=headers)
+
+
+@app.get("/r/{hash_}/text/{index}.json")
+def reader_text(hash_: str, index: int, background: BackgroundTasks):
+    pdf = _reader_source(hash_)
+    try:
+        first, pages = reader.text_range(hash_, pdf, index)
+    except IndexError:
+        raise HTTPException(404, f"no text range {index}")
+    except Exception as error:
+        raise HTTPException(502, f"could not read text range {index}: {error}") from error
+    background.add_task(reader.finish_shell, hash_, pdf, catalog.entry_name(hash_))
+    return JSONResponse({"first": first, "pages": pages}, headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/r/{hash_}/p/{page}/{width}.png")
