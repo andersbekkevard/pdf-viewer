@@ -14,6 +14,8 @@
  *   sidebar     outline + thumbnail keyboard commits, one active outline row
  *   commands    palette commands, preferences, settings, cheatsheet, yank
  *   search      `/` search, Enter lands inside the scrolloff band, n cycles
+ *   quickopen   ⌘O / ⌘P / ⌘K: preview and Esc restore, one history entry per
+ *               commit, previous document, no-outline pages, prefixes, find
  *   interaction arrows, paging/history/zoom keys, dark, counter, quote, state
  *   smoke       boot, raster readiness (reader), find, assets, console
  *   paint       (reader) after jumps, history and pins, on-screen pages paint their raster
@@ -602,6 +604,223 @@ async function main() {
     record('cheatsheet lists every command', missing.length === 0, missing.length ? `missing ${missing.join(' ')}` : '');
     record('cheatsheet lists no removed commands', stale.length === 0, stale.join(' '));
     await page.keyboard.press('Escape');
+  }
+
+  if (run('selection')) {
+    await load({reset: true});
+    if (await page.evaluate(() => document.documentElement.dataset.pdf2htmlRepresentation === 'raster-v1')) await require('./verify-reader-selection.cjs')(page, BASE, record);
+  }
+
+  // ==================================================================== quick open
+  if (run('quickopen')) {
+    const other = process.env.PDFV_OTHER_URL || null;
+    const scrollTop = () => probe(() => window.__probe.pc.scrollTop);
+    const pageTop = (n) => probe((n) => window.__probe.pageTop(window.__probe.page(n)), n);
+    const frames = () => probe(() => window.__probe.frames());
+    const panel = () => probe(() => {
+      const bg = document.getElementById('pdf2html-finder');
+      if (!bg) return null;
+      const rows = Array.from(bg.querySelectorAll('.pdf2html-finder-row')).map((r) => ({
+        kind: r.dataset.kind, text: r.querySelector('.primary').textContent,
+        secondary: (r.querySelector('.secondary') || {}).textContent || '', hint: r.querySelector('.hint').textContent,
+        active: r.classList.contains('active'), marked: !!r.querySelector('mark'),
+        indent: parseFloat(r.querySelector('.text').style.paddingLeft) || 0 }));
+      return { mode: bg.querySelector('.pdf2html-finder').dataset.mode, rows,
+        active: rows.find((r) => r.active) || null,
+        heads: Array.from(bg.querySelectorAll('.pdf2html-finder-group')).map((h) => h.textContent),
+        empty: (bg.querySelector('.pdf2html-finder-empty') || {}).textContent || '',
+        foot: bg.querySelector('.pdf2html-finder-foot').textContent,
+        chip: bg.querySelector('.pdf2html-finder-chip').hidden ? '' : bg.querySelector('.pdf2html-finder-chip').textContent,
+        focused: document.activeElement === document.getElementById('pdf2html-finder-input') };
+    });
+    async function quick(key, text) {
+      await page.keyboard.press(key);
+      await page.waitForSelector('#pdf2html-finder-input', { timeout: 3000 });
+      if (text) await page.keyboard.type(text);
+      await page.waitForTimeout(60);
+      await frames();
+      return panel();
+    }
+    async function press(key) { await page.keyboard.press(key); await page.waitForTimeout(40); await frames(); await frames(); }
+
+    if (other) {
+      // Read the other document first, so it is the previous one here.
+      await page.goto(other, { waitUntil: 'load' });
+      await page.waitForSelector('#pdf2html-pageno-current', { state: 'attached', timeout: 30000 });
+      await page.waitForTimeout(300);
+    }
+    await load({ reset: true });
+    const startTop = await scrollTop();
+    await palette(String(pick(9)));
+    await probe(() => { const p = window.__probe; p.pc.scrollTop += 137.25; });
+    await settle();
+    const origin = await scrollTop();
+
+    let s = await quick('Meta+o');
+    record('⌘O opens on the current section', s && s.mode === 'sections' && s.focused && s.active && /Results/.test(s.active.text),
+      s && s.active ? s.active.text : JSON.stringify(s));
+    record('⌘O lists sections with page numbers on the right', s.rows.filter((r) => r.kind === 'section').every((r) => /^p\. \d+$/.test(r.hint)));
+    record('the footer shows only keys that apply', !/Tab|scope/.test(s.foot) && /Move/.test(s.foot) && /⌘P/.test(s.foot.replace(/\s/g, '')), s.foot);
+    await press('Control+j');
+    const previewTop = await scrollTop();
+    s = await panel();
+    record('moving the selection previews the section behind the panel', s && Math.abs(previewTop - origin) > 50 && /Discussion/.test(s.active.text),
+      `${origin.toFixed(1)} → ${previewTop.toFixed(1)} (${s && s.active && s.active.text})`);
+    const shown = await probe(() => {
+      const p = window.__probe;
+      const a = p.outlineLinks().find((l) => /Discussion/.test(l.textContent));
+      const d = a && p.destY(a);
+      const below = document.querySelector('.pdf2html-finder').getBoundingClientRect().bottom - p.pc.getBoundingClientRect().top + 16;
+      // pdf2htmlEX destinations preview at their page top (overlay-quickopen.js).
+      const y = a && a.hasAttribute('data-reader-dest') ? d && d.y : p.pageTop(p.page(parseInt(a.getAttribute('href').slice(3), 16)));
+      return a && { y, below, atEnd: d && d.atEnd };
+    });
+    record('the preview puts the heading just below the panel', shown && (shown.atEnd || near(shown.y, shown.below, 2)),
+      shown ? `target at ${shown.y.toFixed(1)}, panel bottom + 16 at ${shown.below.toFixed(1)}` : 'none');
+    await press('Escape');
+    record('Esc after a preview restores the exact position', !(await panel()) && Math.abs((await scrollTop()) - origin) < 0.5,
+      `${origin.toFixed(2)} vs ${(await scrollTop()).toFixed(2)}`);
+
+    // Under Vimium, Escape only blurs the field: the same restore.
+    await quick('Meta+o');
+    await press('Control+k');
+    await probe(() => document.activeElement.blur());
+    await page.waitForTimeout(80);
+    record('focus leaving the field (Vimium Esc) closes and restores', !(await panel()) && Math.abs((await scrollTop()) - origin) < 0.5);
+
+    // Enter commits from the reader's own position: one history entry.
+    await quick('Meta+o');
+    await press('ArrowDown');
+    await press('Enter');
+    await settle();
+    const landed = await probe(() => {
+      const p = window.__probe;
+      const a = p.outlineLinks().find((l) => /Discussion/.test(l.textContent));
+      return a ? p.destY(a) : null;
+    });
+    record('Enter lands the section heading at the viewport top', landed && (landed.atEnd || near(landed.y, 0, 2)),
+      landed ? `${landed.page} at ${landed.y.toFixed(1)} px` : 'no destination');
+    await blurToDocument();
+    await press('Meta+z'); await settle();
+    const back1 = await scrollTop();
+    await press('Meta+z'); await settle();
+    const back2 = await scrollTop();
+    record('Enter records one history entry: ⌘Z returns to where the reader was', Math.abs(back1 - origin) < 2, `${back1.toFixed(1)} vs ${origin.toFixed(1)}`);
+    record('the previews recorded none: the next ⌘Z is the jump before', Math.abs(back2 - startTop) < 2, `${back2.toFixed(1)} vs ${startTop.toFixed(1)}`);
+
+    // Digits mean a page; one past the end offers none.
+    s = await quick('Meta+o', String(pick(42)));
+    record('digits offer "Go to page N" first', s.rows[0] && s.rows[0].kind === 'goto' && s.rows[0].text === 'Go to page ' + pick(42) && s.rows[0].active,
+      JSON.stringify(s.rows[0]));
+    await press('Enter'); await settle();
+    record('Go to page lands the page top at the lead', near(await pageTop(pick(42)), PAGE_LEAD), `${(await pageTop(pick(42))).toFixed(1)} px`);
+    s = await quick('Meta+o', String(total + 1));
+    record('a page past the end is not offered', !s.rows.some((r) => r.kind === 'goto') && /No page/.test(s.empty), s.empty);
+    await press('Escape');
+
+    // Fuzzy matching on titles, with the matched characters tinted.
+    s = await quick('Meta+o', 'dscs');
+    record('fuzzy section match ranks the right section first', s.rows[0] && /Discussion/.test(s.rows[0].text) && s.rows[0].marked, JSON.stringify(s.rows[0]));
+    await press('Escape');
+
+    // Pressing the same key closes; another key switches in place.
+    await quick('Meta+o');
+    await probe(() => { document.getElementById('pdf2html-finder').__same = 1; });
+    await press('Meta+p');
+    const switched = await probe(() => { const bg = document.getElementById('pdf2html-finder'); return bg && bg.__same === 1 && bg.querySelector('.pdf2html-finder').dataset.mode; });
+    record('another quick-open key switches the open panel in place', switched === 'documents', String(switched));
+    await press('Meta+p');
+    record('the same key again closes the panel', !(await panel()));
+
+    // ⌘K: prefixes narrow; Tab moves the selection; no match offers Find.
+    s = await quick('Meta+k', '>zoo');
+    record('> narrows ⌘K to commands', s.chip === 'Commands' && s.rows.length > 0 && s.rows.every((r) => r.kind === 'cmd') && s.rows[0].text === ':zoom',
+      JSON.stringify(s.rows.slice(0, 2)));
+    await press('Escape');
+    s = await quick('Meta+k', '@res');
+    record('@ narrows ⌘K to sections', s.chip === 'Sections' && s.rows.length > 0 && s.rows.every((r) => r.kind === 'section'), JSON.stringify(s.rows.map((r) => r.kind)));
+    await press('Escape');
+    s = await quick('Meta+k', '#12');
+    record('# and a number go to that page', s.rows[0] && s.rows[0].kind === 'goto' && /12$/.test(s.rows[0].text));
+    await press('Escape');
+    s = await quick('Meta+k', '>');
+    const firstActive = s.active && s.active.text;
+    await press('Tab');
+    const afterTab = await panel();
+    record('Tab moves the selection like ↓ (no scope cycling)', afterTab && afterTab.mode === 'all' && afterTab.active && afterTab.active.text !== firstActive,
+      `${firstActive} → ${afterTab && afterTab.active && afterTab.active.text}`);
+    await press('Escape');
+    s = await quick('Meta+k', 'zymurgical');
+    record('no matching section offers "Find" in this document', s.rows.length && s.rows[s.rows.length - 1].kind === 'find', JSON.stringify(s.rows.map((r) => r.kind)));
+    for (let i = 1; i < s.rows.length; i++) await press('ArrowDown');
+    await press('Enter');
+    await page.waitForTimeout(150);
+    const found = await probe(() => ({ bar: (document.getElementById('pdf2html-search-input') || {}).value || '',
+      count: (document.getElementById('pdf2html-search-count') || {}).textContent || '' }));
+    record('Find opens the / search with that text', found.bar === 'zymurgical' && /\/ [1-9]/.test(found.count), JSON.stringify(found));
+    await press('Escape');
+
+    // Marks are listed first in ⌘O.
+    await palette('mark q');
+    s = await quick('Meta+o');
+    record('⌘O lists saved marks first, under their own heading', s.heads[0] === 'Marks' && s.rows[0].kind === 'mark', JSON.stringify(s.heads));
+    await press('Escape');
+
+    // Click outside closes and restores.
+    const before = await scrollTop();
+    await quick('Meta+o');
+    await press('ArrowDown');
+    await page.mouse.click(10, VIEWPORT.height - 10);
+    await page.waitForTimeout(80);
+    record('a click outside closes and restores', !(await panel()) && Math.abs((await scrollTop()) - before) < 0.5);
+
+    // With the sidebar open the same keys work and land the same way.
+    await blurToDocument();
+    await page.keyboard.press('Meta+b'); await page.waitForTimeout(500);
+    s = await quick('Meta+o', 'methods');
+    await press('Enter'); await settle();
+    const withSidebar = await probe(() => {
+      const p = window.__probe;
+      const a = p.outlineLinks().find((l) => /Methods/.test(l.textContent));
+      return a ? p.destY(a) : null;
+    });
+    record('⌘O works with the sidebar open', withSidebar && near(withSidebar.y, 0, 2), withSidebar ? withSidebar.y.toFixed(1) : 'none');
+    await blurToDocument();
+    await page.keyboard.press('Meta+b'); await page.waitForTimeout(300);
+
+    // :print opens the source PDF in a new tab, in the browser's own viewer.
+    // Headless Chromium does not report a PDF tab as a page, so the check is
+    // the call the overlay makes.
+    await probe(() => {
+      const open = window.__open = window.open;
+      window.__opened = [];
+      window.open = function (url, target) { window.__opened.push([url, target]); const w = open.apply(window, arguments); if (w) w.close(); return w; };
+    });
+    await palette('print');
+    const opened = await probe(() => { const o = window.__opened; window.open = window.__open; return o; });
+    record(':print opens the source PDF in a new tab', opened.length === 1 && /^\/native\?hash=[a-f0-9]+$/.test(opened[0][0]) && opened[0][1] === '_blank',
+      JSON.stringify(opened));
+
+    if (other) {
+      s = await quick('Meta+p');
+      record('⌘P opens on the previous document', s.active && s.active.kind === 'doc' && s.heads[0] === 'Previous' && /Plain fixture/.test(s.active.text),
+        JSON.stringify(s.active));
+      record('document rows show pages and when they were read', /\d+ pages/.test(s.active.hint) && /(now|ago|yesterday)/.test(s.active.hint), s.active.hint);
+      record('the current document is not listed', !s.rows.some((r) => /Overlay regression fixture/.test(r.text)));
+      await Promise.all([page.waitForURL((u) => u.href.indexOf(other.split('?')[0]) === 0, { timeout: 15000 }), page.keyboard.press('Enter')]);
+      record('⌘P then Enter reaches the previous document', page.url().indexOf(other.split('?')[0]) === 0, page.url());
+      await page.waitForSelector('#pdf2html-pageno-current', { state: 'attached', timeout: 30000 });
+      await page.waitForFunction(() => document.documentElement.dataset.readerText === 'complete', null, { timeout: 60000 });
+      await page.evaluate(installProbe);
+      s = await quick('Meta+o');
+      record('⌘O on a document without an outline lists its pages', s.rows.length > 0 && s.rows.every((r) => r.kind === 'page')
+        && /Page 1 heading/.test(s.rows[0].text) && s.rows[0].hint === 'p. 1', JSON.stringify(s.rows[0]));
+      await press('Escape');
+      s = await quick('Meta+p');
+      record('⌘P from there offers the first document as previous', s.active && /Overlay regression fixture/.test(s.active.text), s.active && s.active.text);
+      await press('Escape');
+      await load();
+    }
   }
 
   // ======================================================================= search

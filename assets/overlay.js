@@ -119,6 +119,7 @@ preparePdf2htmlEx({ document: document, window: window });
             prefs: prefs, zoom: zoom, navigation: navigation, text: text, library: library,
             pins: pins, showPins: function () { sidebar.showPins(); },
             finger: finger, settings: settings, isInputTarget: isInputTarget, notify: toast.show,
+            documentModel: documentModel, search: search, entryHash: entryHash,
             jumpBack: function () { jump(navigation.back, 'Back', 'Nothing to go back to'); },
             jumpForward: function () { jump(navigation.forward, 'Forward', 'Nothing to go forward to'); } });
         function jump(travel, word, empty) {

@@ -142,7 +142,12 @@ function portFree(port, host = '127.0.0.1') {
   });
 }
 async function pickPort() {
-  if (process.env.PDFV_PORT) { const port = Number(process.env.PDFV_PORT); if (await portFree(port)) return port; throw new Error('requested port occupied'); }
+  if (process.env.PDFV_PORT) {
+    const port=Number(process.env.PDFV_PORT);
+    if (!Number.isInteger(port) || port < 1024 || port > 65535 || !(await portFree(port)))
+      throw new Error('requested PDFV_PORT is invalid or occupied');
+    return port;
+  }
   for (let port = 7470; port <= 7479; port++) {
     if (await portFree(port) && await portFree(port, '::1')) return port;
   }
@@ -190,13 +195,21 @@ for n in range(1, 15):
     c.drawString(72, H - 80, "Page %d heading" % n + (": " + CHAPTERS[n] if n in CHAPTERS else ""))
     c.setFont("Helvetica", 11)
     y = H - 120
-    for line in range(38):
+    for line in range(0 if n == 13 else 38):
         words = [WORDS[(n * 7 + line * 5 + i) % len(WORDS)] for i in range(12)]
         text = "Line %d of page %d: %s." % (line + 1, n, " ".join(words))
         if line == 20 and n % 3 == 2:
             text = "Line %d of page %d holds the marker word zymurgical among ordinary words." % (line + 1, n)
         c.drawString(72, y, text)
         y -= 16
+    if n == 13:
+        for col in range(2):
+            for row in range(6):
+                c.drawString(72 + col*250, H-120-row*24-col*12, f'Column {col+1} row {row+1} selectable text.')
+        c.drawString(72, H-350, 'Before the figure selectable text.')
+        c.rect(72, H-470, 220, 90)
+        c.drawString(72, H-490, 'Figure caption selectable text.')
+        c.drawString(72, H-530, 'After the figure selectable text.')
     if n == 1:
         c.drawString(72, 100, "Source https://example.org/vimium-harness/paper and doi:10.1234/vimium.5678 here.")
         c.drawString(72, 60, "See the results on page nine. Visit the example site.")
@@ -727,6 +740,43 @@ async function runEngine(ctx, spec) {
     await press('Escape');
     await clearSelection();
 
+    // Trusted Vimium line motions from the last line across a page break.
+    if (spec.label === 'reader') {
+      await probe(() => window.__vp.scrollToPage(3, 0.7));
+      await settle(50, 250);
+      await probe(() => {
+        const lines = document.querySelectorAll('#pf3 .t');
+        const walker = document.createTreeWalker(lines[lines.length-1], NodeFilter.SHOW_TEXT);
+        const node = walker.nextNode();
+        getSelection().setBaseAndExtent(node, 0, node, 1);
+      });
+      await press('v');
+      for (let i=0;i<4;i++) { await press('j'); await page.waitForTimeout(80); }
+      const down = await probe(() => window.__vp.selection());
+      check('4 visual j crosses a page boundary', down.focusPage === 4, `focus page ${down.focusPage}`);
+      for (let i=0;i<5;i++) { await press('k'); await page.waitForTimeout(80); }
+      const up = await probe(() => window.__vp.selection());
+      check('4 visual k crosses back over a page boundary', up.focusPage === 3, `focus page ${up.focusPage}`);
+      await press('Escape'); await clearSelection();
+      for (const [label, startText, expected] of [
+        ['column break', 'Column 1 row 6', 'Column 2'],
+        ['figure', 'Before the figure', 'Figure caption'],
+      ]) {
+        await probe(() => window.__vp.scrollToPage(13, 0.1));
+        await settle(50, 250);
+        await probe(text => {
+          const line=[...document.querySelectorAll('#pfd .t')].find(l=>l.textContent.startsWith(text));
+          const node=document.createTreeWalker(line, NodeFilter.SHOW_TEXT).nextNode();
+          getSelection().setBaseAndExtent(node,0,node,1);
+        }, startText);
+        await press('v');
+        for (let i=0;i<3;i++) {await press('j'); await page.waitForTimeout(80);}
+        const moved=await probe(()=>window.__vp.selection());
+        check('4 visual j crosses a '+label, moved.text.includes(expected), JSON.stringify(moved.text));
+        await press('Escape'); await clearSelection();
+      }
+    }
+
     // Caret from a find hit: overlay `/` search, Enter, then v extends from it.
     await probe(() => window.__vp.scrollToPage(5, 0.4));
     await settle(50, 250);
@@ -820,6 +870,24 @@ async function runEngine(ctx, spec) {
     await probe(() => { const el = document.getElementById('pdf2html-search'); if (el) el.remove(); });
     await escFromInput('`:` palette', ':', 'pdf2html-palette-input', 'pdf2html-palette');
     await escFromInput('`/` search bar', '/', 'pdf2html-search-input', 'pdf2html-search');
+    for (const [label, key] of [['⌘O sections', 'Meta+o'], ['⌘P documents', 'Meta+p'], ['⌘K quick open', 'Meta+k']]) {
+      await escFromInput(label, key, 'pdf2html-finder-input', 'pdf2html-finder');
+    }
+    {
+      // A ⌘O preview moves the document; Vimium's Escape (a blur) puts it back.
+      await blur();
+      const before = await probe(() => window.__vp.pc.scrollTop);
+      await press('Meta+o');
+      await page.waitForSelector('#pdf2html-finder-input', { timeout: 2000 }).catch(() => {});
+      await press('ArrowDown');
+      await page.waitForTimeout(150);
+      const moved = await probe(() => window.__vp.pc.scrollTop);
+      await press('Escape');
+      await page.waitForTimeout(200);
+      const after = await probe(() => ({ top: window.__vp.pc.scrollTop, open: !!document.getElementById('pdf2html-finder') }));
+      check('5 ⌘O preview moves the document; one Esc closes and restores it', moved !== before && !after.open && Math.abs(after.top - before) < 0.5,
+        `before ${fmt(before)}, preview ${fmt(moved)}, after ${fmt(after.top)}${after.open ? ', still open' : ''}`);
+    }
     await probe(() => window.__vp.pc.dispatchEvent(new Event('scroll')));
     await page.keyboard.press('Escape'); // clear any search highlights left behind
     await clearSelection();

@@ -36,7 +36,7 @@ import ocr
 import pdfium_doc
 
 # Bump when the shell markup changes, so cached shells are rebuilt.
-SHELL_VERSION = 6
+SHELL_VERSION = 7
 REPRESENTATION = "raster-v1"
 MIN_RASTER_WIDTH = 64
 MAX_RASTER_WIDTH = 6000

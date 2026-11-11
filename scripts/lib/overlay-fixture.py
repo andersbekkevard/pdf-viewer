@@ -1,4 +1,6 @@
 # Synthetic outline/link fixture adapted from verify-vimium.cjs; 160 pages exercise distant jumps.
+# Usage: overlay-fixture.py <out.pdf> <title> <pages> [flat|nested|none]
+#   flat (default): four chapters; nested adds sections under them; none has no outline.
 
 import sys
 from reportlab.lib.pagesizes import A4
@@ -10,6 +12,9 @@ WORDS = ("reading documents with the keyboard should feel ordinary and quiet whi
          "keeps its layout and its text remains selectable searchable and copyable across lines "
          "chapters figures footnotes tables margins and references").split()
 CHAPTERS = {1: "Introduction", 4: "Methods", 8: "Results", 12: "Discussion"}
+OUTLINE = sys.argv[4] if len(sys.argv) > 4 else "flat"
+SECTIONS = {5: (1, "Sampling design"), 6: (2, "Résumé of instruments"), 9: (1, "Effect sizes"),
+            10: (1, "Robustness checks")}
 c = canvas.Canvas(out, pagesize=A4)
 c.setTitle(title)
 number = 0
@@ -18,7 +23,11 @@ for n in range(1, int(sys.argv[3]) + 1):
     c.bookmarkPage(key, fit="XYZ", top=H - 60)
     if n in CHAPTERS:
         number += 1
-        c.addOutlineEntry("%d %s" % (number, CHAPTERS[n]), key, level=0)
+        if OUTLINE != "none":
+            c.addOutlineEntry("%d %s" % (number, CHAPTERS[n]), key, level=0)
+    if OUTLINE == "nested" and n in SECTIONS:
+        level, label = SECTIONS[n]
+        c.addOutlineEntry(label, key, level=level)
     c.setFont("Helvetica-Bold", 18)
     c.drawString(72, H - 80, "Page %d heading" % n + (": " + CHAPTERS[n] if n in CHAPTERS else ""))
     c.setFont("Helvetica", 11)

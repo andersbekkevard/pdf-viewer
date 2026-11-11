@@ -27,20 +27,74 @@ For the rationale on the overall keyboard strategy, see
 | `⌘Z` / `⌘⇧Z`           | Back to where you were before the last jump / forward again (outline, links, `:42`, `gg`/`G`, a find match, `Home`/`End`) |
 | `⌘⇧.`                  | Toggle page counter                                           |
 | `:`                    | Open command palette                                          |
-| `⌘K`                   | Quick-open: outline sections, other cached documents, commands |
+| `⌘O`                   | Quick open: sections (or pages) and marks of this document    |
+| `⌘P`                   | Quick open: documents; the previous one is selected, so `⌘P` `Enter` goes back to it |
+| `⌘K`                   | Quick open: sections, documents and commands together         |
 | `⌘,`                   | Open settings (intercepts browser preferences shortcut)       |
 | `?`                    | Toggle cheatsheet (needs Vimium `?` disabled for `localhost:7435`) |
-| `Esc`                  | Close finder / palette → finger mode → settings → cheatsheet → sidebar → clear selection |
+| `Esc`                  | Close quick open / palette → finger mode → settings → cheatsheet → sidebar → clear selection |
 
 Jumps land consistently. Page jumps (`:42`, `e` / `q`, marks, thumbnails,
 resume) put the page top 8 px below the viewport top. Chapter jumps
-(outline clicks and `Enter`, `:chapter`, `c` / `C`, ⌘K sections) go to the
+(outline clicks and `Enter`, `:chapter`, `c` / `C`, quick-open sections) go to the
 outline entry's destination, so its heading sits at the viewport top.
 
 Bare `Tab` is not a viewer command. On the PDF document surface it is
 intentionally ignored so browser focus traversal does not jump between pages;
-overlay inputs such as `:` and `⌘K` still use Tab for local completion/scope
-cycling.
+the `:` palette still uses Tab to complete, and quick open uses Tab and
+Shift-Tab to move its selection.
+
+## Quick open
+
+A reader asks one of three things: where in this document, which document,
+or what to do. Each has a key, and `⌘K` answers all three. They are one
+panel (`assets/overlay-quickopen.js`): pressing the same key again closes
+it, and pressing another of the three switches it in place, keeping what was
+typed.
+
+- `⌘O` opens on the current section with its neighbours visible, the outline
+  hierarchy indented and page numbers on the right. Saved marks come first
+  under their own heading. Digits alone offer "Go to page N" first, only when
+  that page exists. A document without an outline lists its pages, labelled
+  with each page's first line of text.
+- `⌘P` opens on the previous document (the most recently read one other than
+  this), then the rest by frecency: each session counts, halving every seven
+  days (`daemon/visits.py`). Rows show the title (a `:rename`d name, else the
+  PDF's metadata title, else the file name), the author or source host, and
+  the saved page or page count with when it was last read. `Enter` opens it in
+  this tab at its saved page; `⌘Enter` opens a new tab. This document is not
+  listed.
+- `⌘K` with nothing typed lists the previous document, the next sections from
+  where the reader is, recent documents and the commands. Typing ranks
+  sections, documents and commands together. Prefixes narrow it: `@`
+  sections, `#` pages (`#42` or a bare number goes to that page), `>`
+  commands. When no section matches, the last row offers "Find … in this
+  document": the `/` search with that text, or, when the text is not on
+  screen, a jump to its next occurrence (the browser's find, which sees every
+  page) and the `/` search there.
+
+Typing is fuzzy: each word is matched as a subsequence, ignoring case and
+diacritics, ranked higher at word starts and for consecutive letters, and
+the matched characters are tinted. Section rows also match their parent
+sections' titles.
+
+In the panel: `↓` / `↑`, `Ctrl-j` / `Ctrl-k`, `Ctrl-n` / `Ctrl-p` and
+`Tab` / `Shift-Tab` move; `Enter` commits; `⌘Enter` opens a document, or this
+document at a section or page, in a new tab; `Esc`, a click outside or focus
+leaving the field (Vimium's `Esc`) closes. The footer shows only the keys that
+apply.
+
+Moving the selection to a section, page or mark previews it: the document
+behind the panel scrolls so the target sits just below the panel (reader
+destinations land their heading there; pdf2htmlEX ones their page top). A
+preview records no history. Closing without a commit returns to the exact
+scroll position; `Enter` returns there first and then jumps, so the jump is
+one `⌘Z` entry like any other.
+
+`⌘O` and `⌘P` are the browser's open-file and print shortcuts; the overlay
+takes them in the capture phase from any focus, as it does `⌘K` and `⌘,`.
+Printing the viewer page would print the overlay; `:print` prints the PDF.
+`⌘` chords are not Vimium keys, so none of this needs an exclusion rule.
 
 ## Home page
 
@@ -65,8 +119,9 @@ Vimium's `f` hints reach them. No overlay key leads here; use the address bar.
 | `:jump <a-z>`                | Jump to a saved mark                                                             |
 | `:clear <a-z>`               | Delete a saved mark                                                              |
 | `:open <doc>` / `:o`         | Switch to another cached doc; completes against `/library` (visits-sorted)       |
-| `:rename <name>` / `:rn`     | Rename this PDF (changes the search name used by `:open` / ⌘K). Tab fills current |
+| `:rename <name>` / `:rn`     | Rename this PDF (the name `:open` and quick open show and match). Tab fills current |
 | `:path`                      | Copy this PDF's source path / URL (from `mappings.tsv`) to clipboard             |
+| `:print`                     | Open the source PDF in a new tab, in the browser's own viewer, to print it (`⌘P` is quick open) |
 | `:disable` / `:native`       | Open this PDF in the native browser PDF viewer and disable custom-viewer redirects for this entry |
 | `:cursorpin`                 | Toggle cursor pin-to-center                                                             |
 | `:scrolloff 25` / `:so 25`   | Set scrolloff band to 25 % (0–50)                                                |

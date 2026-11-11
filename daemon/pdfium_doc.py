@@ -6,7 +6,8 @@ request threads). Coordinates leave this module in *page px*: top-left origin,
 1 PDF point = 1 px, page rotation and crop box already applied. That is the
 unit of a `.pf` page frame in the reader shell.
 
-Text model. A page is a list of lines in PDFium's text order. A line is a
+Text model. A page is a list of positioned lines. Geometric ordering is
+experimental until it passes the corpus copy/find fidelity gates. A line is a
 list of segments; a segment is a run of characters with no large horizontal
 gap, carrying the exact width it occupies on the page. The browser lays the
 segment out in a fallback font and fits it to that width, so selection and
@@ -33,7 +34,9 @@ SEGMENT_GAP_EM = 1.0
 # Characters whose centre leaves the line by more than this many line heights
 # belong to another line, even when PDFium reports no line break.
 LINE_DRIFT_EM = 0.7
-TEXT_LAYER_VERSION = 4
+GEOMETRIC_TEXT_ORDER = os.environ.get("PDF_VIEWER_GEOMETRIC_TEXT_ORDER") == "1"
+# Experimental and default extraction must never share a text/shell cache.
+TEXT_LAYER_VERSION = 7 if GEOMETRIC_TEXT_ORDER else 5
 
 # The text layer is laid out in a fallback font and fitted to each segment's
 # width. The closer the fallback's proportions are to the document's font, the
@@ -343,6 +346,51 @@ def _build_line(chars: list[tuple]) -> list[dict]:
     return out
 
 
+def reading_order(lines: list[dict]) -> list[dict]:
+    """Conservative XY order, preserving each line and its character order.
+
+    Only persistent empty x gutters separate columns. Overlapping lines and
+    RTL pages retain stream order; rotated stamps follow the upright body.
+    Tables with row-spanning segments therefore remain rows, not columns.
+    """
+    if any(line.get("rtl") for line in lines):
+        return lines
+    stream_index = {id(line): i for i, line in enumerate(lines)}
+    body = [line for line in lines if not line.get("dir")]
+    marginal = [line for line in lines if line.get("dir")]
+
+    def right(line):
+        return line["x"] + sum(s["w"] + s.get("gap", 0) for s in line["segs"])
+
+    def order(group, depth=0):
+        if depth >= 32 or len(group) < 2:
+            return sorted(group, key=lambda line: stream_index[id(line)])
+        em = statistics.median(l["h"] for l in group)
+        by_y = sorted(group, key=lambda l: l["y"])
+        # Separate full-width headings/captions/footnotes before searching
+        # for column gutters, so a short footnote cannot attach to column 1.
+        bottom = by_y[0]["y"] + by_y[0]["h"]
+        for i in range(1, len(by_y)):
+            if by_y[i]["y"] - bottom >= 2 * em:
+                return order(by_y[:i], depth + 1) + order(by_y[i:], depth + 1)
+            bottom = max(bottom, by_y[i]["y"] + by_y[i]["h"])
+        by_x = sorted(group, key=lambda l: l["x"])
+        edge = right(by_x[0])
+        for i in range(1, len(by_x)):
+            gap = by_x[i]["x"] - edge
+            left, rest = by_x[:i], by_x[i:]
+            if gap >= 2 * em and min(len(left), len(rest)) >= 3:
+                if max(min(l["y"] for l in left), min(l["y"] for l in rest)) < min(max(l["y"] for l in left), max(l["y"] for l in rest)):
+                    return order(left, depth + 1) + order(rest, depth + 1)
+            edge = max(edge, right(by_x[i]))
+        # At the same y, x-only sorting would scramble tables/equations.
+        if any(b["y"] < a["y"] + a["h"] * .7 for a, b in zip(by_y, by_y[1:])):
+            return sorted(group, key=lambda line: stream_index[id(line)])
+        return by_y
+
+    return order(body) + marginal
+
+
 def page_text(path: str, index: int) -> list[dict]:
     """Positioned text lines of one page (see the module docstring)."""
     key = _doc_key(path)
@@ -430,7 +478,7 @@ def _page_lines(page: pdfium.PdfPage, affine: tuple) -> list[dict]:
                 styles[key] = font_style(key[0].decode("utf-8", "replace"), key[1], key[2])
             if styles[key]:
                 line["f"] = styles[key]
-        return lines
+        return reading_order(lines) if GEOMETRIC_TEXT_ORDER else lines
     finally:
         textpage.close()
 

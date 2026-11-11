@@ -127,7 +127,8 @@ All core phases done (1 → 7). What works end-to-end today:
   `GET /read?path=|url=` / `GET /r/<hash>/` (reader) /
   `GET /entry/<hash>/state` (position, marks, zoom) /
   `GET /_assets/*` / `GET /healthz` / `GET /stats` /
-  `GET /stats/recent` / `GET /library`. Cache lookup ≈ 1–3 ms.
+  `GET /stats/recent` / `GET /library` (`?view=finder`: quick-open rows).
+  Cache lookup ≈ 1–3 ms.
 - **launchd autostart** — `launchd/com.anders.pdf_viewer.plist`, installed
   into `~/Library/LaunchAgents/` by `scripts/setup.sh` (see
   [Externalities](#externalities) §2). `KeepAlive=true`, respawns within a
@@ -148,8 +149,8 @@ All core phases done (1 → 7). What works end-to-end today:
   enabled by default; `/view-canonical` is the explicit rollback route.
 - **Visit tracking** (`daemon/visits.py` + `visits.db`) — every cache hit
   logged off the response path via FastAPI `BackgroundTasks`. Powers
-  `/stats`, `/stats/recent`, and the visits-sorted library picker
-  behind `⌘K` / `:open`.
+  `/stats`, `/stats/recent`, and the frecency order of the home page,
+  quick open (`⌘P`, `⌘K`) and `:open`.
 - **Native `⌘F` full-document indexing** — `.pf` carries
   `content-visibility: auto` so off-viewport pages skip paint+layout
   but their text stays in the layout tree, where Chromium's native
@@ -334,14 +335,16 @@ the migration window.
 | `⌘+` / `⌘−` / `⌘0` | Zoom in / out / fit-width        |
 | `⌘⇧.`    | Toggle page counter                          |
 | `:`      | Open command palette                         |
-| `⌘K`     | Quick-open: sections, cached documents, commands |
+| `⌘O`     | Quick open: sections or pages of this document |
+| `⌘P`     | Quick open: documents (`⌘P` `Enter` = previous document) |
+| `⌘K`     | Quick open: sections, documents and commands |
 | `⌘,`     | Settings                                     |
 | `?`      | Cheatsheet (needs Vimium `?` disabled on `localhost:7435`) |
 | `Esc`    | Close the topmost overlay, then the sidebar, then clear selection |
 
 Palette: `:42`, `:p 42`, `:chapter <name>`, `:next` / `:prev`,
 `:mark <a-z>`, `:jump <a-z>`, `:clear <a-z>`, `:open <doc>` / `:o`,
-`:rename <name>`, `:path`, `:disable`, `:delete confirm`,
+`:rename <name>`, `:path`, `:print`, `:disable`, `:delete confirm`,
 `:pin`, `:scrolloff 25` / `:so 25`, `:case`, `:zoom N | auto`,
 `:yank <ref|page|chapter|document>` / `:y`, `:finger` / `:f`,
 `:counter` / `:num`, `:set`, `:help` / `:h`.

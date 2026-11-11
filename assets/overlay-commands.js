@@ -1,6 +1,7 @@
-// Command surfaces: the `:` palette, the ⌘K finder and the `?` cheatsheet,
-// all driven by one COMMANDS table.
+// Command surfaces: the `:` palette, quick open (⌘O / ⌘P / ⌘K, in
+// overlay-quickopen.js) and the `?` cheatsheet, all driven by one COMMANDS table.
 import { escapeHtml, middleEllipsis, removeOverlay } from './overlay-dom.js';
+import { createQuickOpen } from './overlay-quickopen.js';
 
 export function createCommandSurface(core) {
     var document = core.document;
@@ -37,7 +38,9 @@ export function createCommandSurface(core) {
         ] },
         { title: 'Modes', rows: [
             [[[':']], 'Command palette (Tab / ^J / ^K to cycle)'],
-            [[['⌘', 'K']], 'Quick-open: sections, other documents, commands'],
+            [[['⌘', 'O']], 'Go to a section or page of this document'],
+            [[['⌘', 'P']], 'Open a document; Enter alone goes back to the previous one'],
+            [[['⌘', 'K']], 'Search sections, documents and commands together'],
             [[['⌘', ',']], 'Settings'],
             [[['/'], ['s']], 'Find in visible pages (Enter jumps, n / N cycle)'],
             [[['Ctrl', 'f']], 'Finger visible URL / DOI / ISBN / ID tokens; hint copies'],
@@ -104,7 +107,7 @@ export function createCommandSurface(core) {
     // reverses, commands + arguments are both completable.
     //
     // COMMANDS is the single source of truth for the dispatcher, the
-    // completer, the ⌘K finder and the cheatsheet. Each entry:
+    // completer, quick open (⌘K) and the cheatsheet. Each entry:
     //   name, aliases     what the palette matches
     //   usage, help       the cheatsheet row
     //   desc              the wildmenu hint (string or function for state)
@@ -294,6 +297,13 @@ export function createCommandSurface(core) {
               text.writeClip(ref).then(function (ok) {
                   notify(ok ? 'Copied ' + middleEllipsis(ref, 48) : 'Could not copy to the clipboard', { error: !ok });
               });
+          } },
+        { name: 'print', aliases: [], usage: 'print', help: "Open the PDF in the browser's viewer to print it",
+          desc: "open the PDF in the browser's viewer to print",
+          handler: function () {
+              var hash = core.entryHash && core.entryHash();
+              if (!hash) { notify('No PDF recorded for this document', { error: true }); return; }
+              window.open('/native?hash=' + encodeURIComponent(hash), '_blank');
           } },
         { name: 'disable', aliases: ['native'], usage: 'disable', help: 'Open the native PDF and stop redirecting this file',
           desc: 'open native PDF and disable viewer for this file',
@@ -652,455 +662,78 @@ export function createCommandSurface(core) {
     }
 
     // ------------------------------------------------------------------------
-    // Cmd-K Finder — centered, pretty quick-jump dropdown. Groups candidates
-    // from the current document's outline, the cached library, and the
-    // palette COMMANDS into one searchable list. Sibling to openPalette()
-    // (:) rather than replacing it: : stays vim ex-bar; ⌘K opens this.
+    // Quick open (overlay-quickopen.js): ⌘O sections of this document, ⌘P
+    // documents, ⌘K everything including COMMANDS. All three are taken in the
+    // capture phase from any focus state, like ⌘, below: printing the viewer
+    // would print the overlay (`:print` prints the PDF), and the browser's
+    // open-file dialog has no use here.
     // ------------------------------------------------------------------------
-
-    function closeFinder() {
-        removeOverlay(document.getElementById('pdf2html-finder'));
-    }
-
-    // SVG atoms — trimmed to just what the row icons need.
-    function finderSvg(kind) {
-        var attrs = 'width="12" height="12" viewBox="0 0 24 24" fill="none" '
-                  + 'stroke="currentColor" stroke-width="1.75" '
-                  + 'stroke-linecap="round" stroke-linejoin="round"';
-        if (kind === 'doc') {
-            return '<svg ' + attrs + '>'
-                + '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>'
-                + '<path d="M14 3v6h6"/></svg>';
-        }
-        if (kind === 'book') {
-            return '<svg ' + attrs + '>'
-                + '<rect x="3" y="5" width="4" height="14"/>'
-                + '<rect x="9" y="3" width="4" height="16"/>'
-                + '<path d="M15 7l3.5-1 3 11-3.5 1z"/></svg>';
-        }
-        if (kind === 'cmd') {
-            return '<svg ' + attrs + '>'
-                + '<path d="M5 8l4 4-4 4M12 16h7"/></svg>';
-        }
-        return '';
-    }
-
-    // Try to split a chapter label into a leading section number and title.
-    // "3.2 Self-organization" → { num: "3.2", title: "Self-organization" }
-    // If there's no number, returns { num: "", title: label }.
-    function finderParseChapter(label) {
-        var m = String(label || '').match(/^\s*([0-9]+(?:\.[0-9]+)*|[A-Z])\s+(.*)$/);
-        if (m) return { num: m[1], title: m[2].trim() };
-        return { num: '', title: String(label || '').trim() };
-    }
-
-    // Derive a human title from a path/URL when the daemon didn't supply
-    // a name. Strips the extension so "/Users/x/Foo-Bar.pdf" → "Foo-Bar".
-    // URL-decodes percent-encoded segments so %20 doesn't leak into the UI.
-    function finderDeriveTitle(ref) {
-        var s = String(ref || '').trim();
-        if (!s) return '';
-        // Drop query string + trailing slashes.
-        s = s.replace(/[?#].*$/, '').replace(/\/+$/, '');
-        var tail = s.split('/').pop() || s;
-        try { tail = decodeURIComponent(tail); } catch (_) {}
-        return tail.replace(/\.(pdf|html?|xml)$/i, '');
-    }
-
-    // Build the full flat-with-groups candidate list once per open. Each
-    // candidate is { group, icon, label, meta, searchText, run }.
-    function buildFinderCandidates(selection) {
-        var out = [];
-
-        // --- Outline (this document) ---
-        var chaps = navigation.entries();
-        for (var i = 0; i < chaps.length; i++) {
-            var c = chaps[i];
-            var parts = finderParseChapter(c.label);
-            var num = parts.num;
-            var title = parts.title;
-            var metaBits = [];
-            if (num) metaBits.push('§ ' + num);
-            metaBits.push('p. ' + c.page);
-            out.push({
-                scope: 'outline',
-                group: 'Outline · this document',
-                icon: num ? { kind: 'text', text: num } : { kind: 'text', text: '§' },
-                label: title,
-                meta: metaBits.join('  ·  '),
-                searchText: (num + ' ' + title + ' ' + c.label).toLowerCase(),
-                run: (function (entry) { return function () { navigation.gotoEntry(entry); }; })(c),
-            });
-        }
-
-        // --- Other documents (library) ---
-        var libraryEntries = library.all();
-        if (libraryEntries.length) {
-            for (var j = 0; j < libraryEntries.length; j++) {
-                var e = libraryEntries[j];
-                if (library.isCurrent(e)) continue;
-                var libLabel = String(e.name || '').trim();
-                if (!libLabel) libLabel = finderDeriveTitle(e.source_ref) || '(untitled)';
-                var bits = [];
-                if (e.source_ref) bits.push(middleEllipsis(e.source_ref, 44));
-                if (e.pages) bits.push(e.pages + ' pp');
-                var rec = library.recencyLabel(e);
-                if (rec) bits.push(rec);
-                out.push({
-                    scope: 'files',
-                    group: 'Other documents',
-                    icon: { kind: 'svg', svg: finderSvg('book') },
-                    label: libLabel,
-                    meta: bits.join('  ·  '),
-                    searchText: library.searchText(e),
-                    run: (function (href) { return function () { if (href) location.href = href; }; })(e.href),
-                });
+    var quickOpen = createQuickOpen({
+        document: document, window: window, location: location, navigation: navigation,
+        documentModel: core.documentModel, library: library, notify: notify, pins: core.pins,
+        saveSelection: saveSelection, restoreSelection: restoreSelection,
+        commands: function () { return COMMANDS; },
+        runCommand: function (cmd, selection) {
+            restoreSelection(selection);
+            if (!commandTakesArg(cmd)) { cmd.handler(); return; }
+            // A command that takes an argument continues in the : palette.
+            openPalette(selection);
+            var inp = document.getElementById('pdf2html-palette-input');
+            if (inp) {
+                inp.value = cmd.name + ' ';
+                inp.dispatchEvent(new Event('input'));
+                inp.selectionStart = inp.selectionEnd = inp.value.length;
             }
-        }
+        },
+        find: findInDocument,
+    });
 
-        // --- Commands ---
-        for (var k = 0; k < COMMANDS.length; k++) {
-            var cmd = COMMANDS[k];
-            var desc = typeof cmd.desc === 'function' ? cmd.desc() : (cmd.desc || '');
-            var alias = cmd.aliases && cmd.aliases[0] ? cmd.aliases[0] : '';
-            out.push({
-                scope: 'commands',
-                group: 'Commands',
-                icon: { kind: 'svg', svg: finderSvg('cmd') },
-                label: ':' + cmd.name + (alias ? '  ' : ''),
-                labelAlias: alias ? ':' + alias : '',
-                meta: desc,
-                searchText: (cmd.name + ' ' + (cmd.aliases || []).join(' ') + ' ' + desc).toLowerCase(),
-                // Commands that take args shouldn't fire bare — expand into the
-                // ex-bar palette so the user can supply an argument. Zero-arg
-                // commands run straight through.
-                run: (function (c) {
-                    return function () {
-                        restoreSelection(selection);
-                        if (commandTakesArg(c)) {
-                            openPalette(selection);
-                            var inp = document.getElementById('pdf2html-palette-input');
-                            if (inp) {
-                                inp.value = c.name + ' ';
-                                inp.dispatchEvent(new Event('input'));
-                                inp.selectionStart = inp.selectionEnd = inp.value.length;
-                            }
-                        } else {
-                            c.handler();
-                        }
-                    };
-                })(cmd),
-            });
+    // The `/` search marks hits on the visible pages. When the text is not on
+    // screen, the browser's own find (which sees every page: offscreen text
+    // stays in layout) jumps to the next occurrence from here, and the bar
+    // then marks the hits around it.
+    function findInDocument(text) {
+        var search = core.search;
+        if (!search || !text) return;
+        if (search.find(text) > 0) return;
+        search.close();
+        var sel = window.getSelection();
+        var visible = core.documentModel.visiblePages();
+        var start = visible.length && core.documentModel.pageTextBoundaryPosition(
+            core.documentModel.pageNumber(visible[0]), true);
+        try {
+            if (sel && start) sel.collapse(start.node, start.offset);
+        } catch (_) {}
+        var found = false;
+        try { found = window.find(text, false, false, true, false, false, false); } catch (_) {}
+        var range = found && sel && sel.rangeCount ? sel.getRangeAt(0) : null;
+        var root = core.documentModel.container();
+        if (!range || !root) {
+            if (sel) sel.removeAllRanges();
+            notify('No \u201c' + text + '\u201d in this document', { error: true });
+            return;
         }
-
-        return out;
+        // The browser's find selects the match but leaves the page scroller
+        // where it was: bring the match to the upper third, as a jump ⌘Z undoes.
+        var box = range.getBoundingClientRect(), rootBox = root.getBoundingClientRect();
+        navigation.remember();
+        root.scrollTop += box.top - rootBox.top - root.clientHeight / 3;
+        sel.removeAllRanges();
+        window.requestAnimationFrame(function () { search.find(text); });
     }
 
-    // Case-insensitive substring filter; also builds match highlight ranges
-    // over the label so we can show which chars hit.
-    function finderFilter(candidates, query) {
-        var q = String(query || '').trim().toLowerCase();
-        if (!q) return candidates.map(function (c) { return { cand: c, hit: null }; });
-        var out = [];
-        for (var i = 0; i < candidates.length; i++) {
-            var c = candidates[i];
-            if (c.searchText.indexOf(q) === -1) continue;
-            var labelLc = String(c.label || '').toLowerCase();
-            var idx = labelLc.indexOf(q);
-            out.push({ cand: c, hit: idx >= 0 ? { start: idx, end: idx + q.length } : null });
-        }
-        return out;
-    }
-
-    function renderFinderLabel(cand, hit) {
-        var label = String(cand.label || '');
-        var html;
-        if (hit) {
-            html = escapeHtml(label.slice(0, hit.start))
-                 + '<span class="match">' + escapeHtml(label.slice(hit.start, hit.end)) + '</span>'
-                 + escapeHtml(label.slice(hit.end));
-        } else {
-            html = escapeHtml(label);
-        }
-        if (cand.labelAlias) {
-            html += '<span class="dim">' + escapeHtml(cand.labelAlias) + '</span>';
-        }
-        return html;
-    }
-
-    function renderFinderIcon(icon) {
-        if (!icon) return '';
-        if (icon.kind === 'text') {
-            return '<span class="icon icon-text">' + escapeHtml(icon.text) + '</span>';
-        }
-        return '<span class="icon">' + (icon.svg || '') + '</span>';
-    }
-
-    function openFinder() {
-        // Toggle: re-press ⌘K closes.
-        var existing = document.getElementById('pdf2html-finder');
-        if (existing) { removeOverlay(existing); return; }
-
-        // Kick off library fetch if we don't have it yet — first ⌘K on a
-        // fresh tab would otherwise render an empty "Other documents" group.
-        library.load();
-
-        // Scope cycle: Tab advances, Shift+Tab reverses. 'all' includes the
-        // command palette too; the narrower scopes drop it so the user can
-        // focus on navigation without noise.
-        var SCOPES = [
-            { id: 'all',      label: 'All',           placeholder: 'Jump to anything — section, document, command…  ·  tab to cycle' },
-            { id: 'outline',  label: 'This document', placeholder: 'Search this document…' },
-            { id: 'files',    label: 'Files',         placeholder: 'Search files…' },
-        ];
-        var scopeIdx = 0;
-
-        var bg = document.createElement('div');
-        bg.id = 'pdf2html-finder';
-        bg.innerHTML =
-            '<div class="pdf2html-finder" role="dialog" aria-label="Quick finder">'
-          +   '<div class="pdf2html-finder-input-row">'
-          +     '<button type="button" class="pdf2html-finder-scope" id="pdf2html-finder-scope" '
-          +       'title="Cycle scope (Tab / Shift+Tab)" hidden>'
-          +       '<span class="scope-label"></span>'
-          +     '</button>'
-          +     '<input type="text" class="pdf2html-finder-input" id="pdf2html-finder-input" '
-          +       'autocomplete="off" spellcheck="false" autocapitalize="off" '
-          +       'placeholder="Jump to anything — section, document, command…  ·  tab to cycle">'
-          +     '<button type="button" class="pdf2html-finder-close" aria-label="Close">'
-          +       '<span class="pdf2html-kbd sm">Esc</span>'
-          +     '</button>'
-          +   '</div>'
-          +   '<div class="pdf2html-finder-list" id="pdf2html-finder-list"></div>'
-          +   '<div class="pdf2html-finder-foot">'
-          +     '<div class="foot-group">'
-          +       '<span class="foot-item"><span class="pdf2html-kbd">↑</span><span class="pdf2html-kbd">↓</span><span class="tip">navigate</span></span>'
-          +       '<span class="foot-item"><span class="pdf2html-kbd">Tab</span><span class="tip">scope</span></span>'
-          +       '<span class="foot-item"><span class="pdf2html-kbd">↵</span><span class="tip">go</span></span>'
-          +       '<span class="foot-item"><span class="pdf2html-kbd">Esc</span><span class="tip">close</span></span>'
-          +     '</div>'
-          +     '<div class="foot-group"><span class="foot-item tip" id="pdf2html-finder-count">—</span></div>'
-          +   '</div>'
-          + '</div>';
-
-        document.body.appendChild(bg);
-
-        var listEl = bg.querySelector('#pdf2html-finder-list');
-        var inputEl = bg.querySelector('#pdf2html-finder-input');
-        var countEl = bg.querySelector('#pdf2html-finder-count');
-        var closeBtn = bg.querySelector('.pdf2html-finder-close');
-        var scopeBtn = bg.querySelector('#pdf2html-finder-scope');
-        var scopeLabelEl = scopeBtn.querySelector('.scope-label');
-
-        function currentScope() { return SCOPES[scopeIdx].id; }
-        function cycleScope(delta) {
-            scopeIdx = (scopeIdx + delta + SCOPES.length) % SCOPES.length;
-            var scope = SCOPES[scopeIdx];
-            var isDefault = scopeIdx === 0;
-            // All mode: hide the pill entirely, fold the cue into the input
-            // placeholder. Narrower scopes: materialize the pill.
-            scopeBtn.hidden = isDefault;
-            scopeLabelEl.textContent = isDefault ? '' : scope.label;
-            scopeBtn.classList.toggle('accent', !isDefault);
-            inputEl.placeholder = scope.placeholder;
-            render();
-        }
-        scopeBtn.addEventListener('click', function () { cycleScope(1); inputEl.focus(); });
-
-        // Click outside (on the backdrop, not the modal) closes.
-        bg.addEventListener('mousedown', function (ev) {
-            if (ev.target === bg) { ev.preventDefault(); closeFinder(); }
-        });
-        closeBtn.addEventListener('click', function () { closeFinder(); });
-
-        var finderSelection = saveSelection();
-        var allCandidates = buildFinderCandidates(finderSelection);
-        var state = { visible: [], idx: 0 };
-
-        // Expose the active element-lookup fn to scroll-into-view after render.
-        function scrollActiveIntoView() {
-            var active = listEl.querySelector('.pdf2html-finder-row.active');
-            if (active && active.scrollIntoView) {
-                active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-            }
-        }
-
-        function render() {
-            // Bail if the modal was ripped out from under us (poll callback,
-            // async library fetch, etc. — the listEl would be orphaned).
-            if (!bg.isConnected) return;
-            var q = inputEl.value;
-            // Cap bareNum to an int that can't roll into Infinity/NaN — the
-            // gotoPage() lookup silently fails for missing pages, but we
-            // still want a sane upper bound on the synthetic "Go to" row.
-            var bareNumMatch = /^\s*(\d{1,7})\s*$/.exec(q);
-            var bareNum = bareNumMatch ? parseInt(bareNumMatch[1], 10) : 0;
-
-            var scope = currentScope();
-            var scoped = scope === 'all'
-                ? allCandidates
-                : allCandidates.filter(function (c) { return c.scope === scope; });
-            var filtered = finderFilter(scoped, q);
-
-            // Prepend a synthetic "Go to page N" entry when the user types a
-            // bare number — mirrors the : palette's `:42` shortcut.
-            // Only in scopes that include in-document navigation.
-            if (bareNum > 0 && (scope === 'all' || scope === 'outline')) {
-                filtered.unshift({
-                    cand: {
-                        group: 'Go to',
-                        icon: { kind: 'svg', svg: finderSvg('doc') },
-                        label: 'Page ' + bareNum,
-                        meta: 'jump',
-                        run: (function (n) { return function () { navigation.gotoPage(n, true); }; })(bareNum),
-                    },
-                    hit: null,
-                });
-            }
-
-            state.visible = filtered;
-            if (state.idx >= filtered.length) state.idx = 0;
-            if (state.idx < 0) state.idx = 0;
-
-            listEl.innerHTML = '';
-            if (!filtered.length) {
-                var empty = document.createElement('div');
-                empty.className = 'pdf2html-finder-empty';
-                empty.textContent = q ? 'No matches for "' + q + '"' : 'Nothing here yet.';
-                listEl.appendChild(empty);
-                countEl.textContent = '0 results';
-                return;
-            }
-
-            var lastGroup = null;
-            // Group counts for the group-label tail count chip.
-            var counts = {};
-            for (var gi = 0; gi < filtered.length; gi++) {
-                var g = filtered[gi].cand.group;
-                counts[g] = (counts[g] || 0) + 1;
-            }
-
-            for (var i = 0; i < filtered.length; i++) {
-                var entry = filtered[i];
-                var cand = entry.cand;
-                if (cand.group !== lastGroup) {
-                    lastGroup = cand.group;
-                    var gLabel = document.createElement('div');
-                    gLabel.className = 'pdf2html-finder-group';
-                    gLabel.innerHTML =
-                        escapeHtml(cand.group)
-                      + '<span class="count">' + counts[cand.group] + '</span>';
-                    listEl.appendChild(gLabel);
-                }
-                var row = document.createElement('div');
-                row.className = 'pdf2html-finder-row' + (i === state.idx ? ' active' : '');
-                row.dataset.idx = String(i);
-                row.innerHTML =
-                    renderFinderIcon(cand.icon)
-                  + '<span class="label">' + renderFinderLabel(cand, entry.hit) + '</span>'
-                  + '<span class="meta">' + escapeHtml(cand.meta || '') + '</span>';
-                row.addEventListener('mousemove', (function (idx) {
-                    return function () {
-                        if (state.idx !== idx) {
-                            state.idx = idx;
-                            // Light-touch re-render: just toggle the `active`
-                            // class instead of redrawing the whole list on
-                            // every mouse pixel.
-                            var rows = listEl.querySelectorAll('.pdf2html-finder-row');
-                            for (var r = 0; r < rows.length; r++) {
-                                rows[r].classList.toggle('active', Number(rows[r].dataset.idx) === idx);
-                            }
-                        }
-                    };
-                })(i));
-                row.addEventListener('mousedown', (function (runFn) {
-                    return function (ev) {
-                        ev.preventDefault();
-                        closeFinder();
-                        if (typeof runFn === 'function') {
-                            setTimeout(function () {
-                                try { runFn(); }
-                                catch (err) { console.warn('[finder] run failed:', err); }
-                            }, 0);
-                        }
-                    };
-                })(cand.run));
-                listEl.appendChild(row);
-            }
-
-            countEl.textContent = filtered.length + (filtered.length === 1 ? ' result' : ' results');
-            scrollActiveIntoView();
-        }
-
-        function move(delta) {
-            if (!state.visible.length) return;
-            state.idx = (state.idx + delta + state.visible.length) % state.visible.length;
-            var rows = listEl.querySelectorAll('.pdf2html-finder-row');
-            for (var r = 0; r < rows.length; r++) {
-                rows[r].classList.toggle('active', Number(rows[r].dataset.idx) === state.idx);
-            }
-            scrollActiveIntoView();
-        }
-
-        inputEl.addEventListener('input', render);
-        inputEl.addEventListener('keydown', function (ev) {
-            if (ev.key === 'Escape') {
-                ev.stopPropagation(); ev.preventDefault();
-                closeFinder();
-            } else if (ev.key === 'Tab') {
-                ev.preventDefault();
-                state.idx = 0;
-                cycleScope(ev.shiftKey ? -1 : 1);
-            } else if (ev.key === 'Enter') {
-                ev.preventDefault();
-                var pick = state.visible[state.idx];
-                if (pick && pick.cand && typeof pick.cand.run === 'function') {
-                    closeFinder();
-                    setTimeout(function () {
-                        try { pick.cand.run(); }
-                        catch (err) { console.warn('[finder] run failed:', err); }
-                    }, 0);
-                }
-            } else if (ev.key === 'ArrowDown' || (ev.ctrlKey && !ev.metaKey && !ev.altKey && (ev.key === 'j' || ev.key === 'J'))) {
-                ev.preventDefault(); move(1);
-            } else if (ev.key === 'ArrowUp' || (ev.ctrlKey && !ev.metaKey && !ev.altKey && (ev.key === 'k' || ev.key === 'K'))) {
-                ev.preventDefault(); move(-1);
-            }
-        });
-
-        // Library might not have loaded yet; re-render once it lands so the
-        // "Other documents" group fills in. Bail early if the user closed the
-        // finder while we were waiting — no point mutating an orphaned DOM.
-        if (!library.all().length) {
-            var retries = 0;
-            var poll = setInterval(function () {
-                if (!bg.isConnected) { clearInterval(poll); return; }
-                if (library.all().length || retries++ > 20) {
-                    clearInterval(poll);
-                    if (!bg.isConnected) return;
-                    allCandidates = buildFinderCandidates(finderSelection);
-                    render();
-                }
-            }, 150);
-        }
-
-        inputEl.focus();
-        closeWhenFocusLeaves(inputEl, bg);
-        render();
-    }
-
-    // ⌘K — open the finder dropdown. Bypasses isInputTarget so it works
-    // from any focus state (Raycast-style quick-open expectation).
+    var QUICK_KEYS = { k: 'all', o: 'sections', p: 'documents' };
     function registerQuickOpenHandler() {
         document.addEventListener('keydown', function (e) {
-            if (!e.metaKey || e.ctrlKey || e.altKey) return;
-            if (e.key !== 'k' && e.key !== 'K') return;
+            if (!e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+            var key = String(e.key || '').toLowerCase();
+            if (!/^[a-z]$/.test(key) && /^Key[KOP]$/.test(e.code || '')) key = e.code.slice(3).toLowerCase();
+            var mode = QUICK_KEYS[key];
+            if (!mode) return;
             e.preventDefault(); e.stopPropagation();
-            // If the : palette happens to be open, close it first — ⌘K is a
-            // distinct UI.
-            var existing = document.getElementById('pdf2html-palette');
-            if (existing) removeOverlay(existing);
-            openFinder();
+            var palette = document.getElementById('pdf2html-palette');
+            if (palette) removeOverlay(palette);
+            quickOpen.toggle(mode);
         }, true);
     }
 
@@ -1120,8 +753,7 @@ export function createCommandSurface(core) {
     }
 
     function closeFinderOrPalette() {
-        var finder = document.getElementById('pdf2html-finder');
-        if (finder) return removeOverlay(finder);
+        if (quickOpen.close()) return true;
         var palette = document.getElementById('pdf2html-palette');
         if (palette) return removeOverlay(palette);
         return false;
@@ -1152,6 +784,6 @@ export function createCommandSurface(core) {
         closeHelp: closeHelp,
         toggleCheatsheet: toggleCheatsheet,
         openPalette: openPalette,
-        openFinder: openFinder,
+        quickOpen: quickOpen.toggle,
     };
 }

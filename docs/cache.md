@@ -236,8 +236,18 @@ disabled PDF back into the custom viewer.
 path, so a broken DB can never break serving. Aggregates computed at
 query time; personal-use volume keeps the events table tiny for years.
 
-Powers `/stats`, `/stats/recent`, and the visits-sorted library picker
-behind `⌘K` / `:open`.
+Powers `/stats`, `/stats/recent`, and the frecency order of the library
+(home page, quick open's `⌘P` / `⌘K`, `:open`). A session is one 15-minute
+bucket with a visit; frecency is the sum over sessions of
+`0.5 ** (age / 7 days)`, so a document read every few days stays above one
+opened once today, and old habits fade behind recent use.
+
+`GET /library?view=finder&current=<hash>` is the overlay's compact form: per
+document the display title, author, source host, file name, pages, saved page
+(from `state.db`), last read (the later of the last open and the last saved
+page change) and score, with `previous: true` on the most recently read
+document other than `current`. It reads `mappings.tsv` once per listing; 500
+entries list in well under a second.
 
 ## Per-document state
 

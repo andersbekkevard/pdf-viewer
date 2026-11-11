@@ -54,9 +54,9 @@ sys.dont_write_bytecode = True  # do not leave __pycache__ in bench/corpus/probe
 sys.path.insert(0, str(REPO / "bench" / "corpus" / "probe"))
 import probe as oldprobe  # noqa: E402  (thresholds and Playwright lookup shared with the old probe)
 
-BENCH_VERSION = "1"
-SCRATCH = pathlib.Path("/tmp/pdfv-bench")
-CACHE = pathlib.Path.home() / ".cache" / "pdf_viewer"
+BENCH_VERSION = "2"
+SCRATCH = pathlib.Path(os.environ.get("PDFV_BENCH_SCRATCH", "/tmp/pdfv-bench"))
+CACHE = pathlib.Path(os.environ.get("PDF_VIEWER_CACHE_DIR", str(pathlib.Path.home() / ".cache" / "pdf_viewer")))
 
 # Visual comparison geometry, as the old probe: fit-width 1600 CSS px at DPR 2.
 FIT_WIDTH_CSS = oldprobe.FIT_WIDTH_CSS
@@ -318,7 +318,7 @@ class Bench:
         else:
             url = f"{self.args.base}/read?path={urllib.parse.quote(str(pdf), safe='')}"
             doc["open_via"] = "read"
-        spec = {"readUrl": url, "zoom": zoom, "viewport": {"width": vw, "height": vh}, "dpr": DPR,
+        spec = {"textOnly": self.args.text_only, "readUrl": url, "zoom": zoom, "viewport": {"width": vw, "height": vh}, "dpr": DPR,
                 "outDir": str(wdir / "shots"), "rasterWaitMs": self.args.raster_wait * 1000,
                 "openTimeoutMs": self.args.doc_timeout * 1000,
                 "pages": [{"page": p, "words": [w["word"] for w in text.get(p, {}).get("words", [])]}
@@ -370,7 +370,7 @@ class Bench:
             doc["classes"].append("open-failed")
         if drv.get("pfCount") is not None and n and drv["pfCount"] != n:
             doc["classes"].append("page-count-mismatch")
-        if opened and drv.get("firstRasterMs") is None:
+        if opened and not self.args.text_only and drv.get("firstRasterMs") is None:
             doc["classes"].append("raster-timeout")
         # The overlay asks every entry for /<hash>/meta.json, which reader entries
         # do not have. That one systematic 404 (and the console line Chromium logs
@@ -434,7 +434,8 @@ class Bench:
             if dp.get("error"):
                 cls.append("bench-error")
                 pg["error"] = dp["error"][:200]
-            pg.update({"raster_state": dp.get("rasterState"), "jump_ms": dp.get("jumpMs"),
+            pg.update({"order_inversions": dp.get("orderInversions"), "order_pairs": dp.get("orderPairs"),
+                       "raster_state": dp.get("rasterState"), "jump_ms": dp.get("jumpMs"),
                        "jump_landed": dp.get("jumpLanded"), "scroll_ms": dp.get("scrollMs"), "decode_wait_ms": dp.get("decodeWaitMs"),
                        "text_wait": dp.get("textWait"), "text_wait_ms": dp.get("textWaitMs"), "raster_px": dp.get("naturalWidth"),
                        "device_px": dp.get("deviceWidth")})
@@ -593,6 +594,7 @@ def main() -> int:
     ap.add_argument("--tier", action="append", help="only rows of this tier (t1 includes t0); repeatable")
     ap.add_argument("--sha", action="append", help="only rows whose sha256 starts with this")
     ap.add_argument("--limit", type=int)
+    ap.add_argument("--text-only", action="store_true", help="score copy/find/highlights without raster screenshots")
     ap.add_argument("--base", default="http://127.0.0.1:7436")
     ap.add_argument("--jobs", type=int, default=3)
     ap.add_argument("--max-pages", type=int, default=5)
@@ -659,7 +661,7 @@ def main() -> int:
                        "text_loss_ratio": TEXT_LOSS_RATIO, "copy_sim_min": COPY_SIM_MIN,
                        "copy_min_chars": COPY_MIN_CHARS, "iou_median_min": IOU_MEDIAN_MIN,
                        "raster_underres_px": RASTER_UNDERRES_PX},
-        "selection": {"tier": args.tier, "sha": args.sha, "limit": args.limit,
+        "selection": {"text_only": args.text_only, "tier": args.tier, "sha": args.sha, "limit": args.limit,
                       "include_existing": args.include_existing},
         "counts": {"locally_present": present, "selected": len(rows),
                    "skipped_existing_entries": 0 if args.include_existing else len(skipped_existing)},

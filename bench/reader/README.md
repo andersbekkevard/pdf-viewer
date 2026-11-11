@@ -224,3 +224,21 @@ class rates.
 - The old probe compared each document's own sampled pages; this bench adds
   evenly spaced pages, so document-level worst values cover more pages than
   the old ones (`visual_worst_old_pages` restricts to the same pages).
+
+### Text-only and order investigations
+
+`--text-only` skips raster readiness/screenshots and visual comparisons, while
+keeping the same sampled pages, copy/select similarity, native `window.find`
+and highlight IoU. It is not a visual or timing proof. Supply
+`PDF_VIEWER_CACHE_DIR` to match the scratch daemon and `PDFV_BENCH_SCRATCH` for
+an isolated work directory; these override the historical cache/work defaults.
+
+Each sampled page also records `order_inversions` / `order_pairs`: pairs of
+upright, non-RTL, single-segment lines with at least half their x extents in
+common and distinct y positions. An inversion has an earlier DOM line below
+a later one. This diagnoses backward movement in a horizontal lane, not full
+reading-order correctness: it cannot judge captions or transitions between
+columns. `scripts/measure-reader-order.py` checks known synthetic column order
+separately. Copy similarity remains against **PDFium stream order**; do not
+change that reference to make a geometric reordering pass. Such a reorder can
+preserve every character and still lower this order-sensitive metric.

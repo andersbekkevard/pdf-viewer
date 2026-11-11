@@ -153,6 +153,9 @@ class CacheCatalog:
         # Request threads register entries while others list them; a scan that
         # started before a write must not replace the copy that has it.
         self._manifests_lock = threading.RLock()
+        # While one thread lists the library, its many per-entry lookups share
+        # one read of mappings.tsv instead of re-reading it per lookup.
+        self._listing = threading.local()
 
     @property
     def mappings_path(self) -> pathlib.Path:
@@ -185,6 +188,9 @@ class CacheCatalog:
         """Every known entry: mappings.tsv rows (written by the conversion
         scripts) plus the entries registered on demand, which carry their
         identity in `<hash>/entry.json` instead of a row."""
+        memo = getattr(self._listing, "mappings", None)
+        if memo is not None:
+            return memo
         out = self._tsv_mappings()
         for hash_, manifest in self.manifests().items():
             if hash_ in out:
@@ -564,6 +570,13 @@ class CacheCatalog:
         return re.sub(r"\s+", " ", text.casefold()).strip()
 
     def list_entries(self, *, prefer_reader: bool = False) -> list[dict]:
+        self._listing.mappings = self.mappings()
+        try:
+            return self._list_entries(prefer_reader)
+        finally:
+            self._listing.mappings = None
+
+    def _list_entries(self, prefer_reader: bool) -> list[dict]:
         scores = self.activity.all_frecency()
         out = []
         for hash_, mapping in self.mappings().items():
@@ -591,6 +604,59 @@ class CacheCatalog:
                         "author": meta.get("author"),
                         "thumb_href": self._thumb_href(hash_, has_source)})
         out.sort(key=lambda entry: (-entry["frecency_score"], -(entry["last_seen"] or 0), entry["name"].lower()))
+        return out
+
+    # Metadata titles that name the authoring tool or file, not the work.
+    _JUNK_TITLE = re.compile(
+        r"^(untitled|title|document\d*|slide \d+|microsoft (word|powerpoint) - .*|.*\.(docx?|pptx?|pdf|tex|dvi|indd|qxd|rtf))$",
+        re.IGNORECASE)
+
+    @classmethod
+    def _source_stem(cls, source_ref: str) -> str:
+        if source_ref.startswith(("http://", "https://")):
+            path = urllib.parse.unquote(urllib.parse.urlparse(source_ref).path)
+            return pathlib.PurePosixPath(path).stem
+        return pathlib.PurePath(source_ref).stem
+
+    @classmethod
+    def display_title(cls, name: str, source_ref: str, meta_title: Optional[str]) -> str:
+        """What a reader calls the document: a name chosen with :rename (any
+        name that is not the source file's stem), else a usable metadata
+        title, else the name."""
+        renamed = bool(name) and name != cls._source_stem(source_ref or "") and not HASH_RE.fullmatch(name)
+        title = (meta_title or "").strip()
+        if not renamed and len(title) >= 3 and not cls._JUNK_TITLE.match(title) and not HASH_RE.fullmatch(title):
+            return title
+        return name
+
+    def finder_entries(self, positions: dict, current: str = "", *, prefer_reader: bool = False) -> list[dict]:
+        """The library as the overlay's quick-open rows (⌘P, ⌘K, :open).
+
+        Only what a row shows or matches on, so the response stays small:
+        title, author, source host, file name, pages, the saved page, when it
+        was last read and the frecency score, in frecency order. `last_read`
+        is the later of the last open and the last saved page change, in
+        seconds. `previous` marks the most recently read document other than
+        `current`: ⌘P then Enter goes back to it.
+        """
+        out = []
+        for entry in self.list_entries(prefer_reader=prefer_reader):
+            ref = strip_passthrough(entry["source_ref"] or "")
+            parsed = urllib.parse.urlparse(ref)
+            web = parsed.scheme in {"http", "https"}
+            path = urllib.parse.unquote(parsed.path) if web else ref
+            saved = positions.get(entry["hash"])
+            last_read = max(entry["last_seen"] or 0, saved[1] // 1000 if saved else 0) or None
+            out.append({"hash": entry["hash"], "href": entry["href"], "name": entry["name"],
+                        "title": self.display_title(entry["name"], ref, entry["title"]),
+                        "author": entry["author"], "host": parsed.netloc.lower() if web else None,
+                        "file": pathlib.PurePosixPath(path).name or None, "source_ref": entry["source_ref"],
+                        "pages": entry["pages"], "page": saved[0] if saved else None,
+                        "last_read": last_read, "rank": entry["rank"], "count": entry["count"],
+                        "score": entry["frecency_score"], "previous": False})
+        others = [row for row in out if row["hash"] != current and row["last_read"]]
+        if others:
+            max(others, key=lambda row: row["last_read"])["previous"] = True
         return out
 
     def _entry_meta(self, hash_: str) -> dict:
