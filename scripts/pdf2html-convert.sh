@@ -118,6 +118,28 @@ TAB_URL=$(osascript -e 'tell application id "com.google.Chrome" to return URL of
 [[ -n "$TAB_URL" ]] || fail "No Chrome window with an active tab"
 
 # -----------------------------------------------------------------------------
+# Reader engine: nothing to convert. Send the tab to the daemon's open route
+# (the same one the extension's redirect uses); the reader builds the pages on
+# demand, and a sign-in-gated source is fetched through the extension.
+# PDF_VIEWER_FORCE_CONVERT=1 keeps the pdf2htmlEX conversion below.
+# -----------------------------------------------------------------------------
+if [[ -z "${PDF_VIEWER_FORCE_CONVERT:-}" ]] \
+    && curl -sf -m 2 "http://localhost:${PORT}/healthz" 2>/dev/null | grep -q '"engine":"reader"'; then
+    CLEAN_URL=$(python3 -c "import sys,re; print(re.sub(r'[?&]_pdfvw=passthrough', '', sys.argv[1]))" "$TAB_URL")
+    case "$CLEAN_URL" in
+        file://*) READER_URL="http://localhost:${PORT}/view-file-raw?${CLEAN_URL}" ;;
+        http://*|https://*) READER_URL="http://localhost:${PORT}/view-raw?${CLEAN_URL}" ;;
+        *) fail "Active tab is not a file:// or http(s):// page" ;;
+    esac
+    NAV_PAYLOAD=$(python3 -c "import json, sys; print(json.dumps({'from_url': sys.argv[1], 'to_url': sys.argv[2]}))" "$TAB_URL" "$READER_URL")
+    log "reader open: tab sent to the daemon's open route"
+    curl -sf -m 5 -X POST -H 'Content-Type: application/json' -d "$NAV_PAYLOAD" \
+        "http://localhost:${PORT}/signal/navigate" >/dev/null \
+        || fail "Could not reach the pdf_viewer daemon"
+    exit 0
+fi
+
+# -----------------------------------------------------------------------------
 # Scheme dispatch. file:// and http(s):// both end up with:
 #   HASH, OUT_DIR, PDF_NAME, OUT_NAME, PDF_DIR (mount source), SOURCE_REF (log)
 # -----------------------------------------------------------------------------

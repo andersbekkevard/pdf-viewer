@@ -142,7 +142,7 @@ function copyExtension(dir) {
     recursive: true,
     filter: (src) => !src.includes(`${path.sep}_metadata`),
   });
-  for (const [file, count] of [['background.js', 2], ['rules.json', 1]]) {
+  for (const [file, count] of [['background.js', 2], ['rules.json', 2]]) {
     const target = path.join(dir, file);
     const text = fs.readFileSync(target, 'utf8');
     const patched = text.replace(/(127\.0\.0\.1|localhost):7435/g, `$1:${DAEMON_PORT}`);
@@ -187,7 +187,15 @@ function startOrigin(log) {
     }
     log.push({ t: Date.now(), path: url.pathname, signedIn, mode: req.headers['sec-fetch-mode'] || '' });
     setTimeout(() => {
-      if (url.pathname === '/open/doc.pdf') {
+      if (url.pathname === '/open/paper/2401.00001v2') {
+        // A PDF whose URL does not say so (arXiv-style): only the type does.
+        res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': PDF.length });
+        sendPaced(res, PDF);
+      } else if (url.pathname === '/open/download/7') {
+        res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': PDF.length,
+          'Content-Disposition': 'attachment; filename="export.pdf"' });
+        sendPaced(res, PDF);
+      } else if (url.pathname === '/open/doc.pdf') {
         res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': PDF.length });
         sendPaced(res, PDF);
       } else if (url.pathname === '/gated/html.pdf' && signedIn) {
@@ -409,6 +417,21 @@ async function main() {
       check('open PDF is downloaded by the daemon, not through the browser session',
         originHits(originLog, '/open/doc.pdf', started).every((r) => r.mode === ''),
         describe(originLog, started));
+
+      commits = trackCommits(page);
+      await gotoLoose(page, `${ORIGIN}/open/paper/2401.00001v2`);
+      await waitFor(() => isReader(page.url()), 10000);
+      check('a PDF with no .pdf in its URL (content type only) lands in the reader',
+        isReader(page.url()) && await readerReady(page),
+        `url ${page.url()}; commits ${JSON.stringify(commits)}`);
+      commits = trackCommits(page);
+      // Playwright rejects the navigation when it turns into a download.
+      started = Date.now();
+      await page.goto(`${ORIGIN}/open/download/7`, { timeout: 8000 }).catch(() => {});
+      await sleep(1500);
+      check('a PDF sent as an attachment download is left alone',
+        originHits(originLog, '/open/download/7', started).length === 1 && commits.length === 0,
+        `url ${page.url()}; commits ${JSON.stringify(commits)}`);
 
       await gotoLoose(page, `${ORIGIN}/login`);
 
