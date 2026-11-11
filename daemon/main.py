@@ -59,6 +59,7 @@ from pydantic import BaseModel
 
 import pdfium_doc
 import sources
+import opens
 import state
 import visits
 from reader import Reader
@@ -99,6 +100,8 @@ app = FastAPI(title="pdf_viewer", version="0.1.0", lifespan=_lifespan)
 # Per-document position, marks and zoom (daemon/state.py). Included before
 # the static mounts at the end of this file, which catch every other path.
 app.include_router(state_router)
+app.add_middleware(opens.OpenMiddleware, catalog=catalog)
+opens.configure_logging()
 
 
 def _prefer_reader() -> bool:
@@ -462,6 +465,7 @@ def _store_relayed_source(hash_: str, source_ref: str, body: bytes, disposition:
     catalog.register(hash_, source_ref, pathlib.PurePath(name).stem)
 
 
+@opens.relay
 async def _relay_source(hash_: str, tab_url: str, source_ref: str, base_url: str) -> bool:
     loop = asyncio.get_running_loop()
     waits = list(_RELAY_ANSWER_WAIT_SEC)
@@ -740,6 +744,7 @@ def _view_path(path: str, background: BackgroundTasks, *, light: bool, reader_fi
         if not previous or not catalog.is_disabled(previous):
             return _open_local_in_reader(p)
     resolved = catalog.resolve_source(p, prefer_light=light)
+    opens.resolved(resolved)
     if resolved.representation is not None:
         if resolved.disabled:
             return FileResponse(
@@ -768,11 +773,13 @@ def _view_url(url: str, background: BackgroundTasks, *, light: bool, reader_firs
         resolved = catalog.resolve_source(url, prefer_light=light)
     except InvalidCatalogInput as error:
         raise HTTPException(400, str(error)) from error
+    opens.resolved(resolved)
     if reader_first and not resolved.disabled:
         if catalog.source_pdf(resolved.hash) is None:
             try:
                 name = sources.download(url, CACHE_DIR / resolved.hash / "_source")
             except sources.SourceError as error:
+                opens.hint(error)
                 # No bytes (sign-in page, network): the browser's own viewer
                 # opens the original URL, and the relay fetches it from that
                 # tab's session to swap the tab to the reader.
@@ -1120,12 +1127,30 @@ def library():
 @app.get("/stats")
 def stats():
     s = visits.summary()
+    s["opens"] = opens.summary()
     mappings = catalog.mappings()
     for row in s["top"]:
         mapping = mappings.get(row["hash"])
         row["name"] = mapping.name if mapping else row["hash"]
         row["source_ref"] = mapping.source_ref if mapping else None
     return s
+
+
+@app.post("/entry/{hash_}/timing")
+async def entry_timing(hash_: str, request: Request):
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > 4096:
+            raise HTTPException(413, "timing too large")
+    try:
+        import json
+        await asyncio.to_thread(opens.timing, hash_, json.loads(body))
+    except (ValueError, TypeError):
+        raise HTTPException(400, "invalid timing")
+    except (OSError, opens.sqlite3.Error):
+        pass  # Observability must never interfere with reading.
+    return Response(status_code=204)
 
 
 @app.get("/stats/recent")

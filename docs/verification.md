@@ -261,3 +261,13 @@ a term on a distant page before and after reload. Measure a fresh browser's
 whole process set together with attributable serving memory; a renderer-only
 number is not the total-memory gate. Report cold and warm usable load through
 mounted controls, fonts, first-page raster readiness and two animation frames.
+
+## Open telemetry and private history
+
+Run `uv run --directory daemon python -m unittest tests/test_opens.py` for
+privacy fields, validated timing updates, SQLite failure isolation and redirect
+correlation. On a scratch daemon, open a fixture in headless Chromium and verify
+one reader attempt plus a timing sample via `/stats`; test a failed open too.
+The owner-cache smoke script is unsuitable for isolated worktree checks because
+it writes the production cache. See `bench/history/README.md` for the isolated
+history replay and its coverage limits.
