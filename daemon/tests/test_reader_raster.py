@@ -154,6 +154,45 @@ class JobTest(unittest.TestCase):
         self.assertFalse(paths[0].is_file(), "the least recently used raster goes first")
 
 
+class QueueTest(unittest.TestCase):
+    """Background work never takes the last free worker."""
+
+    def test_raster_starts_while_text_fills_the_queue(self):
+        started: list[str] = []
+        held: list[concurrent.futures.Future] = []
+
+        class FakePool:
+            def submit(self, fn, *args):
+                started.append(args[0])
+                future: concurrent.futures.Future = concurrent.futures.Future()
+                held.append(future)
+                return future
+
+        r = reader.Reader(pathlib.Path(tempfile.mkdtemp()), workers=3)
+        r.pool = lambda: FakePool()
+        for name in ("text1", "text2", "text3", "text4"):
+            r._submit(print, name, urgent=False)
+        wait_for(lambda: len(started) == 2)
+        self.assertEqual(started, ["text1", "text2"], "one worker stays free of background work")
+        done = r._submit(print, "raster")
+        wait_for(lambda: len(started) == 3)
+        self.assertEqual(started[-1], "raster")
+        held[-1].set_result(None)
+        done.result(timeout=5)
+        held[0].set_result(None)
+        wait_for(lambda: len(started) == 4)
+        self.assertEqual(started[-1], "text3")
+
+
+def wait_for(check, timeout=5.0):
+    import time
+    end = time.monotonic() + timeout
+    while not check():
+        if time.monotonic() > end:
+            raise AssertionError("timed out")
+        time.sleep(0.005)
+
+
 class RouteTest(unittest.IsolatedAsyncioTestCase):
     """The async raster route lets go of a render when its request goes away."""
 

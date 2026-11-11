@@ -267,6 +267,7 @@ class Reader:
         self._queue: list[tuple] = []
         self._queued = threading.Condition(threading.Lock())
         self._active = 0
+        self._background = 0
         self._sequence = 0
         self._dispatcher: threading.Thread | None = None
 
@@ -299,15 +300,27 @@ class Reader:
             self._queued.notify()
         return future
 
+    def _ready(self) -> bool:
+        """Whether the most urgent queued task may start now. Background work
+        (text ranges, OCR preparation) never takes the last free worker, so a
+        page raster asked for while a book's text is being extracted starts at
+        once instead of waiting for a text task to finish."""
+        if not self._queue or self._active >= self.workers:
+            return False
+        background = self._queue[0][0] >= 1
+        return not background or self.workers < 2 or self._background < self.workers - 1
+
     def _dispatch(self) -> None:
         while True:
             with self._queued:
-                while not (self._queue and self._active < self.workers):
+                while not self._ready():
                     self._queued.wait()
-                _, _, fn, args, future = heapq.heappop(self._queue)
+                priority, _, fn, args, future = heapq.heappop(self._queue)
+                background = priority >= 1
                 self._active += 1
+                self._background += background
             if not future.set_running_or_notify_cancel():
-                self._task_done()
+                self._task_done(background)
                 continue
             try:
                 pool = self.pool()
@@ -319,17 +332,19 @@ class Reader:
                     inner = pool.submit(fn, *args)
             except BaseException as error:  # noqa: BLE001 - handed to the caller
                 future.set_exception(error)
-                self._task_done()
+                self._task_done(background)
                 continue
-            inner.add_done_callback(functools.partial(self._finished, pool, future))
+            inner.add_done_callback(functools.partial(self._finished, pool, future, background))
 
-    def _task_done(self) -> None:
+    def _task_done(self, background: bool = False) -> None:
         with self._queued:
             self._active -= 1
+            self._background -= background
             self._queued.notify()
 
-    def _finished(self, pool, future: concurrent.futures.Future, inner: concurrent.futures.Future) -> None:
-        self._task_done()
+    def _finished(self, pool, future: concurrent.futures.Future, background: bool,
+                  inner: concurrent.futures.Future) -> None:
+        self._task_done(background)
         error = inner.exception()
         if error is None:
             future.set_result(inner.result())
