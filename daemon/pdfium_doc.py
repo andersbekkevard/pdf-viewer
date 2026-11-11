@@ -36,7 +36,7 @@ SEGMENT_GAP_EM = 1.0
 LINE_DRIFT_EM = 0.7
 GEOMETRIC_TEXT_ORDER = os.environ.get("PDF_VIEWER_GEOMETRIC_TEXT_ORDER") == "1"
 # Experimental and default extraction must never share a text/shell cache.
-TEXT_LAYER_VERSION = 5 + int(GEOMETRIC_TEXT_ORDER)
+TEXT_LAYER_VERSION = 7 if GEOMETRIC_TEXT_ORDER else 5
 
 # The text layer is laid out in a fallback font and fitted to each segment's
 # width. The closer the fallback's proportions are to the document's font, the
@@ -355,6 +355,7 @@ def reading_order(lines: list[dict]) -> list[dict]:
     """
     if any(line.get("rtl") for line in lines):
         return lines
+    stream_index = {id(line): i for i, line in enumerate(lines)}
     body = [line for line in lines if not line.get("dir")]
     marginal = [line for line in lines if line.get("dir")]
 
@@ -363,7 +364,7 @@ def reading_order(lines: list[dict]) -> list[dict]:
 
     def order(group, depth=0):
         if depth >= 32 or len(group) < 2:
-            return group
+            return sorted(group, key=lambda line: stream_index[id(line)])
         em = statistics.median(l["h"] for l in group)
         by_y = sorted(group, key=lambda l: l["y"])
         # Separate full-width headings/captions/footnotes before searching
@@ -384,7 +385,7 @@ def reading_order(lines: list[dict]) -> list[dict]:
             edge = max(edge, right(by_x[i]))
         # At the same y, x-only sorting would scramble tables/equations.
         if any(b["y"] < a["y"] + a["h"] * .7 for a, b in zip(by_y, by_y[1:])):
-            return group
+            return sorted(group, key=lambda line: stream_index[id(line)])
         return by_y
 
     return order(body) + marginal

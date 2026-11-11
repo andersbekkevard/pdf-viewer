@@ -41,3 +41,8 @@ class ReadingOrderTests(unittest.TestCase):
         self.assertEqual(pdfium_doc.reading_order(lines), lines)
         self.assertIn('dir="rtl"', reader._line_html(lines[0]))
         self.assertEqual(lines[0]['segs'][0]['t'], 'שלום עולם')
+
+    def test_ambiguous_column_keeps_stream_order_not_x_sort_order(self):
+        lines=[line(str(c)+':'+str(r), 50+c*250+(10 if r%2==0 else 0),
+                    50+(r//2)*40+(r%2)*5) for c in range(2) for r in range(6)]
+        self.assertEqual(pdfium_doc.reading_order(lines), lines)
