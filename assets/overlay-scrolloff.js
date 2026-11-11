@@ -75,6 +75,7 @@ export function createScrollOff(core) {
         var dragging = false;
         var lastScrollTs = 0;
         var focusWasInPage = false;
+        var previousFocus = null;
         function focusInPage(sel) {
             return !!(sel && sel.rangeCount && sel.focusNode && documentModel.pageFromNode(sel.focusNode));
         }
@@ -92,8 +93,15 @@ export function createScrollOff(core) {
         window.addEventListener('blur', endPointerSelection);
 
         document.addEventListener('selectionchange', function () {
-            var inPage = focusInPage(document.getSelection());
-            var moved = inPage && focusWasInPage;
+            var selection = document.getSelection();
+            var inPage = focusInPage(selection);
+            // Native find can re-announce its old selection after scrolling
+            // or Enter. Follow a changed focus endpoint, never the mere event.
+            // Vimium Selection.modify and deliberate overlay moves change it.
+            var changed = !previousFocus || !selection ||
+                previousFocus.node !== selection.focusNode || previousFocus.offset !== selection.focusOffset;
+            previousFocus = selection ? {node: selection.focusNode, offset: selection.focusOffset} : null;
+            var moved = changed && inPage && focusWasInPage;
             focusWasInPage = inPage;
             if (!moved || dragging || raf) return;
             if (performance.now() < suppressedUntil) return;
