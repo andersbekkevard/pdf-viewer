@@ -18,6 +18,7 @@ import ctypes
 import functools
 import io
 import math
+import os
 import statistics
 import unicodedata
 
@@ -40,11 +41,39 @@ def _open(path: str, mtime_ns: int, size: int) -> pdfium.PdfDocument:
     return pdfium.PdfDocument(path)
 
 
-def open_document(path: str) -> pdfium.PdfDocument:
-    import os
-
+def _doc_key(path: str) -> tuple[str, int, int]:
     stat = os.stat(path)
-    return _open(path, stat.st_mtime_ns, stat.st_size)
+    return path, stat.st_mtime_ns, stat.st_size
+
+
+def open_document(path: str) -> pdfium.PdfDocument:
+    return _open(*_doc_key(path))
+
+
+@functools.lru_cache(maxsize=6)
+def _affines(path: str, mtime_ns: int, size: int) -> dict[int, tuple]:
+    """Page index → page-space-to-page-px affine, per document and worker.
+
+    A link's target page must be loaded to get its transform, and loading
+    a page parses its content, so every transform is computed once."""
+    del path, mtime_ns, size
+    return {}
+
+
+def _page_affine(key: tuple[str, int, int], index: int, page: pdfium.PdfPage | None = None) -> tuple:
+    cache = _affines(*key)
+    affine = cache.get(index)
+    if affine is None:
+        if page is not None:
+            affine = _device_affine(page, *page.get_size())
+        else:
+            target = _open(*key)[index]
+            try:
+                affine = _device_affine(target, *target.get_size())
+            finally:
+                target.close()
+        cache[index] = affine
+    return affine
 
 
 def page_sizes(path: str) -> list[tuple[float, float]]:
@@ -216,27 +245,37 @@ def _build_line(chars: list[tuple]) -> list[dict]:
         return [{"x": x0, "y": y0, "h": height, "dir": 0, "rtl": True,
                  "segs": [{"t": text_all.strip(), "w": x1 - x0, "gap": 0.0, "sp": False}]}]
 
+    # The hot loop of text extraction. Comparisons stand in for max() and
+    # min() with the same results (`b if b > a else a` is max(a, b)).
     last_x0 = last_x1 = 0.0
     line_h = line_top = 0.0
+    median = statistics.median
     for ch in chars:
         if ch[1] is None:
             pending_space = current is not None or bool(segments)
             continue
-        lx0, ly0, lx1, ly1 = _to_local(direction, ch[1:5])
-        h = max(0.5, ly1 - ly0)
+        if direction == 0:
+            lx0, ly0, lx1, ly1 = ch[1], ch[2], ch[3], ch[4]
+        else:
+            lx0, ly0, lx1, ly1 = _to_local(direction, ch[1:5])
+        h = ly1 - ly0
+        if not h > 0.5:
+            h = 0.5
         if current is not None or segments:
             # The line's height and top are medians over its characters; they
             # settle after a few, so refresh them at 1, 2, 4, 8… characters.
-            if len(heights) & (len(heights) - 1) == 0:
-                line_h = statistics.median(heights)
-                line_top = statistics.median(tops)
+            count = len(heights)
+            if count & (count - 1) == 0:
+                line_h = median(heights)
+                line_top = median(tops)
             centre = (ly0 + ly1) / 2
             line_centre = line_top + line_h / 2
             gap = lx0 - last_x1
+            em = h if h > line_h else line_h
             # PDFium expands a ligature into characters that share one box,
             # so a character starting inside the previous box is no jump back.
-            behind = lx0 < last_x0 - 0.5 * max(line_h, h)
-            if abs(centre - line_centre) > LINE_DRIFT_EM * max(line_h, h) or behind:
+            behind = lx0 < last_x0 - 0.5 * em
+            if abs(centre - line_centre) > LINE_DRIFT_EM * em or behind:
                 flush_line()
             elif gap > SEGMENT_GAP_EM * line_h:
                 if current is not None:
@@ -250,8 +289,14 @@ def _build_line(chars: list[tuple]) -> list[dict]:
             current["t"] += " "
             pending_space = False
         current["t"] += ch[0]
-        current["x1"] = max(current["x1"], lx1)
-        last_x0, last_x1 = lx0, max(lx1, last_x1) if lx0 < last_x1 else lx1
+        if lx1 > current["x1"]:
+            current["x1"] = lx1
+        if lx0 < last_x1:
+            if not last_x1 > lx1:
+                last_x1 = lx1
+        else:
+            last_x1 = lx1
+        last_x0 = lx0
         heights.append(h)
         tops.append(ly0)
     flush_line()
@@ -260,57 +305,78 @@ def _build_line(chars: list[tuple]) -> list[dict]:
 
 def page_text(path: str, index: int) -> list[dict]:
     """Positioned text lines of one page (see the module docstring)."""
-    pdf = open_document(path)
-    page = pdf[index]
+    key = _doc_key(path)
+    page = _open(*key)[index]
     try:
-        width, height = page.get_size()
-        a, b, c, d, e, f = _device_affine(page, width, height)
-        textpage = page.get_textpage()
-        try:
-            count = raw.FPDFText_CountChars(textpage)
-            rect = raw.FS_RECTF()
-            lines: list[dict] = []
-            chars: list[tuple] = []
-            for i in range(count):
-                code = raw.FPDFText_GetUnicode(textpage, i)
-                if code in (0x0A, 0x0D):
-                    if chars:
-                        lines.extend(_build_line(chars))
-                        chars = []
-                    continue
-                if code == 0xFFFE or code == 0x02:
-                    code = 0x2D  # PDFium's marker for a line-end hyphen
-                if 0xD800 <= code <= 0xDBFF and i + 1 < count:
-                    # PDFium hands out UTF-16 units: a character outside the
-                    # BMP (mathematical italics, script letters) is a
-                    # surrogate pair whose box is on the first unit.
-                    low = raw.FPDFText_GetUnicode(textpage, i + 1)
-                    if 0xDC00 <= low <= 0xDFFF:
-                        code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)
-                if code < 0x20 or code == 0xFFFF or 0xD800 <= code <= 0xDFFF:
-                    if code == 0x09:
-                        chars.append((" ", None))
-                    continue
-                ch = chr(code)
-                if ch.isspace():
-                    chars.append((" ", None))
-                    continue
-                if not raw.FPDFText_GetLooseCharBox(textpage, i, rect) or rect.right <= rect.left or rect.top <= rect.bottom:
-                    # No usable box: keep the character in the text flow.
-                    if chars and chars[-1][1] is not None:
-                        last = chars[-1]
-                        chars[-1] = (last[0] + ch,) + last[1:]
-                    continue
-                xs = (a * rect.left + c * rect.bottom + e, a * rect.right + c * rect.top + e)
-                ys = (b * rect.left + d * rect.bottom + f, b * rect.right + d * rect.top + f)
-                chars.append((ch, min(xs), min(ys), max(xs), max(ys)))
-            if chars:
-                lines.extend(_build_line(chars))
-            return lines
-        finally:
-            textpage.close()
+        return _page_lines(page, _page_affine(key, index, page))
     finally:
         page.close()
+
+
+def _page_lines(page: pdfium.PdfPage, affine: tuple) -> list[dict]:
+    a, b, c, d, e, f = affine
+    textpage = page.get_textpage()
+    try:
+        handle = textpage.raw
+        get_unicode = raw.FPDFText_GetUnicode
+        get_box = raw.FPDFText_GetLooseCharBox
+        count = raw.FPDFText_CountChars(handle)
+        rect = raw.FS_RECTF()
+        lines: list[dict] = []
+        chars: list[tuple] = []
+        for i in range(count):
+            code = get_unicode(handle, i)
+            if code == 0x0A or code == 0x0D:
+                if chars:
+                    lines.extend(_build_line(chars))
+                    chars = []
+                continue
+            if code == 0xFFFE or code == 0x02:
+                code = 0x2D  # PDFium's marker for a line-end hyphen
+            if 0xD800 <= code <= 0xDBFF and i + 1 < count:
+                # PDFium hands out UTF-16 units: a character outside the
+                # BMP (mathematical italics, script letters) is a
+                # surrogate pair whose box is on the first unit.
+                low = get_unicode(handle, i + 1)
+                if 0xDC00 <= low <= 0xDFFF:
+                    code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)
+            if code < 0x20 or code == 0xFFFF or 0xD800 <= code <= 0xDFFF:
+                if code == 0x09:
+                    chars.append((" ", None))
+                continue
+            ch = chr(code)
+            if ch.isspace():
+                chars.append((" ", None))
+                continue
+            if not get_box(handle, i, rect):
+                left = right = top = bottom = 0.0
+            else:
+                left, bottom, right, top = rect.left, rect.bottom, rect.right, rect.top
+            if right <= left or top <= bottom:
+                # No usable box: keep the character in the text flow.
+                if chars and chars[-1][1] is not None:
+                    last = chars[-1]
+                    chars[-1] = (last[0] + ch,) + last[1:]
+                continue
+            x0 = a * left + c * bottom + e
+            x1 = a * right + c * top + e
+            y0 = b * left + d * bottom + f
+            y1 = b * right + d * top + f
+            # min() and max() of each pair, exactly as those return them.
+            if x1 < x0:
+                x0, x1 = x1, x0
+            elif not x1 > x0:
+                x1 = x0
+            if y1 < y0:
+                y0, y1 = y1, y0
+            elif not y1 > y0:
+                y1 = y0
+            chars.append((ch, x0, y0, x1, y1))
+        if chars:
+            lines.extend(_build_line(chars))
+        return lines
+    finally:
+        textpage.close()
 
 
 def pages_text(path: str, start: int, stop: int) -> list[list[dict]]:
@@ -321,6 +387,40 @@ def pages_text(path: str, start: int, stop: int) -> list[list[dict]]:
             out.append(page_text(path, index))
         except Exception:
             out.append([])
+    return out
+
+
+def pages_layer(path: str, start: int, stop: int) -> list[tuple[list[dict], list[dict]]]:
+    """(text lines, links) of pages [start, stop), each page loaded once.
+
+    The same values as pages_text and pages_links; a part that fails
+    yields an empty list."""
+    key = _doc_key(path)
+    pdf = _open(*key)
+    out = []
+    for index in range(start, stop):
+        try:
+            page = pdf[index]
+        except Exception:
+            out.append(([], []))
+            continue
+        try:
+            try:
+                affine = _page_affine(key, index, page)
+            except Exception:
+                out.append(([], []))
+                continue
+            try:
+                lines = _page_lines(page, affine)
+            except Exception:
+                lines = []
+            try:
+                links = _page_links(pdf, key, page, affine)
+            except Exception:
+                links = []
+            out.append((lines, links))
+        finally:
+            page.close()
     return out
 
 
@@ -357,7 +457,7 @@ def _box(affine, left: float, bottom: float, right: float, top: float) -> tuple[
     return min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)
 
 
-def _dest_target(pdf: pdfium.PdfDocument, dest, affines: dict) -> dict | None:
+def _dest_target(pdf: pdfium.PdfDocument, dest, key: tuple[str, int, int]) -> dict | None:
     """A destination → {page (1-based), x, y} in the target page's px."""
     index = raw.FPDFDest_GetDestPageIndex(pdf, dest)
     if index < 0 or index >= len(pdf):
@@ -369,13 +469,7 @@ def _dest_target(pdf: pdfium.PdfDocument, dest, affines: dict) -> dict | None:
         return out
     if not (has_x.value or has_y.value):
         return out
-    if index not in affines:
-        target = pdf[index]
-        try:
-            affines[index] = _device_affine(target, *target.get_size())
-        finally:
-            target.close()
-    a, b, c, d, e, f = affines[index]
+    a, b, c, d, e, f = _page_affine(key, index)
     # A missing coordinate keeps the page edge it names: left or top.
     px = float(x.value) if has_x.value and math.isfinite(x.value) else None
     py = float(y.value) if has_y.value and math.isfinite(y.value) else None
@@ -406,54 +500,57 @@ def page_links(path: str, index: int) -> list[dict]:
     target page, None when the destination names no position) or "uri". Links with any
     other action, a disallowed scheme or no usable rectangle are skipped.
     """
-    pdf = open_document(path)
+    key = _doc_key(path)
+    pdf = _open(*key)
     page = pdf[index]
     try:
-        width, height = page.get_size()
-        affine = _device_affine(page, width, height)
-        affines: dict[int, tuple] = {index: affine}
-        out: list[dict] = []
-        pos = ctypes.c_int(0)
-        link = raw.FPDF_LINK()
-        rect = raw.FS_RECTF()
-        while raw.FPDFLink_Enumerate(page, pos, link):
-            try:
-                if not raw.FPDFLink_GetAnnotRect(link, rect):
+        return _page_links(pdf, key, page, _page_affine(key, index, page))
+    finally:
+        page.close()
+
+
+def _page_links(pdf: pdfium.PdfDocument, key: tuple[str, int, int], page: pdfium.PdfPage,
+                affine: tuple) -> list[dict]:
+    out: list[dict] = []
+    pos = ctypes.c_int(0)
+    link = raw.FPDF_LINK()
+    rect = raw.FS_RECTF()
+    while raw.FPDFLink_Enumerate(page, pos, link):
+        try:
+            if not raw.FPDFLink_GetAnnotRect(link, rect):
+                continue
+            x, y, w, h = _box(affine, rect.left, rect.bottom, rect.right, rect.top)
+            if not (w > 0.5 and h > 0.5) or not all(map(math.isfinite, (x, y, w, h))):
+                continue
+            item: dict = {"x": x, "y": y, "w": w, "h": h}
+            dest = raw.FPDFLink_GetDest(pdf, link)
+            if dest:
+                target = _dest_target(pdf, dest, key)
+                if target is None:
                     continue
-                x, y, w, h = _box(affine, rect.left, rect.bottom, rect.right, rect.top)
-                if not (w > 0.5 and h > 0.5) or not all(map(math.isfinite, (x, y, w, h))):
+                item["dest"] = target
+            else:
+                action = raw.FPDFLink_GetAction(link)
+                if not action:
                     continue
-                item: dict = {"x": x, "y": y, "w": w, "h": h}
-                dest = raw.FPDFLink_GetDest(pdf, link)
-                if dest:
-                    target = _dest_target(pdf, dest, affines)
+                kind = raw.FPDFAction_GetType(action)
+                if kind == raw.PDFACTION_GOTO:
+                    dest = raw.FPDFAction_GetDest(pdf, action)
+                    target = _dest_target(pdf, dest, key) if dest else None
                     if target is None:
                         continue
                     item["dest"] = target
+                elif kind == raw.PDFACTION_URI:
+                    uri = safe_uri(_uri(pdf, action))
+                    if uri is None:
+                        continue
+                    item["uri"] = uri
                 else:
-                    action = raw.FPDFLink_GetAction(link)
-                    if not action:
-                        continue
-                    kind = raw.FPDFAction_GetType(action)
-                    if kind == raw.PDFACTION_GOTO:
-                        dest = raw.FPDFAction_GetDest(pdf, action)
-                        target = _dest_target(pdf, dest, affines) if dest else None
-                        if target is None:
-                            continue
-                        item["dest"] = target
-                    elif kind == raw.PDFACTION_URI:
-                        uri = safe_uri(_uri(pdf, action))
-                        if uri is None:
-                            continue
-                        item["uri"] = uri
-                    else:
-                        continue
-                out.append(item)
-            except Exception:
-                continue
-        return out
-    finally:
-        page.close()
+                    continue
+            out.append(item)
+        except Exception:
+            continue
+    return out
 
 
 def pages_links(path: str, start: int, stop: int) -> list[list[dict]]:
