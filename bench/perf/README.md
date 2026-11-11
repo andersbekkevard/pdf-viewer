@@ -13,7 +13,7 @@ the owner's daemon on 7435, which `run.py` refuses):
 
 ```bash
 B=~/.cache/pdf_viewer-bench/daemon; mkdir -p $B
-cd daemon && PDF_VIEWER_ENGINE=reader PDF_VIEWER_CACHE_DIR=$B/cache \
+cd daemon && PDF_VIEWER_CACHE_DIR=$B/cache \
   PDFV_STATE_DB=$B/state.db uv run uvicorn main:app --host 127.0.0.1 --port 7442
 ```
 
@@ -297,7 +297,7 @@ reading state).
 
 ## Not measured
 
-- Comet, real Vimium, and Vimium `j`/`d` key scrolling (wheel input stands in).
+- Real Vimium, and Vimium `j`/`d` key scrolling (wheel input stands in).
 - Native Cmd-F to a far hit and selection drag latency (plan A4).
 - CPU time and energy.
 - The native viewer's memory for documents it has to download from the web

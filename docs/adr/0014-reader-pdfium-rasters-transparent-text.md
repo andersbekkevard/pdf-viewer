@@ -1,8 +1,8 @@
 # ADR 0014: Reader — PDFium rasters under a transparent text layer
 
-**Status**: Accepted. The reader is the default engine since 2026-11-11;
-pdf2htmlEX output is the rollback (`PDF_VIEWER_ENGINE=pdf2htmlex`) and still
-serves entries converted earlier. Not yet checked in Comet.
+**Status**: Accepted. The reader is the only engine since 2026-11-11
+([ADR 0015](0015-retire-pdf2htmlex.md)); the text below describes the
+decision as it was made, with pdf2htmlEX still present.
 **Date**: 2026-11-10
 
 ## Context

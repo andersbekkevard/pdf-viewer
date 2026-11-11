@@ -55,17 +55,18 @@ it's probably two decisions in one file.
 
 | # | Title | Status |
 |---|-------|--------|
-| 0001 | [pdf2htmlEX as rendering engine](0001-pdf-to-html-engine-pdf2htmlex.md) | Accepted |
+| 0001 | [pdf2htmlEX as rendering engine](0001-pdf-to-html-engine-pdf2htmlex.md) | Superseded by 0015 |
 | 0002 | [Render window and cursor pin model](0002-render-window-and-cursor-pin.md) | Accepted (§A superseded by 0009; §B superseded by 0006) |
 | 0003 | [Keyboard shortcut design under Vimium](0003-keyboard-shortcuts-vimium-coexistence.md) | Accepted |
-| 0004 | [On-demand Docker, always-on daemon](0004-on-demand-docker-and-daemon-split.md) | Accepted (Docker-compute half superseded by 0011; daemon split stands) |
+| 0004 | [On-demand Docker, always-on daemon](0004-on-demand-docker-and-daemon-split.md) | Superseded by 0015 for conversion; the always-on daemon stands |
 | 0005 | [Vimium scroll scoping via synthetic activation events](0005-vimium-scroll-scoping-via-synthetic-activation.md) | Accepted |
 | 0006 | [Scrolloff: CSS scroll-padding plus JS fallback](0006-scrolloff-css-padding-plus-js-fallback.md) | Accepted |
 | 0007 | [Native browser find via cached shadow text](0007-native-browser-find-shadow-layer.md) | Superseded by 0009 |
 | 0008 | [Proposed mode-aware extension keygate for Vimium coexistence](0008-proposed-mode-aware-extension-keygate.md) | Proposed |
 | 0009 | [Native Cmd-F via content-visibility: auto](0009-native-find-via-content-visibility.md) | Accepted |
-| 0010 | [Light HTML with external rasters and page text](0010-light-html-external-rasters-page-text.md) | Accepted |
-| 0011 | [Native arm64 pdf2htmlEX (no Docker for conversion)](0011-native-arm64-pdf2htmlex.md) | Accepted (supersedes Docker-compute half of 0004; zero-patch clause superseded by 0013) |
+| 0010 | [Light HTML with external rasters and page text](0010-light-html-external-rasters-page-text.md) | Superseded by 0015 |
+| 0011 | [Native arm64 pdf2htmlEX (no Docker for conversion)](0011-native-arm64-pdf2htmlex.md) | Superseded by 0015 |
 | 0012 | [Page zoom lives on the pages, not the scroller](0012-page-zoom-off-the-scroller.md) | Accepted |
-| 0013 | [Patch pdf2htmlEX for text-layer fidelity](0013-patched-pdf2htmlex-text-fidelity.md) | Accepted |
-| 0014 | [Reader: PDFium rasters under a transparent text layer](0014-reader-pdfium-rasters-transparent-text.md) | Accepted for the reader routes; default engine pending a Comet check |
+| 0013 | [Patch pdf2htmlEX for text-layer fidelity](0013-patched-pdf2htmlex-text-fidelity.md) | Superseded by 0015 |
+| 0014 | [Reader: PDFium rasters under a transparent text layer](0014-reader-pdfium-rasters-transparent-text.md) | Accepted; the only engine since 0015 |
+| 0015 | [Retire pdf2htmlEX; the reader is the only engine](0015-retire-pdf2htmlex.md) | Accepted |

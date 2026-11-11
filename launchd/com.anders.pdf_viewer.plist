@@ -17,9 +17,7 @@
 
         launchctl kickstart -k gui/$UID/com.anders.pdf_viewer
 
-    Logs stream to ~/.cache/pdf_viewer/daemon.log (shared with the convert
-    scripts' log directory; separate filename so conversion output stays
-    grep-able).
+    Logs stream to ~/.cache/pdf_viewer/daemon.log.
 -->
 <plist version="1.0">
 <dict>
@@ -63,11 +61,6 @@
         <string>/Users/andersbekkevard/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
         <key>HOME</key>
         <string>/Users/andersbekkevard</string>
-        <!-- Engine for every PDF the extension redirects: "reader" (PDFium
-             rasters built on demand, ADR 0014) or "pdf2htmlex" (converted
-             HTML; the rollback). -->
-        <key>PDF_VIEWER_ENGINE</key>
-        <string>reader</string>
     </dict>
 
     <key>ProcessType</key>

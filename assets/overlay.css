@@ -1,6 +1,6 @@
 /* ============================================================================
-   pdf_viewer overlay — chrome restyle on top of pdf2htmlEX's default output.
-   Served as /_assets/overlay.css from the daemon; each converted HTML links
+   pdf_viewer overlay — the chrome around the reader shell's pages.
+   Served as /_assets/overlay.css from the daemon; each reader shell links
    it via <link rel="stylesheet">.
 
    Design system: warm dark (#282828 body / #ece7dc fg), single font family
@@ -53,7 +53,7 @@
 
 
 /* ---- Canvas background + text selection ----
-   pdf2htmlEX's default is white; we want dark chrome around cream pages. */
+   Dark chrome around cream pages. */
 
 html, body, #page-container {
     background: var(--bg) !important;
@@ -186,11 +186,8 @@ body.pdf2html-search-entered ::-moz-selection { background: transparent; color: 
    `contain-intrinsic-size: auto <h>` reserves space for unrendered pages so
    the scrollbar and zoom math don't jump as pages enter/leave the viewport.
    `auto` lets the browser remember each page's last-known size and use that
-   on subsequent renders, which is correct for the mixed page sizes
-   pdf2htmlEX emits.
-
-   DO NOT refactor to inline `.style.display` on `.pc` — pdf2htmlEX's leftover
-   runtime races us. See ADR 0002 / 0009.
+   on subsequent renders, which is correct for documents with mixed page
+   sizes. See ADR 0002 / 0009.
    --------------------------------------------------------------------------- */
 
 .pf {
@@ -198,19 +195,12 @@ body.pdf2html-search-entered ::-moz-selection { background: transparent; color: 
     contain-intrinsic-size: auto 1100px;
 }
 
-/* pdf2htmlEX's runtime injects an `@media screen { .pc { display:none } }`
-   stylesheet on init and lazy-adds `.pc.opened` to reveal pages it picks
-   to render. We neutralize that runtime (killPdf2htmlExRenderLoop), so
-   `.opened` is never added to anything past the initial set; we have to
-   force `.pc` visible here or pages 3+ stay blank.
-
-   Paint cost for offscreen pages is now controlled by
-   `content-visibility: auto` on the parent `.pf` (above), not by gating
-   `.pc`. */
+/* Paint cost for offscreen pages is controlled by `content-visibility: auto`
+   on the parent `.pf` (above), never by hiding `.pc`. */
 .pf > .pc { display: block !important; }
 
-/* pdf2htmlEX paints each page as a full-page raster image behind the
-   selectable `.t` text layer. Keep that raster inert so a missed text
+/* Each page is a full-page raster image under the selectable `.t` text
+   layer. Keep that raster inert so a missed text
    selection drag does not turn into Chrome's image-drag ghost. */
 #page-container .pc > img.bi {
     -webkit-user-drag: none;
@@ -221,69 +211,11 @@ body.pdf2html-search-entered ::-moz-selection { background: transparent; color: 
     visibility: hidden;
 }
 
-/* Geometry-mode light variants keep selectable/findable positioned text, but
-   use the page raster as the visual source. pdf2htmlEX marks fallback-font
-   lines visibility:hidden; override that here so Chromium indexes them, while
-   transparent paint leaves the byte-identical raster as the visual source.
-   Original-mode light variants retain pdf2htmlEX's paint untouched. */
-html[data-pdf2html-representation="light-v1"][data-pdf2html-text-mode="geometry"]
-body #page-container .t,
-html[data-pdf2html-representation="light-v1"][data-pdf2html-text-mode="geometry"]
-body #page-container .t * {
-    color: transparent !important;
-    text-shadow: none !important;
-}
-
-/* The raster is paint only. Let hit-testing reach the positioned text model
-   underneath so mouse drag and caret placement operate on logical text. */
-body.pdf2html-light #page-container .pc > img.bi {
-    pointer-events: none !important;
-    user-select: none !important;
-}
-
 /* scroll-padding is desirable for keyboard/caret motion, but Chromium also
    applies it continuously during a pointer drag. With a centered cursor that
    turns a horizontal selection into runaway page scrolling. */
 body.pdf2html-pointer-selecting #page-container {
     scroll-padding-block: 0 !important;
-}
-
-html[data-pdf2html-representation="light-v1"][data-pdf2html-text-mode="geometry"]
-body #page-container .t,
-html[data-pdf2html-representation="light-v1"][data-pdf2html-text-mode="geometry"]
-body #page-container .t * {
-    visibility: visible !important;
-}
-
-/* Paint-safe light variants retain canonical paint everywhere except fallback
-   lines that the converter proved are hidden by their own document-local
-   ``ff*`` rule. Those marked lines are made findable/selectable, but their
-   transparent text leaves the page raster as the only visible paint source. */
-html[data-pdf2html-representation="light-v1"][data-pdf2html-text-mode="paint-safe"]
-body #page-container .t.pdf2html-paint-safe[data-pdf2html-paint-safe="hidden"],
-html[data-pdf2html-representation="light-v1"][data-pdf2html-text-mode="paint-safe"]
-body #page-container .t.pdf2html-paint-safe[data-pdf2html-paint-safe="hidden"] * {
-    color: transparent !important;
-    text-shadow: none !important;
-    visibility: visible !important;
-}
-
-/* Hidden fallback glyphs are a logical selection/search layer. Selection
-   must tint the raster, not repaint a different font over its original ink.
-   Keep the custom search-entered highlight path and visible canonical text. */
-html[data-pdf2html-representation="light-v1"][data-pdf2html-text-mode="paint-safe"]
-body:not(.pdf2html-search-entered) #page-container .t.pdf2html-paint-safe[data-pdf2html-paint-safe="hidden"]::selection,
-html[data-pdf2html-representation="light-v1"][data-pdf2html-text-mode="paint-safe"]
-body:not(.pdf2html-search-entered) #page-container .t.pdf2html-paint-safe[data-pdf2html-paint-safe="hidden"] *::selection {
-    color: transparent;
-    background: rgba(153, 193, 218, 0.35);
-}
-html[data-pdf2html-representation="light-v1"][data-pdf2html-text-mode="paint-safe"]
-body:not(.pdf2html-search-entered) #page-container .t.pdf2html-paint-safe[data-pdf2html-paint-safe="hidden"]::-moz-selection,
-html[data-pdf2html-representation="light-v1"][data-pdf2html-text-mode="paint-safe"]
-body:not(.pdf2html-search-entered) #page-container .t.pdf2html-paint-safe[data-pdf2html-paint-safe="hidden"] *::-moz-selection {
-    color: transparent;
-    background: rgba(153, 193, 218, 0.35);
 }
 
 /* Reader shells (daemon/reader.py): the raster holds every glyph and the
@@ -325,24 +257,10 @@ html[data-pdf2html-representation="raster-v1"] #page-container .pc > img.bi {
     pointer-events: none;
 }
 
-/* Legacy page-text light artifacts remain readable for rollback/testing. */
-body.pdf2html-light #page-container .pdf2html-page-text {
-    position: absolute;
-    inset: 0;
-    z-index: 1;
-    overflow: hidden;
-    white-space: pre-wrap;
-    color: transparent !important;
-    text-shadow: none !important;
-    user-select: text;
-    font: 16px/1.35 sans-serif;
-}
-
 
 /* ---- Sidebar visibility + space-taking mode ----
    Hidden by default; body.sidebar-shown reveals it. BOTH rules needed —
-   the negative beats pdf2htmlEX in the hidden state, the positive beats
-   pdf2htmlEX's own `#sidebar { display: none }` in the shown state.
+   one for the hidden state and one for the shown state.
 
    The PDF stays full-width at the container level; overlay.js computes a
    page-frame translate that consumes the natural left gutter first and only
@@ -390,12 +308,12 @@ body.sidebar-shown #pdf2html-toggle { display: none; }
 
 
 /* ============================================================================
-   Sidebar — pdf2htmlEX-provided #sidebar restyled as a fixed, left-docked
+   Sidebar — the shell's #sidebar restyled as a fixed, left-docked
    vertical stack:
      #pdf2html-sidebar-head     (doc title + author/pages; mountSidebarHeader)
      #pdf2html-sidebar-tabs     (Outline / Pages tab bar; mountSidebarChrome)
      #pdf2html-sidebar-body
-       #outline                 (pdf2htmlEX-provided TOC, moved into wrapper)
+       #outline                 (the shell's TOC, moved into wrapper)
        #pdf2html-thumbs         (2-col thumbnails grid; mountThumbnails)
      #pdf2html-sidebar-footer   (Settings + Help icon buttons)
    ============================================================================ */
@@ -474,7 +392,7 @@ body.sidebar-shown #pdf2html-toggle { display: none; }
 }
 
 /* ---- Outline (TOC) ---------------------------------------------------------
-   pdf2htmlEX renders a nested <ul><li><a> tree. Flatten visual style, inherit
+   The outline is a nested <ul><li><a> tree. Flatten visual style, inherit
    indentation from nesting. */
 
 #outline {
@@ -1623,7 +1541,7 @@ body.pdf2html-dark-pages #pdf2html-thumbs .thumb-img {
    Scoped search (/) — find-in-visible-pages bar, bottom-center, mirrors the
    palette's card chrome but with a single input row (no wildmenu). The
    highlights on actual page text use the CSS Custom Highlight API, so no
-   DOM mutation inside pdf2htmlEX's positioned .t spans.
+   DOM mutation inside the positioned .t spans.
    ============================================================================ */
 
 #pdf2html-search {

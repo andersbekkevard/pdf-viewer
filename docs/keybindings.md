@@ -85,8 +85,8 @@ leaving the field (Vimium's `Esc`) closes. The footer shows only the keys that
 apply.
 
 Moving the selection to a section, page or mark previews it: the document
-behind the panel scrolls so the target sits just below the panel (reader
-destinations land their heading there; pdf2htmlEX ones their page top). A
+behind the panel scrolls so the target sits just below the panel (a destination
+with a point lands its heading there; one without, its page top). A
 preview records no history. Closing without a commit returns to the exact
 scroll position; `Enter` returns there first and then jumps, so the jump is
 one `⌘Z` entry like any other.

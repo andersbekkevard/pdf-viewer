@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Compare a reader scorecard with the old engine's stored probe results.
+"""Summarize a reader scorecard, beside the stored results of the retired engine.
 
 Usage:
     python3 bench/reader/compare.py <reader.json> [--md OUT.md] [--corpus DIR] [--worst 15]
 
 Reads the scorecard written by bench/reader/run.py and, for the same sha256,
-<corpus>/probe/<sha256>.json written by bench/corpus/probe/probe.py (the
-pdf2htmlEX light engine). Prints a table and writes a markdown summary
+<corpus>/probe/<sha256>.json: the results the probe of the retired pdf2htmlEX
+engine stored before it was removed (ADR 0015). They are a fixed historical
+baseline; documents without one are left out of the tables. Prints a table and writes a markdown summary
 (default: next to the scorecard, <reader>.md). Stdlib only; no PDF is opened
 and no document text is read. Definitions: bench/reader/README.md.
 """

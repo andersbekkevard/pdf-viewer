@@ -11,7 +11,6 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from catalog import (  # noqa: E402
     CacheCatalog,
     InvalidCatalogInput,
-    NameConflict,
     strip_passthrough,
     url_hash,
     with_passthrough,
@@ -52,10 +51,12 @@ class CatalogTest(unittest.TestCase):
         self.temp.cleanup()
 
     def add_entry(self, hash_=HASH, name="Book", source="https://EXAMPLE.com/docs/book.pdf?revision=old"):
+        """A row as the retired conversion scripts left it, with the stored
+        source PDF the reader opens."""
         entry = self.root / hash_
-        entry.mkdir()
+        (entry / "_source").mkdir(parents=True)
+        (entry / "_source" / "source.pdf").write_bytes(b"%PDF-1.4")
         canonical = entry / f"{name}.html"
-        canonical.write_text(f"<title>{name}</title>", encoding="utf-8")
         with self.catalog.mappings_path.open("a", encoding="utf-8") as mappings:
             mappings.write(f"2026-01-01\t{source}\t{hash_}\t{canonical}\n")
         return entry, canonical
@@ -74,7 +75,7 @@ class CatalogTest(unittest.TestCase):
         self.add_entry(source=str(missing))
         resolved = self.catalog.resolve_source(missing)
         self.assertEqual(resolved.hash, HASH)
-        self.assertIsNotNone(resolved.representation)
+        self.assertEqual(self.catalog.viewer_href(HASH), f"/r/{HASH}/")
 
     def test_browser_url_resolution_content_hashes_unmapped_local_file(self):
         pdf = pathlib.Path(self.temp.name) / "new.pdf"
@@ -100,13 +101,13 @@ class CatalogTest(unittest.TestCase):
         pdf.write_bytes(b"pdf bytes")
         expected = self.catalog.resolve_source(pdf).hash
         remote = "https://example.com/a/b.pdf?sig=1&x=2"
-        for route in ("/view", "/view-light", "/view-canonical"):
+        for route in ("/view", "/read"):
             with self.subTest(route=route):
                 self.assertEqual(
                     self.catalog.hash_for_browser_url(f"http://localhost:7435{route}?path={pdf}"),
                     expected,
                 )
-        for route in ("/view-raw", "/view-light-raw", "/view-canonical-raw"):
+        for route in ("/view-raw", "/read-raw"):
             with self.subTest(route=route):
                 self.assertEqual(
                     self.catalog.hash_for_browser_url(f"http://127.0.0.1:7435{route}?{remote}"),
@@ -126,15 +127,6 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(mapping.source_ref, "/b.pdf")
         self.assertEqual(mapping.name, "Latest")
 
-    def test_light_preference_falls_back_to_canonical(self):
-        entry, canonical = self.add_entry()
-        self.assertEqual(self.catalog.locate_representation(HASH, prefer_light=True).selected, canonical)
-        light = entry / "Book.light.html"
-        light.write_text("light", encoding="utf-8")
-        representation = self.catalog.locate_representation(HASH, prefer_light=True)
-        self.assertEqual(representation.canonical, canonical)
-        self.assertEqual(representation.selected, light)
-
     def test_disabled_state_is_sorted_compatible_and_filters_invalid_hashes(self):
         self.add_entry()
         self.catalog.disabled_path.write_text(json.dumps(["not-a-hash", OTHER_HASH]), encoding="utf-8")
@@ -145,9 +137,7 @@ class CatalogTest(unittest.TestCase):
         self.assertTrue(self.catalog.extension_entries()[0]["disabled"])
 
     def test_library_lists_searches_and_drops_stale_mappings(self):
-        entry, canonical = self.add_entry(name="Linear Algebra", source="/courses/math/book.pdf")
-        light = entry / "Linear Algebra.light.html"
-        light.write_text("light", encoding="utf-8")
+        self.add_entry(name="Linear Algebra", source="/courses/math/book.pdf")
         self.catalog.mappings_path.write_text(
             self.catalog.mappings_path.read_text()
             + f"1\t/missing.pdf\t{OTHER_HASH}\t{self.root / OTHER_HASH / 'Gone.html'}\n",
@@ -157,36 +147,28 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual([entry["hash"] for entry in entries], [HASH])
         self.assertEqual(self.catalog.search_entries("MATH")[0]["name"], "Linear Algebra")
         self.assertEqual(entries[0]["frecency_score"], 4.0)
-        self.assertEqual(entries[0]["href"], f"/{HASH}/{light.name}")
-        self.assertEqual(entries[0]["canonical_href"], f"/{HASH}/{canonical.name}")
+        self.assertEqual(entries[0]["href"], f"/r/{HASH}/")
 
-    def test_rename_updates_both_representations_mapping_and_titles(self):
+    def test_rename_of_a_converted_row_is_kept_in_the_manifest(self):
         entry, _canonical = self.add_entry()
-        (entry / "Book.light.html").write_text("<title>Book</title>", encoding="utf-8")
         result = self.catalog.rename(HASH, "../New/Name.html")
-        self.assertEqual(result["new_name"], "-New-Name")
-        self.assertTrue((entry / "-New-Name.html").is_file())
-        self.assertTrue((entry / "-New-Name.light.html").is_file())
-        self.assertIn("<title>-New-Name</title>", (entry / "-New-Name.html").read_text())
+        self.assertEqual((result["old_name"], result["new_name"], result["renamed"]), ("Book", "-New-Name", True))
+        self.assertEqual(result["href"], f"/r/{HASH}/")
         self.assertEqual(self.catalog.mappings()[HASH].html_path, entry / "-New-Name.html")
+        self.assertEqual(self.catalog.entry_name(HASH), "-New-Name")
+        self.assertEqual(self.catalog.mappings()[HASH].name, "-New-Name")
+        self.assertEqual(self.catalog.list_entries()[0]["name"], "-New-Name")
         self.assertEqual(self.activity.boosted, [(HASH, 3)])
+        self.assertFalse(self.catalog.rename(HASH, "-New-Name")["renamed"])
 
-    def test_rename_href_keeps_the_light_representation(self):
-        entry, _canonical = self.add_entry()
-        (entry / "Book.light.html").write_text("<title>Book</title>", encoding="utf-8")
-        result = self.catalog.rename(HASH, "Renamed")
-        self.assertEqual(result["href"], f"/{HASH}/Renamed.light.html")
-        self.assertEqual(result["canonical_href"], f"/{HASH}/Renamed.html")
-
-    def test_rename_href_is_canonical_without_light(self):
-        self.add_entry()
-        self.assertEqual(self.catalog.rename(HASH, "Renamed")["href"], f"/{HASH}/Renamed.html")
-
-    def test_rename_refuses_existing_canonical_or_light_target(self):
-        entry, _canonical = self.add_entry()
-        (entry / "Taken.light.html").write_text("occupied", encoding="utf-8")
-        with self.assertRaises(NameConflict):
-            self.catalog.rename(HASH, "Taken")
+    def test_entry_without_a_stored_pdf_reopens_from_its_url_or_is_dropped(self):
+        for hash_, source in ((HASH, "https://example.com/a b.pdf"), (OTHER_HASH, "/gone/book.pdf")):
+            (self.root / hash_).mkdir()
+            with self.catalog.mappings_path.open("a", encoding="utf-8") as mappings:
+                mappings.write(f"1\t{source}\t{hash_}\t{self.root / hash_ / 'Book.html'}\n")
+        self.assertEqual(self.catalog.viewer_href(HASH), "/read?url=https%3A%2F%2Fexample.com%2Fa%20b.pdf")
+        self.assertIsNone(self.catalog.viewer_href(OTHER_HASH))
+        self.assertEqual([entry["hash"] for entry in self.catalog.list_entries()], [HASH])
 
     def test_delete_is_atomic_across_catalog_state_and_activity(self):
         entry, _canonical = self.add_entry(source="https://example.com/book.pdf?_pdfvw=passthrough")

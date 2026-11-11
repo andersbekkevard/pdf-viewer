@@ -1,9 +1,10 @@
 import './overlay-timing.js';
 // ============================================================================
-// pdf_viewer overlay — runtime layer on top of pdf2htmlEX's output.
+// pdf_viewer overlay — runtime layer on top of the reader shell
+// (daemon/reader.py).
 //
-// Served as /_assets/overlay.js, loaded via <script type="module"> injected
-// into each converted HTML. Module scripts defer by default, so everything
+// Served as /_assets/overlay.js, loaded via <script type="module"> in each
+// reader shell. Module scripts defer by default, so everything
 // runs after HTML parse, before DOMContentLoaded handlers registered later.
 //
 // This is the composition root: it builds the concept modules in
@@ -18,7 +19,6 @@ import { createPreferences } from './overlay-prefs.js';
 import { createDocumentState } from './overlay-state.js';
 import { createDocumentModel } from './overlay-document.js';
 import { createZoom } from './overlay-zoom.js';
-import { createPdf2htmlEx, preparePdf2htmlEx } from './overlay-pdf2htmlex.js';
 import { createNavigation } from './overlay-navigation.js';
 import { createScrollOff } from './overlay-scrolloff.js';
 import { createTextInteraction } from './overlay-text.js';
@@ -37,22 +37,16 @@ import { createPageCounter } from './overlay-pageno.js';
 import { createCommandSurface } from './overlay-commands.js';
 import { createToast } from './overlay-toast.js';
 
-preparePdf2htmlEx({ document: document, window: window });
-
 (function () {
     'use strict';
 
     document.addEventListener('DOMContentLoaded', init);
 
-    // Resolve the cache-entry hash. Prefer the inject-time <meta> tag —
-    // location.pathname lies when the page is served via /view?path=…
-    // (the daemon serves the file on /view rather than redirecting to
-    // /<hash>/<stem>.html). Fall back to pathname for older entries that
-    // predate the meta injection.
+    // The cache-entry hash: the shell's <meta> tag, else the /r/<hash>/ path.
     function entryHash() {
         var meta = document.querySelector('meta[name="pdf2html-hash"]');
         if (meta && meta.content) return meta.content;
-        var m = location.pathname.match(/^\/([a-f0-9]{6,32})\//);
+        var m = location.pathname.match(/^\/r\/([a-f0-9]{6,32})\//);
         return m ? m[1] : null;
     }
 
@@ -66,10 +60,9 @@ preparePdf2htmlEx({ document: document, window: window });
         var documentModel = createDocumentModel(base);
         var zoom = createZoom(withBase({ storage: localStorage, documentState: documentState, entryHash: entryHash,
             documentModel: documentModel }));
-        var pdf2htmlex = createPdf2htmlEx(withBase({ documentModel: documentModel, zoom: zoom }));
         var navigation = createNavigation(withBase({
             location: location, history: history, documentState: documentState, entryHash: entryHash,
-            documentModel: documentModel, followDestination: pdf2htmlex.followDestination,
+            documentModel: documentModel,
         }));
         var scrollOff = createScrollOff(withBase({ performance: performance, prefs: prefs, documentModel: documentModel }));
         var toast = createToast(base);
@@ -129,13 +122,11 @@ preparePdf2htmlEx({ document: document, window: window });
         registerJumpHistoryKeys(jump, navigation);
         applyDarkPages(prefs);
 
-        // Order matters where one mount measures what another builds: the
-        // document adaptation runs before first paint, zoom before anything
-        // measures pages, and the sidebar before focus routing hooks into it.
-        pdf2htmlex.adaptDocument();
+        // Order matters where one mount measures what another builds: zoom
+        // before anything measures pages, and the sidebar before focus
+        // routing hooks into it.
         zoom.mount();
         rememberViewport(documentModel);
-        pdf2htmlex.adaptRuntime();
         var textFit = createTextFit(withBase({ documentModel: documentModel }));
         textFit.mount();
         createLinks(withBase({ documentModel: documentModel, navigation: navigation })).mount();
@@ -181,7 +172,7 @@ preparePdf2htmlEx({ document: document, window: window });
         }, true);
     }
 
-    // Bare Tab in pdf2htmlEX content walks the browser's focus order through
+    // Bare Tab in page content walks the browser's focus order through
     // page links/anchors and can scroll to a different page. Keep Tab local to
     // overlay chrome and inputs; on the PDF surface, it is intentionally inert.
     function registerDocumentTabGuard() {
@@ -217,8 +208,7 @@ preparePdf2htmlEx({ document: document, window: window });
 
     // ⌘/Ctrl with + − 0 zooms the pages, never the browser: browser zoom
     // scales the sidebar and controls and leaves fit-width pages as they
-    // were. Taken in the capture phase for both engines, so pdf2htmlEX's own
-    // handler does not see the key a second time.
+    // were. Taken in the capture phase, before the browser's own zoom.
     function registerZoomKeys(zoom) {
         var STEP = 0.9;
         document.addEventListener('keydown', function (e) {

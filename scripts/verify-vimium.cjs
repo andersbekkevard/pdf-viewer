@@ -20,12 +20,9 @@
  *
  * Documents are generated at run time (reportlab via uv): a 14-page PDF with
  * an outline, an internal link, an external link and URL/DOI text. The reader
- * opens it through /read?path=. When the native pdf2htmlEX binary is
- * installed, a second copy is converted with scripts/lib/pipeline.sh into the
- * same scratch cache and the same checks run against its .light.html, so a
- * failure can be told apart as new in the reader or pre-existing.
+ * opens it through /read?path=.
  *
- * Usage: scripts/verify-vimium.sh [--engine reader|pdf2htmlex|both]
+ * Usage: scripts/verify-vimium.sh
  *   PDFV_CHROMIUM=<binary>  Chromium for Testing to use
  *   PDFV_VIMIUM_DIR=<dir>   unpacked Vimium to copy (default: newest version
  *                           in the Chrome Default profile)
@@ -49,12 +46,6 @@ const PAGE_LEAD = 8;
 const STEP = 60; // Vimium's default scrollStepSize
 const TOL = 1.5;
 const HARNESS_TIMEOUT_MS = 6 * 60 * 1000;
-
-const argv = process.argv.slice(2);
-const engineArg = (() => {
-  const i = argv.indexOf('--engine');
-  return i >= 0 ? argv[i + 1] : 'both';
-})();
 
 const results = [];
 let section = '';
@@ -230,34 +221,6 @@ function generatePdf(tmp, file, title) {
   return out;
 }
 
-// Converts with the shared pipeline into the scratch cache. Null + reason
-// when the native binary is missing or the conversion fails.
-function convertOld(cache, pdf) {
-  const native = path.join(os.homedir(), '.local/opt/pdf2htmlEX/bin/pdf2htmlEX');
-  if (!fs.existsSync(native)) return { reason: `native pdf2htmlEX not installed (${native})` };
-  const stem = path.basename(pdf, '.pdf');
-  const script = `
-    set -u
-    source "$1/scripts/lib/pipeline.sh"
-    ensure_asset_link
-    h=$(content_hash "$2"); o="$CACHE_DIR/$h"; mkdir -p "$o"
-    native_convert "$2" "$o" || exit 3
-    build_entry "$o" "$3.html" "$h" "$3" || exit 4
-    ensure_meta "$2" "$o" || true
-    ensure_thumbs "$2" "$o" || true
-    upsert_mapping "$2" "$h" "$3.html" || exit 5
-    printf '%s' "$h"`;
-  const r = spawnSync('bash', ['-c', script, '_', REPO, pdf, stem], {
-    encoding: 'utf8',
-    env: { ...process.env, PDF_VIEWER_CACHE_DIR: cache },
-  });
-  if (r.status !== 0) return { reason: `conversion failed (status ${r.status}); see ${path.join(cache, 'log')}` };
-  const hash = r.stdout.trim();
-  const light = path.join(cache, hash, `${stem}.light.html`);
-  const file = fs.existsSync(light) ? `${stem}.light.html` : `${stem}.html`;
-  return { hash, path: `/${hash}/${file}` };
-}
-
 async function startDaemon(tmp, port) {
   const cache = path.join(tmp, 'cache');
   fs.mkdirSync(cache, { recursive: true });
@@ -267,7 +230,6 @@ async function startDaemon(tmp, port) {
     '--host', '127.0.0.1', '--port', String(port), '--log-level', 'warning'], {
     env: {
       ...process.env,
-      PDF_VIEWER_ENGINE: 'reader',
       PDF_VIEWER_CACHE_DIR: cache,
       PDFV_STATE_DB: path.join(tmp, 'state.db'),
       PYTHONUNBUFFERED: '1',
@@ -526,7 +488,7 @@ async function runEngine(ctx, spec) {
     reader: document.documentElement.getAttribute('data-pdf2html-representation'),
     zoom: window.__vp.state().zoom,
   }));
-  note(`${spec.path}: ${meta.pages} pages, representation ${meta.reader || 'pdf2htmlEX'}, fit zoom ${fmt(meta.zoom)}`);
+  note(`${spec.path}: ${meta.pages} pages, representation ${meta.reader}, fit zoom ${fmt(meta.zoom)}`);
 
   // ---------------------------------------------------------- rule is active
   // `?` is not a Vimium pass key by default; with the rule active it reaches
@@ -625,15 +587,7 @@ async function runEngine(ctx, spec) {
         ? `; Vimium's effective pass keys "${vimiumPassKeyString(ctx.passKeys)}" contain "f" — the rule passes f to the page`
         : ''}`);
     if (markers.length) {
-      // pdf2htmlEX link boxes are not hit-testable, so Vimium never hints
-      // them. That is a known limitation of the old engine, not a regression.
-      const reportLinkHint = (name, ok, detail) => {
-        if (spec.label === 'pdf2htmlEX') {
-          note(`${name}: known limitation — pdf2htmlEX's link elements are not hit-testable. ${detail}`);
-        } else {
-          check(name, ok, detail);
-        }
-      };
+      const reportLinkHint = check;
       reportLinkHint('3 the internal PDF link gets a hint', !!view.internal,
         `${view.internal ? `hint "${view.internal.hint}"` : 'no marker'}; visible ${view.internalVisible}, hit-test ${view.internalHit}`);
       reportLinkHint('3 the external PDF link gets a hint', !!view.external,
@@ -1146,7 +1100,7 @@ async function main() {
     });
 
     const engines = [];
-    if (engineArg === 'reader' || engineArg === 'both') {
+    {
       const resp = await fetch(`${daemonUrl}/read?path=${encodeURIComponent(readerPdf)}`, { redirect: 'manual' });
       const loc = resp.headers.get('location') || '';
       const m = /\/r\/([a-f0-9]{16})\//.exec(loc);
@@ -1159,23 +1113,6 @@ async function main() {
         externalLink: '#pf1 a.l[href^="https://example.com"]',
       });
     }
-    if (engineArg === 'pdf2htmlex' || engineArg === 'both') {
-      const oldPdf = generatePdf(tmp, 'harness-old.pdf', 'Vimium harness document (pdf2htmlEX)');
-      const old = convertOld(daemon.cache, oldPdf);
-      if (old.reason) {
-        section = 'pdf2htmlEX';
-        skip('pdf2htmlEX engine', old.reason);
-      } else {
-        engines.push({
-          label: 'pdf2htmlEX',
-          path: old.path,
-          hash: old.hash,
-          internalLink: '#pf1 a.l[href="#pf9"]',
-          externalLink: '#pf1 a.l[href^="https://example.com"]',
-        });
-      }
-    }
-
     const profile = path.join(tmp, 'profile');
     const context = await chromium.launchPersistentContext(profile, {
       executablePath,

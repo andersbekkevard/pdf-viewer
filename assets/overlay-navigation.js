@@ -7,7 +7,7 @@
 //
 // Two jump kinds, so every entry point lands the same way:
 //   - page jumps put the page top PAGE_LEAD px below the viewport top;
-//   - chapter jumps go to the outline entry's pdf2htmlEX destination (its
+//   - chapter jumps go to the outline entry's point on its page (its
 //     heading at the viewport top), falling back to a page jump.
 export function createNavigation(core) {
     var document = core.document;
@@ -17,7 +17,6 @@ export function createNavigation(core) {
     var documentState = core.documentState;
     var entryHash = core.entryHash;
     var documentModel = core.documentModel;
-    var followDestination = core.followDestination;
     var requestAnimationFrame = core.requestAnimationFrame;
 
     // A sliver of the inter-page gap stays visible: a clear "top of a page"
@@ -139,7 +138,7 @@ export function createNavigation(core) {
         landPage(Math.min(total, Math.max(1, currentPage + delta)), false);
     }
     // A reader outline entry names a point on its page; land the heading at
-    // the viewport top, matching pdf2htmlEX XYZ destinations.
+    // the viewport top, as a PDF XYZ destination does.
     function gotoPoint(entry) {
         var target = entry.point && documentModel.page(entry.page);
         return !!target && documentModel.scrollToPagePoint(target, entry.point.y, 0);
@@ -154,7 +153,7 @@ export function createNavigation(core) {
         if (!entry) return;
         remember();
         pickedEntry = entry;
-        if (!followDestination(entry.link) && !gotoPoint(entry)) landPage(entry.page, false);
+        if (!gotoPoint(entry)) landPage(entry.page, false);
         updateChapter();
     }
     function gotoChapter(needle) {
@@ -303,13 +302,13 @@ export function createNavigation(core) {
     //
     // The URL hash and the saved position must not fight each other:
     //   - A `#pfXX` deep link (outline/bookmark) wins on load, but native
-    //     anchoring is unreliable here — pdf2htmlEX pages + content-visibility
+    //     anchoring is unreliable here — pages under content-visibility
     //     land at the top before late layout, so we actively scroll to the
     //     target ourselves.
     //   - Once the reader scrolls away from that target the writer strips the
     //     now-stale `#pfXX`, so the next reload takes the saved-position path
     //     instead of re-anchoring to a page they already left.
-    //   - Any other hash (`#foo`, a pdf2htmlEX view hash) is treated as no
+    //   - Any other hash (`#foo`) is treated as no
     //     hash: strip it (else the browser's own anchor scroll fights the
     //     restore) and resume normally.
     // Saved page 1 is treated as "nothing to resume."

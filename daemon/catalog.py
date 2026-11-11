@@ -1,14 +1,12 @@
-"""Cache catalog: the filesystem-backed interface to converted PDFs.
+"""Cache catalog: the filesystem-backed interface to the library of PDFs.
 
-The catalog owns cache identity, mappings, representations, disabled state,
-native-source discovery, library projection, and safe mutations.  It never
-converts PDFs; producers remain the scripts described by ADR 0004.
+The catalog owns cache identity, mappings, disabled state, native-source
+discovery, library projection, and safe mutations.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
-import html as html_lib
 import json
 import os
 import pathlib
@@ -21,7 +19,6 @@ import urllib.parse
 from typing import Optional, Protocol
 
 
-LIGHT_HTML_SUFFIX = ".light.html"
 ENTRY_MANIFEST = "entry.json"
 PASSTHROUGH_MARKER = "_pdfvw=passthrough"
 HASH_RE = re.compile(r"^[a-f0-9]{6,32}$")
@@ -37,10 +34,6 @@ class InvalidCatalogInput(CatalogError):
 
 
 class EntryNotFound(CatalogError):
-    pass
-
-
-class NameConflict(CatalogError):
     pass
 
 
@@ -70,18 +63,9 @@ class Mapping:
 
 
 @dataclass(frozen=True)
-class Representation:
-    hash: str
-    canonical: pathlib.Path
-    selected: pathlib.Path
-    light: Optional[pathlib.Path]
-
-
-@dataclass(frozen=True)
 class ResolvedSource:
     hash: str
     source_ref: str
-    representation: Optional[Representation]
     disabled: bool
 
 
@@ -140,8 +124,7 @@ def _snapshot_file(source: pathlib.Path, dest: pathlib.Path) -> None:
 class CacheCatalog:
     """Deep module over one cache root.
 
-    Callers provide only source identities, entry hashes, and representation
-    preference. Filesystem layout and cross-file mutation rules stay here.
+    Callers provide only source identities and entry hashes. Filesystem layout and cross-file mutation rules stay here.
     """
 
     def __init__(self, root: pathlib.Path, activity: Optional[Activity] = None):
@@ -185,9 +168,11 @@ class CacheCatalog:
         return out
 
     def mappings(self) -> dict[str, Mapping]:
-        """Every known entry: mappings.tsv rows (written by the conversion
-        scripts) plus the entries registered on demand, which carry their
-        identity in `<hash>/entry.json` instead of a row."""
+        """Every known entry: the entries registered on demand, which carry
+        their identity in `<hash>/entry.json`, plus mappings.tsv rows, which
+        the retired conversion scripts wrote. A row wins over a manifest for
+        the same hash: its name is the stem of the HTML path it records,
+        which is where :rename kept the names of converted entries."""
         memo = getattr(self._listing, "mappings", None)
         if memo is not None:
             return memo
@@ -396,7 +381,7 @@ class CacheCatalog:
         except OSError:
             return None
 
-    def resolve_source(self, source: str | pathlib.Path, *, prefer_light: bool = False) -> ResolvedSource:
+    def resolve_source(self, source: str | pathlib.Path) -> ResolvedSource:
         if isinstance(source, pathlib.Path):
             hash_ = self._mapped_hash_for_path(source)
             if hash_ is None:
@@ -411,39 +396,7 @@ class CacheCatalog:
                 raise InvalidCatalogInput("source URL must be absolute http(s)")
             source_ref = strip_passthrough(source)
             hash_ = url_hash(source_ref)
-        representation = self.locate_representation(hash_, prefer_light=prefer_light) if hash_ else None
-        return ResolvedSource(hash_, source_ref, representation, self.is_disabled(hash_))
-
-    @staticmethod
-    def _is_light(path: pathlib.Path) -> bool:
-        return path.name.endswith(LIGHT_HTML_SUFFIX)
-
-    @staticmethod
-    def light_path(canonical: pathlib.Path) -> pathlib.Path:
-        return canonical if CacheCatalog._is_light(canonical) else canonical.with_name(canonical.stem + LIGHT_HTML_SUFFIX)
-
-    def locate_representation(self, hash_: str, *, prefer_light: bool = False) -> Optional[Representation]:
-        if not hash_ or not HASH_RE.fullmatch(hash_):
-            return None
-        entry_dir = self.root / hash_
-        if not entry_dir.is_dir():
-            return None
-        matches = sorted(entry_dir.glob("*.html"))
-        canonical_matches = [path for path in matches if not self._is_light(path)]
-        canonical = canonical_matches[0] if canonical_matches else (matches[0] if matches else None)
-        if canonical is None:
-            return None
-        light_candidate = self.light_path(canonical)
-        light = light_candidate if light_candidate.is_file() and light_candidate != canonical else None
-        selected = light if prefer_light and light is not None else canonical
-        return Representation(hash_, canonical, selected, light)
-
-    def require_representation(self, hash_: str, *, prefer_light: bool = True) -> Representation:
-        self.validate_hash(hash_)
-        representation = self.locate_representation(hash_, prefer_light=prefer_light)
-        if representation is None:
-            raise EntryNotFound(f"no cached PDF viewer entry for hash {hash_}")
-        return representation
+        return ResolvedSource(hash_, source_ref, self.is_disabled(hash_))
 
     def source_ref(self, hash_: str) -> Optional[str]:
         mapping = self.mappings().get(hash_)
@@ -470,33 +423,25 @@ class CacheCatalog:
         return self.cached_source(hash_)
 
     def entry_name(self, hash_: str) -> str:
-        """Display name: the canonical HTML stem (what :rename changes), else
-        the mapping row's name, else the source file's stem."""
-        representation = self.locate_representation(hash_)
-        if representation is not None:
-            return representation.canonical.stem
-        manifest = self.manifests().get(hash_)
-        if manifest and manifest.get("name"):
-            return str(manifest["name"])
+        """Display name: the mapping's name (what :rename changes), else the
+        source file's stem."""
         mapping = self.mappings().get(hash_)
         if mapping is not None:
             return mapping.name
         source = self.source_pdf(hash_)
         return source.stem if source else hash_
 
-    def viewer_href(self, hash_: str, *, prefer_reader: bool = False,
-                    prefer_light: bool = True) -> Optional[str]:
+    def viewer_href(self, hash_: str) -> Optional[str]:
         """Where an entry is read, as an unquoted daemon path: the reader when
-        preferred or when it is all the entry has, else its converted HTML.
-        None for no entry."""
+        its PDF is on disk, else the route that downloads its URL again.
+        None for no entry, and for an entry whose PDF cannot be had."""
         if not HASH_RE.fullmatch(hash_ or ""):
             return None
-        representation = self.locate_representation(hash_, prefer_light=prefer_light)
-        has_source = self.source_pdf(hash_) is not None
-        if has_source and (prefer_reader or representation is None):
+        if self.source_pdf(hash_) is not None:
             return f"/r/{hash_}/"
-        if representation is not None:
-            return f"/{hash_}/{representation.selected.name}"
+        source_ref = self.source_ref(hash_)
+        if source_ref and source_ref.startswith(("http://", "https://")):
+            return "/read?url=" + urllib.parse.quote(source_ref, safe="")
         return None
 
     def native_source(self, hash_: str) -> NativeSource:
@@ -569,24 +514,22 @@ class CacheCatalog:
         text = urllib.parse.unquote(" ".join(parts))
         return re.sub(r"\s+", " ", text.casefold()).strip()
 
-    def list_entries(self, *, prefer_reader: bool = False) -> list[dict]:
+    def list_entries(self) -> list[dict]:
         self._listing.mappings = self.mappings()
         try:
-            return self._list_entries(prefer_reader)
+            return self._list_entries()
         finally:
             self._listing.mappings = None
 
-    def _list_entries(self, prefer_reader: bool) -> list[dict]:
+    def _list_entries(self) -> list[dict]:
         scores = self.activity.all_frecency()
         out = []
         for hash_, mapping in self.mappings().items():
-            href = self.viewer_href(hash_, prefer_reader=prefer_reader)
+            href = self.viewer_href(hash_)
             if href is None:
                 continue
-            representation = self.locate_representation(hash_, prefer_light=True)
             score = scores.get(hash_, {"raw_count": 0, "rank": 0, "last_seen": None,
                                        "age_multiplier": 0.0, "frecency_score": 0.0})
-            canonical = representation.canonical if representation else None
             name = self.entry_name(hash_)
             has_source = self.source_pdf(hash_) is not None
             meta = self._entry_meta(hash_)
@@ -594,8 +537,6 @@ class CacheCatalog:
                         "search_text": self._search_text(name, mapping.source_ref),
                         "href": href,
                         "reader_href": f"/r/{hash_}/" if has_source else None,
-                        "canonical_href": f"/{hash_}/{canonical.name}" if canonical else None,
-                        "light_href": f"/{hash_}/{representation.light.name}" if representation and representation.light else None,
                         "count": score["raw_count"], "rank": score["rank"],
                         "last_seen": score["last_seen"], "age_multiplier": score["age_multiplier"],
                         "frecency_score": score["frecency_score"],
@@ -629,7 +570,7 @@ class CacheCatalog:
             return title
         return name
 
-    def finder_entries(self, positions: dict, current: str = "", *, prefer_reader: bool = False) -> list[dict]:
+    def finder_entries(self, positions: dict, current: str = "") -> list[dict]:
         """The library as the overlay's quick-open rows (⌘P, ⌘K, :open).
 
         Only what a row shows or matches on, so the response stays small:
@@ -640,7 +581,7 @@ class CacheCatalog:
         `current`: ⌘P then Enter goes back to it.
         """
         out = []
-        for entry in self.list_entries(prefer_reader=prefer_reader):
+        for entry in self.list_entries():
             ref = strip_passthrough(entry["source_ref"] or "")
             parsed = urllib.parse.urlparse(ref)
             web = parsed.scheme in {"http", "https"}
@@ -660,7 +601,7 @@ class CacheCatalog:
         return out
 
     def _entry_meta(self, hash_: str) -> dict:
-        """`<hash>/meta.json` (pdfinfo or the reader's PDFium copy), or {}.
+        """`<hash>/meta.json` (written by the reader from PDFium), or {}.
         Never opens the PDF."""
         try:
             meta = json.loads((self.root / hash_ / "meta.json").read_text(encoding="utf-8"))
@@ -674,14 +615,9 @@ class CacheCatalog:
                 "author": str(meta["author"]).strip() or None if meta.get("author") else None}
 
     def _thumb_href(self, hash_: str, has_source: bool) -> Optional[str]:
-        """Page 1 small: the reader renders it from the source PDF (240 px,
-        the width the sidebar's Pages tab already caches); converted entries
-        may carry pdftocairo's thumbs/1.jpg."""
-        if has_source:
-            return f"/r/{hash_}/p/1/240.png"
-        if (self.root / hash_ / "thumbs" / "1.jpg").is_file():
-            return f"/{hash_}/thumbs/1.jpg"
-        return None
+        """Page 1 small, rendered by the reader from the source PDF (240 px,
+        the width the sidebar's Pages tab already caches)."""
+        return f"/r/{hash_}/p/1/240.png" if has_source else None
 
     def search_entries(self, query: str) -> list[dict]:
         needle = self._search_text(query, None)
@@ -699,63 +635,26 @@ class CacheCatalog:
         name = self._sanitize_name(raw_name)
         if not name:
             raise InvalidCatalogInput("name is empty after sanitization")
-        manifest = self.manifests().get(hash_)
-        if self.locate_representation(hash_) is None:
-            # An entry with no converted HTML keeps its name in entry.json.
-            if manifest is None or self.source_pdf(hash_) is None:
-                raise EntryNotFound(f"no cached PDF viewer entry for hash {hash_}")
-            old_name = str(manifest.get("name") or hash_)
-            if old_name != name:
-                self._write_manifest(hash_, {**manifest, "name": name})
-            result = {"hash": hash_, "old_name": old_name, "new_name": name, "renamed": old_name != name,
-                      "href": f"/r/{hash_}/", "canonical_href": None, "light_href": None}
-            if old_name != name:
-                result.update(light_renamed=False, frecency_boosted=self.activity.boost(hash_, n=3))
-            return result
-        representation = self.require_representation(hash_, prefer_light=False)
-        old = representation.canonical
-        if old.stem == name:
-            return self._rename_result(hash_, old.stem, name, False, representation, 0)
-        target = old.with_name(name + ".html")
-        light_target = old.with_name(name + LIGHT_HTML_SUFFIX)
-        if target.exists() or light_target.exists():
-            raise NameConflict(f"name already in use: {name}")
-
-        def rewrite_title(path: pathlib.Path) -> None:
-            try:
-                text = path.read_text(encoding="utf-8")
-                text, count = re.subn(r"<title>.*?</title>", f"<title>{html_lib.escape(name)}</title>", text, count=1, flags=re.DOTALL)
-                if count:
-                    path.write_text(text, encoding="utf-8")
-            except OSError:
-                pass
-
-        rewrite_title(old)
-        if representation.light:
-            rewrite_title(representation.light)
-            representation.light.rename(light_target)
-        old.rename(target)
-        self._rewrite_mapping_html(hash_, target)
-        updated = Representation(hash_, target, target, light_target if representation.light else None)
-        return self._rename_result(hash_, old.stem, name, True, updated, self.activity.boost(hash_, n=3))
-
-    @staticmethod
-    def _rename_result(hash_: str, old_name: str, new_name: str, renamed: bool,
-                       representation: Representation, boosted: int) -> dict:
-        # `href` follows the library's rule: the light representation when one
-        # exists, so a renamed light tab keeps viewing light HTML.
-        preferred = representation.light or representation.canonical
-        result = {"hash": hash_, "old_name": old_name, "new_name": new_name, "renamed": renamed,
-                  "href": f"/{hash_}/{preferred.name}",
-                  "canonical_href": f"/{hash_}/{representation.canonical.name}",
-                  "light_href": f"/{hash_}/{representation.light.name}" if representation.light else None}
+        if self.viewer_href(hash_) is None:
+            raise EntryNotFound(f"no cached PDF viewer entry for hash {hash_}")
+        old_name = self.entry_name(hash_)
+        renamed = old_name != name
         if renamed:
-            result.update(light_renamed=representation.light is not None, frecency_boosted=boosted)
+            row = self._tsv_mappings().get(hash_)
+            if row is not None:
+                # A row from the retired conversion scripts keeps its name as
+                # the stem of the HTML path it records.
+                self._rewrite_mapping_html(hash_, row.html_path.with_name(name + ".html"))
+            else:
+                manifest = self.manifests().get(hash_) or {"source_ref": self.source_ref(hash_) or ""}
+                self._write_manifest(hash_, {**manifest, "name": name})
+        result = {"hash": hash_, "old_name": old_name, "new_name": name, "renamed": renamed,
+                  "href": self.viewer_href(hash_)}
+        if renamed:
+            result["frecency_boosted"] = self.activity.boost(hash_, n=3)
         return result
 
     def _rewrite_mapping_html(self, hash_: str, path: pathlib.Path) -> None:
-        if not self.mappings_path.is_file():
-            return
         lines = []
         with self.mappings_path.open(encoding="utf-8") as source:
             for line in source:
@@ -822,12 +721,12 @@ class CacheCatalog:
             query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
             if parsed.path == "/native" and query.get("hash") and HASH_RE.fullmatch(query["hash"][0]):
                 return query["hash"][0]
-            if parsed.path in {"/view", "/view-light", "/view-canonical", "/native", "/read"}:
+            if parsed.path in {"/view", "/native", "/read"}:
                 if query.get("path"):
                     return self._hash_for_local_path(pathlib.Path(query["path"][0]))
                 if query.get("url"):
                     return url_hash(strip_passthrough(query["url"][0]))
-            if parsed.path in {"/view-raw", "/view-light-raw", "/view-canonical-raw", "/read-raw"} and parsed.query:
+            if parsed.path in {"/view-raw", "/read-raw"} and parsed.query:
                 return url_hash(strip_passthrough(parsed.query))
         if parsed.scheme == "file":
             return self._hash_for_local_path(pathlib.Path(urllib.parse.unquote(parsed.path)))

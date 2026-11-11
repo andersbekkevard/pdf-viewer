@@ -1,8 +1,8 @@
-// Document structure, text shape, scroll geometry, and light-raster lifecycle.
+// Document structure, text shape, scroll geometry, and the raster lifecycle.
 //
-// pdf2htmlEX's page IDs are hexadecimal (`#pf1`, `#pfa`, …), while feature
-// code deals in one-based page numbers. Keep that DOM translation — plus the
-// canonical/light representation differences — in one place.
+// The reader shell's page IDs are hexadecimal (`#pf1`, `#pfa`, …), while
+// feature code deals in one-based page numbers. Keep that DOM translation in
+// one place.
 export function createDocumentModel(core) {
     var document = core.document;
     var window = core.window;
@@ -46,9 +46,9 @@ export function createDocumentModel(core) {
         return match ? parseInt(match[1], 10) : null;
     }
 
-    // pdf2htmlEX's #outline, flattened in document order: one entry per
-    // `a[href="#pfN"]`, carrying its target page and the pdf2htmlEX
-    // destination (`data-dest-detail`) when the PDF supplied one. The outline
+    // The shell's #outline, flattened in document order: one entry per
+    // `a[href="#pfN"]`, carrying its target page and the point on it
+    // when the PDF supplied one. The outline
     // never changes after load, so this is computed once.
     var outlineCache = null;
     function outline() {
@@ -124,7 +124,7 @@ export function createDocumentModel(core) {
     // same unit as getBoundingClientRect. A zoomed page's own offsetTop /
     // offsetHeight are in page-local units instead, so page positions are
     // always derived from rects here; feature code must not read `offset*`
-    // on a `.pf`. See docs/pdf2htmlex-dom.md, "Zoom and scroll geometry".
+    // on a `.pf` (ADR 0012).
     function pageExtent(pf) {
         var root = container();
         if (!root || !pf) return null;
@@ -179,7 +179,7 @@ export function createDocumentModel(core) {
     }
     // Reading position as the page under the viewport's top-left corner and
     // how far into it, in fractions of the page. Fractions survive anything
-    // that rescales pages (our zoom, pdf2htmlEX's own rescale).
+    // that rescales pages.
     function viewAnchor() {
         var root = container();
         if (!root) return null;
@@ -204,102 +204,12 @@ export function createDocumentModel(core) {
         root.scrollLeft = extent.left + anchor.x * extent.width;
     }
 
-    // The explicit marker is the forward contract. Existing generated cache
-    // entries still use body/attribute markers, so retain those as fallbacks.
-    function representation() {
-        if (html() && html().getAttribute('data-pdf2html-representation') === 'light-v1') return 'light-v1';
-        if (document.body && document.body.classList.contains('pdf2html-light')) return 'light-legacy';
-        return document.querySelector('img.bi[data-pdf2html-src]') ? 'light-legacy' : 'canonical';
-    }
-    function isLight() { return representation().indexOf('light') === 0; }
-    // Reader shells: PDFium rasters under a transparent text layer.
-    function isReader() {
-        return !!html() && html().getAttribute('data-pdf2html-representation') === 'raster-v1';
-    }
     // A reader page whose text has not arrived yet (overlay-readertext.js).
     function isTextPending(pf) { return !!pf && pf.hasAttribute('data-reader-pending'); }
-    function textMode() {
-        var root = html();
-        if (!root) return 'canonical';
-        return root.getAttribute('data-pdf2html-text-mode')
-            || root.getAttribute('data-pdf2html-text-flattened')
-            || 'canonical';
-    }
-    function isTextFlattened() { return textMode() !== 'canonical'; }
 
-    // Only light documents externalize their raster sources. Page state lives
-    // on the frame so other features can observe lifecycle without inspecting
-    // individual image attributes: unloaded -> loading -> ready | error.
     function mountRasterLifecycle() {
         var root = container();
-        if (!root) return;
-        if (isReader()) { mountReaderRasters(root); return; }
-        var entries = new Map();
-
-        function setState(entry, state) {
-            if (entry.page.dataset.pdf2htmlRasterState !== state) {
-                entry.page.dataset.pdf2htmlRasterState = state;
-            }
-        }
-        function sourceFor(img) { return img.getAttribute('data-pdf2html-src'); }
-        function updateState(entry) {
-            // Completion of an old request must not revive an exited page.
-            if (!entry.mounted) return;
-            var ready = true, failed = false;
-            entry.images.forEach(function (img) {
-                if (img.getAttribute('src') !== sourceFor(img) || !img.complete) ready = false;
-                else if (!img.naturalWidth) { ready = false; failed = true; }
-            });
-            setState(entry, failed ? 'error' : ready ? 'ready' : 'loading');
-        }
-        function load(entry) {
-            if (entry.mounted) return;
-            entry.mounted = true;
-            setState(entry, 'loading');
-            entry.images.forEach(function (img) {
-                var source = sourceFor(img);
-                if (img.getAttribute('src') !== source) img.setAttribute('src', source);
-            });
-            updateState(entry);
-        }
-        function unload(entry) {
-            if (!entry.mounted) return;
-            entry.mounted = false;
-            entry.images.forEach(function (img) {
-                if (img.hasAttribute('src')) img.removeAttribute('src');
-            });
-            setState(entry, 'unloaded');
-        }
-
-        pages().forEach(function (pf) {
-            var images = Array.prototype.slice.call(pf.querySelectorAll('img.bi[data-pdf2html-src]'));
-            if (!images.length) return;
-            var entry = { page: pf, images: images, mounted: false };
-            entries.set(pf, entry);
-            images.forEach(function (img) {
-                img.addEventListener('load', function () { updateState(entry); });
-                img.addEventListener('error', function () { updateState(entry); });
-                // Converter-eager sources are handled by the same lifecycle.
-                if (img.hasAttribute('src')) img.removeAttribute('src');
-            });
-            setState(entry, 'unloaded');
-        });
-        if (!entries.size) return;
-
-        // Observe page frames, whose geometry is available even while their
-        // content-visibility subtree is skipped. Scrolling, resize, zoom and
-        // far native-find jumps update intersections without an O(book) scan.
-        var observer = new window.IntersectionObserver(function (changes) {
-            // Drop the old window before mounting the new one on distant jumps.
-            changes.forEach(function (change) {
-                if (!change.isIntersecting) unload(entries.get(change.target));
-            });
-            changes.forEach(function (change) {
-                if (change.isIntersecting) load(entries.get(change.target));
-            });
-        }, { root: root, rootMargin: '3500px 0px', threshold: 0 });
-        entries.forEach(function (entry) { observer.observe(entry.page); });
-
+        if (root) mountReaderRasters(root);
     }
 
     // Reader rasters (daemon/reader.py, docs/reader.md "Rasters"). One JPEG per
@@ -565,12 +475,7 @@ export function createDocumentModel(core) {
         mostVisiblePage: mostVisiblePage,
         viewAnchor: viewAnchor,
         restoreViewAnchor: restoreViewAnchor,
-        representation: representation,
-        isLight: isLight,
-        isReader: isReader,
         isTextPending: isTextPending,
-        textMode: textMode,
-        isTextFlattened: isTextFlattened,
         mountRasterLifecycle: mountRasterLifecycle,
     };
 }

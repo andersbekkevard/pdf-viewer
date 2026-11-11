@@ -248,7 +248,6 @@ async function startDaemon(tmp) {
     '--host', '127.0.0.1', '--port', String(DAEMON_PORT), '--log-level', 'warning'], {
     env: {
       ...process.env,
-      PDF_VIEWER_ENGINE: 'reader',
       PDF_VIEWER_CACHE_DIR: cache,
       PDFV_STATE_DB: path.join(tmp, 'state.db'),
       PYTHONUNBUFFERED: '1',

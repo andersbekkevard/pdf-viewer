@@ -6,6 +6,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 from fastapi.responses import FileResponse
 
@@ -36,12 +37,10 @@ class HomeRouteTest(unittest.TestCase):
         self.assertIn("/_assets/home.js", html)
         self.assertIn("/_assets/home.css", html)
 
-    def test_root_route_precedes_the_cache_mount(self):
+    def test_root_route_precedes_the_entry_routes(self):
         paths = [getattr(route, "path", None) for route in main.app.routes]
-        self.assertIn("/", paths)
-        mount_index = next(i for i, route in enumerate(main.app.routes)
-                           if getattr(route, "name", None) == "cache")
-        self.assertLess(paths.index("/"), mount_index)
+        self.assertLess(paths.index("/"), paths.index("/{hash_}/{name}.html"))
+        self.assertLess(paths.index("/{hash_}/{name}.html"), paths.index("/_assets"))
 
 
 class LibraryHomeFieldsTest(unittest.TestCase):
@@ -57,21 +56,18 @@ class LibraryHomeFieldsTest(unittest.TestCase):
         pdf.write_bytes(b"%PDF-1.4")
         reader_dir = self.root / READER_HASH
         reader_dir.mkdir()
-        (reader_dir / "Book.html").write_text("x", encoding="utf-8")
         (reader_dir / "meta.json").write_text(json.dumps(
             {"title": "  A Book ", "author": "Someone", "pages": 42, "file_size": 8}), encoding="utf-8")
 
-        # A converted entry whose source is gone, with pdftocairo thumbs.
+        # A row from the retired converter: stored source PDF, unreadable meta.json.
         converted_dir = self.root / CONVERTED_HASH
-        (converted_dir / "thumbs").mkdir(parents=True)
-        (converted_dir / "Old.html").write_text("x", encoding="utf-8")
-        (converted_dir / "thumbs" / "1.jpg").write_bytes(b"jpg")
+        (converted_dir / "_source").mkdir(parents=True)
+        (converted_dir / "_source" / "Old.pdf").write_bytes(b"%PDF-1.4")
         (converted_dir / "meta.json").write_text("not json", encoding="utf-8")
 
-        # A converted entry with neither meta.json nor thumbnails.
+        # A URL entry whose PDF is not stored: it downloads again when opened.
         bare_dir = self.root / BARE_HASH
         bare_dir.mkdir()
-        (bare_dir / "Bare.html").write_text("x", encoding="utf-8")
 
         self.catalog.mappings_path.write_text(
             f"1\t{pdf}\t{READER_HASH}\t{reader_dir / 'Book.html'}\n"
@@ -94,16 +90,33 @@ class LibraryHomeFieldsTest(unittest.TestCase):
 
         converted = rows[CONVERTED_HASH]
         self.assertEqual((converted["pages"], converted["title"], converted["author"]), (None, None, None))
-        self.assertEqual(converted["thumb_href"], f"/{CONVERTED_HASH}/thumbs/1.jpg")
+        self.assertEqual(converted["thumb_href"], f"/r/{CONVERTED_HASH}/p/1/240.png")
 
         self.assertIsNone(rows[BARE_HASH]["thumb_href"])
+        self.assertEqual(rows[BARE_HASH]["href"], "/read?url=https%3A%2F%2Fexample.com%2Fbare.pdf")
         self.assertIsNone(rows[BARE_HASH]["pages"])
+
+    def test_converted_page_address_opens_the_reader(self):
+        response = main.converted_page(READER_HASH, "Book")
+        self.assertEqual(response.headers["location"], f"/r/{READER_HASH}/")
+        with unittest.mock.patch.object(main, "CACHE_DIR", self.root):
+            self.assertEqual(pathlib.Path(main.entry_meta(READER_HASH).path),
+                             self.root / READER_HASH / "meta.json")
+
+    def test_reenabled_document_opens_on_the_localhost_origin(self):
+        from starlette.requests import Request
+        request = Request({"type": "http", "scheme": "http", "server": ("127.0.0.1", 7435),
+                           "path": "/extension/toggle", "query_string": b"", "headers": []})
+        self.assertEqual(main._viewer_url_for_hash(READER_HASH, request),
+                         f"http://localhost:7435/r/{READER_HASH}/")
+        self.assertEqual(main._viewer_url_for_hash(BARE_HASH, request),
+                         "http://localhost:7435/read?url=https%3A%2F%2Fexample.com%2Fbare.pdf")
 
     def test_existing_fields_and_order_unchanged(self):
         rows = main.library()
         self.assertEqual(rows[0]["hash"], READER_HASH)  # frecency first
         for key in ("hash", "name", "source_ref", "search_text", "href", "reader_href",
-                    "canonical_href", "light_href", "count", "rank", "last_seen",
+                    "count", "rank", "last_seen",
                     "age_multiplier", "frecency_score"):
             self.assertIn(key, rows[0])
         self.assertEqual(rows[0]["count"], 3)

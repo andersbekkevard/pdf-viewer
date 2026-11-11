@@ -47,7 +47,6 @@ export function createTextFit(core) {
     }
 
     function mount() {
-        if (!documentModel.isReader()) return;
         context = document.createElement('canvas').getContext('2d');
         if (!context) return;
         context.fontKerning = 'none';

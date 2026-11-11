@@ -1,7 +1,7 @@
 # Real-history reader replay
 
 Run `uv run bench/history/run.py --days 60 --port 7445`. Optional flags:
-`--browser chrome|comet|all`, `--profile Default` (or `Profile 1`),
+`--profile Default` (or `Profile 1`),
 `--limit 300`, `--extract-only`. Python uses uv; Chromium uses the cached
 Playwright install found by `scripts/lib/playwright.sh`. Nothing is installed.
 The runner starts and stops its own daemon, cache and state database. Port 7435
@@ -61,7 +61,7 @@ Results and diagnosis from the 60-day run are recorded below after completion.
 This is a reader measurement, not a before/after performance claim. The machine
 is shared; load averages accompany each per-document result. Original sources
 can change between a historical visit and today's replay. Chromium headless
-does not establish Comet, Vimium or extension sign-in integration.
+does not establish Vimium or extension sign-in integration.
 
 ### 60-day run, 2026-11-10 (Boston)
 
@@ -156,5 +156,5 @@ the run does not isolate reader CPU from network time for these successes.
   telemetry, covered by a regression test. No production daemon was restarted.
 - Extraction copies are not atomic snapshots of a concurrently active browser;
   newly committed visits can be absent. Remote identity hashes differ from
-  content hashes. Session-gated sources, extension relay, actual Comet/Vimium,
+  content hashes. Session-gated sources, extension relay, the real Vimium,
   full-document OCR, and visual/highlight fidelity are not proved by this run.

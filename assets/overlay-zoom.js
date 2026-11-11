@@ -1,6 +1,6 @@
 // Page zoom: auto-fit, per-document preference, and where the zoom lives.
 //
-// pdf2htmlEX emits pages at the PDF's native CSS-pixel size (1 PDF pt ≈ 1 px),
+// The reader shell lays pages out at the PDF's native CSS-pixel size (1 PDF pt ≈ 1 px),
 // which varies wildly: A4 ≈ 595px, US Letter 612px, 16:9 slide deck 1920px,
 // posters even more. A fixed multiplier is wrong across that range, so the
 // default is auto-fit: the first page occupies ~85% of #page-container's

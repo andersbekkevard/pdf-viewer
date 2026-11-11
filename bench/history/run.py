@@ -32,7 +32,7 @@ def pct(values,p):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--days',type=int,default=60)
-    p.add_argument('--browser',choices=['all','chrome','comet'],default='all')
+    p.add_argument('--browser',choices=['all','chrome'],default='all')
     p.add_argument('--profile')
     p.add_argument('--limit',type=int,default=300)
     p.add_argument('--port',type=int,default=7445)
@@ -51,7 +51,7 @@ def main():
     env=os.environ.copy();env['NODE_PATH']=pw
     base=f'http://127.0.0.1:{a.port}'
     with tempfile.TemporaryDirectory(prefix='pdfv-history-cache-') as temp:
-        env.update(PDF_VIEWER_ENGINE='reader',PDF_VIEWER_CACHE_DIR=temp,PDFV_STATE_DB=temp+'/state.db')
+        env.update(PDF_VIEWER_CACHE_DIR=temp,PDFV_STATE_DB=temp+'/state.db')
         cache=Path(temp)
         with (OUT/'daemon.log').open('w') as log:
             server=subprocess.Popen(['uv','run','--directory',str(REPO/'daemon'),'uvicorn','main:app','--host','127.0.0.1','--port',str(a.port)],env=env,stdout=log,stderr=log)

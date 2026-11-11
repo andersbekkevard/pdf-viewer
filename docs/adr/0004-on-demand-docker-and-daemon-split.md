@@ -1,6 +1,6 @@
 # ADR 0004 — On-demand Docker, always-on daemon
 
-**Status**: Accepted
+**Status**: Superseded: conversion is gone ([ADR 0015](0015-retire-pdf2htmlex.md)); the always-on local daemon stands
 **Date**: 2026-04-21
 
 ## Context

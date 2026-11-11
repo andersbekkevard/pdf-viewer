@@ -1,18 +1,19 @@
 # pdf_viewer
 
-Personal PDF → custom-HTML viewer for a keyboard-native (Vimium) workflow.
-Click any `*.pdf` link in Comet, land in a dark, Vim-friendly HTML viewer
-instead of Chrome's sandboxed PDF surface.
+Personal PDF viewer for a keyboard-native (Vimium) workflow. Click any PDF
+link in Chrome and land in a dark, Vim-friendly HTML page instead of
+Chrome's sandboxed PDF surface.
 
 ![Viewer — sidebar outline + light PDF canvas](docs/screenshots/viewer.png)
 
 This README is the orientation doc. For deeper references:
+[`docs/reader.md`](docs/reader.md) (how pages are built),
 [`docs/cache.md`](docs/cache.md) (cache design),
 [`docs/keybindings.md`](docs/keybindings.md) (full key + palette
 registry), [`docs/adr/`](docs/adr/) (architectural decisions),
 [`docs/ai-production.md`](docs/ai-production.md) (agent workflow +
 Beads), [`docs/verification.md`](docs/verification.md) (verification
-loops), [`CLAUDE.md`](CLAUDE.md) (build / debug / gotchas).
+loops), [`CLAUDE.md`](CLAUDE.md) (constraints for agents).
 
 ## Quick start
 
@@ -21,196 +22,147 @@ git clone <repo> pdf_viewer && cd pdf_viewer
 ./scripts/setup.sh
 ```
 
-`scripts/setup.sh` is the idempotent bootstrap — safe to re-run. It
-installs the Homebrew runtime deps ([`Brewfile`](Brewfile)), checks for
-`uv`, installs the native pdf2htmlEX toolchain, templates and loads the
-launchd daemon job, creates the cache dir + `_assets` symlink, and ends
-by running [`scripts/doctor.sh`](scripts/doctor.sh) as the success gate.
-It needs Homebrew already present and does **not** auto-install `uv`
-(it prints the one-liner if missing).
+`scripts/setup.sh` is the idempotent bootstrap — safe to re-run. It checks
+for `uv` (and prints the install one-liner if it is missing), templates and
+loads the launchd daemon job, creates the cache dir, and ends by running
+[`scripts/doctor.sh`](scripts/doctor.sh) as the success gate.
 
 Two manual steps it can't script (it prints both on success):
 
-1. **Comet extension** — `comet://extensions` → enable Developer mode →
+1. **Chrome extension** — `chrome://extensions` → enable Developer mode →
    *Load unpacked* → point at `extension/`.
 2. **Raycast script directory** — Raycast → Settings → Extensions →
    Script Commands → *Add script directory* → pick `raycast/`.
 
-(Optional, for the keyboard workflow: add `localhost:7435` to Vimium's
-pass-through keys — see [Externalities](#externalities) §5.)
+(Optional, for the keyboard workflow: add the Vimium exclusion rule — see
+[Externalities](#externalities) §5.)
 
 ## Why
 
 Vimium — the vim-style keyboard navigation we rely on for everything —
-**does not work inside Chrome/Comet's native PDF viewer**. The native
-viewer is a sandboxed `chrome://pdf` surface that browser extensions cannot
-reach. No `j/k`, no `/`, no visual mode, no marks.
+**does not work inside Chrome's native PDF viewer**. The native viewer is a
+sandboxed surface that browser extensions cannot reach. No `j/k`, no `/`,
+no visual mode, no marks.
 
-The workaround: render PDFs as **HTML** instead. `pdf2htmlEX` produces
-pixel-faithful HTML with selectable text; Vimium treats it like any other
-page. Then we inject a JS/CSS overlay to fix the UX (dark canvas, clean
-sidebar, render-window, cursor pin, palette, outline tracker, marks,
-position restore, …).
+The workaround: show PDFs as **HTML** instead. The reader draws every page
+with PDFium (the renderer Chrome's own viewer uses) and lays the PDF's text
+over it as transparent, selectable HTML, so Vimium treats the document like
+any other page. A JS/CSS overlay supplies the rest (dark canvas, sidebar,
+palette, quick open, outline tracker, marks, pins, position restore, …).
 
 ## Design philosophy
 
-1. **Cache is load-bearing.** Conversion is slow (pdf2htmlEX, up to
-   1–2 min for a textbook). Convert once, cache forever at
-   `~/.cache/pdf_viewer/<hash>/`. Every subsequent open is a disk read —
-   1–3 ms.
-2. **Native conversion, no Docker.** Conversion runs a natively-built
-   arm64 pdf2htmlEX binary (`~/.local/opt/pdf2htmlEX/`, installed by
-   `scripts/install-native-pdf2htmlex.sh`). Docker is no longer needed
-   for conversion at all. The daemon never invokes the converter
-   (ADR 0004, ADR 0011).
-3. **Read-only daemon, scary work in Raycast.** FastAPI daemon serves the
-   cache and nothing else. All conversion / indexing lives in Raycast
-   scripts. If the daemon crashes, no documents are lost; if a script
-   breaks, the daemon keeps serving everything already cached.
-4. **Extension for frictionless hits; Raycast for deliberate conversions.**
-   The MV3 extension redirects `*.pdf` navigations to the daemon's
-   query-preserving remote view route. Cache hit → instant HTML. Miss → 307
-   back to the original URL (native viewer takes over, degraded but not
-   broken), and the user runs Raycast-convert to escalate. Next visit of the
-   same doc hits cache forever.
-5. **Overlay is the product.** `assets/overlay*.js` and `assets/overlay.css` is what the user
-   actually experiences. Served live via symlink — edits reload on ⌘⇧R,
-   no reconversion needed.
-6. **Keyboard first.** All numeric arguments go through the `:` palette,
+1. **Nothing is converted.** A PDF opens as fast as its first page renders.
+   The daemon builds the page shell, the text and each page image from the
+   PDF on demand and caches them under `~/.cache/pdf_viewer/<hash>/`
+   ([`docs/reader.md`](docs/reader.md), ADR 0014). The pdf2htmlEX
+   conversion engine this project started with is retired (ADR 0015).
+2. **Local daemon, documents never leave the machine.** A FastAPI daemon on
+   `127.0.0.1:7435` serves everything. All PDFium calls run in worker
+   processes, so a PDF that crashes PDFium cannot take the daemon down.
+3. **The extension makes it frictionless.** The MV3 extension redirects PDF
+   navigations (`*.pdf` URLs, `application/pdf` responses, `file://` PDFs)
+   to the daemon. A PDF behind a sign-in is fetched by the extension inside
+   the browser session and handed to the daemon.
+4. **Overlay is the product.** `assets/overlay*.js` and `assets/overlay.css`
+   are what the user actually experiences. Served live from the repo —
+   edits reload on ⌘⇧R.
+5. **Keyboard first.** All numeric arguments go through the `:` palette,
    not `[N]<key>` prefixes. Shortcut conflicts with Vimium are
    non-negotiable — see the "Permanently rejected" list in
    [`docs/keybindings.md`](docs/keybindings.md).
 
 ## Current state
 
-**Two engines.** The newer one, the **reader**, opens a PDF directly: PDFium
-page rasters at device resolution under a transparent text layer, built on
-demand with no conversion step ([`docs/reader.md`](docs/reader.md), ADR 0014).
-It is the default engine for every PDF the extension redirects, including
-uncached, sign-in-gated and `file://` ones. Start the daemon with
-`PDF_VIEWER_ENGINE=pdf2htmlex` for the rollback: the pdf2htmlEX path described
-below.
+What works end-to-end today:
 
-All core phases done (1 → 7). What works end-to-end today:
-
-- **Conversion** — `scripts/pdf2html-convert.sh` handles both `file://`
-  and `https://` sources (signed Blackboard/S3/CloudFront URLs included;
-  query string stripped from the cache key so signed links hit cache
-  across sessions). Filename recovered from `Content-Disposition` or
-  URL path. Sources behind a browser sign-in (Cloudflare Access, campus
-  SSO) defeat the direct `curl` download, which has no cookies; the script
-  then asks the extension to fetch the URL inside the signed-in browser
-  session (`POST /signal/fetch`, bytes handed back through daemon memory,
-  only for URLs open in a tab). In reader mode the extension does the same
-  for a tab's own navigation, so a gated PDF opens straight in the reader
-  (`docs/reader.md`, "Sign-in-gated sources"). A changed
-  `extension/background.js` needs a reload in `chrome://extensions` before
-  it runs.
-- **Overlay injection** — `scripts/inject-overlay.py`, shared between
-  fresh conversions and bulk upgrades. Idempotent.
-- **Bulk upgrade** — `scripts/upgrade-cache.sh --mode={inject,reconvert,light}`.
-  `inject` re-applies the overlay to every cached HTML (seconds, no
-  reconversion). `reconvert` re-runs pdf2htmlEX; for https entries reuses the
-  stored `_source/*.pdf` so signed URLs don't need to be refetched.
-  `light` builds paint-safe low-memory HTML from existing canonical HTML.
-  Set `PDF_VIEWER_ENABLE_LIGHT=0` to disable new light generation; the legacy
-  `PDF_VIEWER_ENABLE_EXPERIMENTAL_LIGHT` flag remains honored.
-- **Bulk indexing** — `scripts/index-directory.sh <folder>` recursively
-  content-hashes every PDF and converts uncached ones. Raycast wrapper
-  takes a folder argument.
-- **FastAPI daemon** (`daemon/main.py`, uv project) — read-only. Routes:
+- **Opening** — any PDF the extension redirects opens in the reader:
+  public URLs (signed Blackboard/S3/CloudFront URLs included; the query
+  string is stripped from the cache key so signed links hit the same entry
+  across sessions), sign-in-gated URLs (Cloudflare Access, campus SSO;
+  `docs/reader.md`, "Sign-in-gated sources") and local files, which reload
+  live when the file changes on disk. A changed `extension/background.js`
+  needs a reload in `chrome://extensions` before it runs.
+- **FastAPI daemon** (`daemon/main.py`, uv project). Routes:
   `GET /` (home page: the library, searchable; `assets/home.*`) /
-  `GET /view?path=` / `GET /view?url=` / `GET /view-raw?<url>` /
-  `GET /view-light?path=` / `GET /view-light?url=` /
-  `GET /view-light-raw?<url>` / `GET /<hash>/<file>` /
-  `GET /view-canonical?path=` / `GET /view-canonical?url=` /
-  `GET /read?path=|url=` / `GET /r/<hash>/` (reader) /
+  `GET /view?path=|url=` (also `/read`) / `GET /view-raw?<url>` /
+  `GET /view-file-raw?<file-url>` / `GET /r/<hash>/` (the reader shell) /
+  `GET /r/<hash>/p/<page>/<width>.jpg` (page images) /
+  `GET /r/<hash>/text/<k>.json` / `GET /native?hash=` /
   `GET /entry/<hash>/state` (position, marks, zoom) /
   `GET /_assets/*` / `GET /healthz` / `GET /stats` /
   `GET /stats/recent` / `GET /library` (`?view=finder`: quick-open rows).
-  Cache lookup ≈ 1–3 ms.
+  The full list is the docstring of `daemon/main.py`.
 - **launchd autostart** — `launchd/com.anders.pdf_viewer.plist`, installed
   into `~/Library/LaunchAgents/` by `scripts/setup.sh` (see
   [Externalities](#externalities) §2). `KeepAlive=true`, respawns within a
   second if killed; brought up on login.
-- **Comet MV3 extension** (`extension/`) — static
-  `declarativeNetRequest` rules redirect `^https?://.*\.pdf(\?.*)?$`
-  main-frame navigations to the daemon. Loop-prevention via a
-  `_pdfvw=passthrough` marker that the daemon appends to its 307 on
-  miss. The toolbar action toggles the current cached PDF between the
-  custom viewer and the native browser PDF viewer; disabled entries install
-  higher-priority allow rules instead of redirect rules.
-- **Low-memory light HTML** — canonical `<stem>.html` stays in the cache as
-  the exact pdf2htmlEX output and rollback path. Normal opens prefer
-  `<stem>.light.html`, which externalizes page rasters and mounts only nearby
-  images. Its root mode is `paint-safe`: only `.t` lines proved hidden fallback
-  text from document-local CSS are simplified and marked; visible or ambiguous
-  lines remain byte-for-byte canonical. Generation and normal routing are
-  enabled by default; `/view-canonical` is the explicit rollback route.
-- **Visit tracking** (`daemon/visits.py` + `visits.db`) — every cache hit
-  logged off the response path via FastAPI `BackgroundTasks`. Powers
-  `/stats`, `/stats/recent`, and the frecency order of the home page,
-  quick open (`⌘P`, `⌘K`) and `:open`.
+- **Chrome MV3 extension** (`extension/`) — static
+  `declarativeNetRequest` rules redirect PDF main-frame navigations to the
+  daemon. Loop-prevention via a `_pdfvw=passthrough` marker that the daemon
+  appends when it sends a tab back to the original URL. The toolbar action
+  toggles the current PDF between the custom viewer and the native browser
+  PDF viewer; disabled entries install higher-priority allow rules instead
+  of redirect rules.
+- **Visit and open tracking** (`daemon/visits.py`, `daemon/opens.py`) —
+  powers `/stats`, `/stats/recent`, and the frecency order of the home
+  page, quick open (`⌘P`, `⌘K`) and `:open`
+  ([`docs/observability.md`](docs/observability.md)).
 - **Native `⌘F` full-document indexing** — `.pf` carries
   `content-visibility: auto` so off-viewport pages skip paint+layout
   but their text stays in the layout tree, where Chromium's native
-  find indexes it. In canonical and paint-safe light HTML, matches target the
-  retained positioned text line while the raster remains the visual source.
-  Native-find highlighting can overlap a little where fallback-font metrics
-  differ, but idle pixels remain raster-faithful. See ADR 0009 and ADR 0010.
-  Overlay `/` search remains visible-page scoped.
+  find indexes it. See ADR 0009. Overlay `/` search remains visible-page
+  scoped.
+- **Scanned pages** — text is recognized on the device with Apple Vision
+  (`daemon/ocr.py`) and becomes selectable and findable like any other.
 
-What's not built: cross-device access over Tailscale (phase 8, optional).
+What's not built: cross-device access over Tailscale (optional).
 
 ## Workflow
 
-- **Cached doc, anywhere on the web** — click the link, land in the HTML
+- **Any PDF, anywhere on the web or on disk** — click the link, land in the
   viewer. No thought.
 - **Bad rendering / want native for this doc** — run `:disable` (alias
   `:native`) in the viewer. The daemon records that cache hash as disabled
   and opens the native PDF route without deleting the cache entry. Click the
   extension toolbar button while the PDF is native to re-enable the custom
   viewer for that same document.
-- **Uncached doc** — click the link, native viewer opens (degraded but
-  readable). If you want it in HTML, run Raycast-convert once. Next click
-  forever hits cache.
-- **Whole textbook directory** — run Raycast-index-directory against the
-  folder. Idempotent; re-running skips already-cached PDFs (content-hash
-  dedup handles renames).
+- **A tab the extension left in the native viewer** — run the Raycast
+  command "PDF viewer: open in reader" (`scripts/open-in-reader.sh`).
+- **Going back to a document** — `⌘P` in the viewer, or the home page at
+  `http://localhost:7435/`.
 
 ## Components
 
 ```
 pdf_viewer/
 ├── assets/overlay.js            # composition root: wires the overlay-*.js concept modules
-├── assets/overlay-*.js          # prefs, document model, zoom, pdf2htmlEX adapter, navigation,
-│                                # sidebar, search, scrolloff, commands, settings, finger, …
+├── assets/overlay-*.js          # prefs, document model, zoom, navigation, sidebar, search,
+│                                # scrolloff, commands, quick open, pins, settings, finger, …
 ├── assets/overlay.css           # the overlay styles
+├── assets/home.*                # the library home page
 ├── scripts/
-│   ├── lib/pipeline.sh          # shared cache layout + conversion steps (sourced)
-│   ├── pdf2html-convert.sh      # convert: single PDF (file or url)
-│   ├── index-directory.sh       # index: recursive directory walk (1 worker)
-│   ├── index-directory-parallel.sh  # index with N workers
-│   ├── upgrade-cache.sh         # bulk re-inject / re-convert
-│   ├── externalize-page-images.py
-│   │                            # build low-memory .light.html variants
-│   └── inject-overlay.py        # idempotent overlay injector
-├── raycast/                     # Raycast-format wrappers (point Raycast here)
-│   ├── pdf-viewer-convert.sh
-│   └── pdf-viewer-index-folder.sh
-├── daemon/                      # FastAPI read-only service (uv project)
+│   ├── open-in-reader.sh        # send the active Chrome tab's PDF to the reader
+│   ├── setup.sh, doctor.sh      # bootstrap and read-only diagnosis
+│   ├── verify-*.sh              # headless browser checks (docs/verification.md)
+│   └── open-stats.py            # what was opened, how, and how fast
+├── raycast/                     # Raycast-format wrapper (point Raycast here)
+│   └── pdf-viewer-convert.sh    # "PDF viewer: open in reader"
+├── daemon/                      # FastAPI service (uv project)
 │   ├── main.py                  # thin HTTP adapter + extension signals
 │   ├── reader.py                # reader shell + raster cache (PDFium worker pool)
 │   ├── pdfium_doc.py            # every PDFium call: text, links, outline, rendering
+│   ├── ocr.py                   # on-device text recognition for scanned pages
 │   ├── sources.py               # downloading a remote PDF
 │   ├── state.py                 # per-document position, marks and zoom
 │   ├── catalog.py               # cache identity, discovery, and safe mutations
-│   ├── tests/test_catalog.py    # temp-directory cache contract suite
-│   └── visits.py
-├── extension/                   # Comet MV3 redirect extension
+│   ├── opens.py, visits.py      # open log and visit counts
+│   └── tests/
+├── extension/                   # Chrome MV3 redirect extension
 │   ├── manifest.json
 │   ├── rules.json               # static redirects (*.pdf URLs, application/pdf responses) + passthrough allow
-│   └── background.js            # per-entry dynamic rules, daemon signals, toolbar toggle
+│   └── background.js            # per-entry dynamic rules, daemon signals, sign-in fetches, toolbar toggle
+├── bench/                       # reader scorecard, performance and history-replay benchmarks
 ├── launchd/                     # LaunchAgent plist
 ├── docs/
 │   ├── adr/                     # immutable architectural decisions
@@ -218,58 +170,28 @@ pdf_viewer/
 │   ├── cache.md                 # cache design: layout, hash keys, URL norm
 │   ├── keybindings.md           # full key + palette registry
 │   ├── non-goals.md             # explicit scope boundaries
-│   ├── pdf2htmlex-dom.md        # DOM conventions of converted HTML
 │   ├── reader.md                # the reader: routes, DOM contract, text model
 │   └── verification.md          # browser/daemon/manual verification loops
-└── CLAUDE.md                    # guidance for future Claude sessions
+└── CLAUDE.md                    # guidance for agent sessions
 ```
 
 ## Externalities
 
 Everything the repo **does not** contain but depends on. All of it is
-wired once and then forgotten.
+wired once and then forgotten. The only tool to install is `uv`; the
+daemon's Python dependencies (PDFium through `pypdfium2`, FastAPI) come
+from `daemon/pyproject.toml`.
 
-The Homebrew runtime formulas these externalities rely on (the dylibs
-the native pdf2htmlEX binary links, `poppler`'s `pdftocairo`/`pdfinfo`,
-and `uv`) are declared in [`Brewfile`](Brewfile); verify a machine has
-them with `brew bundle check --file=Brewfile`.
+### 1. Raycast wrapper (`raycast/`)
 
-### 1. Raycast wrappers (`raycast/`)
-
-The user-facing entrypoints live **inside** this repo at `raycast/`.
 The folder contains *only* Raycast-format scripts so it can be added
 directly as a script directory (Raycast → Settings → Extensions →
-Script Commands → *Add script directory* → pick `pdf_viewer/raycast/`)
-without Raycast tripping over unrelated files.
-
-They are deliberately **trivial**: a `nohup` fork into the real script,
-then `echo` a HUD line and exit. All logic lives in `scripts/` so it
-can be edited and tested without Raycast in the loop.
-
-```bash
-# raycast/pdf-viewer-convert.sh
-nohup /…/pdf_viewer/scripts/pdf2html-convert.sh "$@" \
-    >>"$HOME/.cache/pdf_viewer/log" 2>&1 &
-disown
-echo "pdf_viewer: starting conversion…"
-```
-
-```bash
-# raycast/pdf-viewer-index-folder.sh
-export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-nohup /…/pdf_viewer/scripts/index-directory.sh "$1" \
-    >>"$HOME/.cache/pdf_viewer/log" 2>&1 &
-disown
-echo "pdf_viewer: indexing folder…"
-```
-
-Why `nohup &` + early `echo` instead of `exec`: Raycast's silent mode
-only surfaces a HUD at script **completion**. A cache miss is 1–2 min
-and a folder index can be tens of minutes — `exec`'ing straight through
-would leave the user staring at nothing for that entire window. Forking
-into the background makes the HUD fire immediately; the real script
-runs to completion on its own and uses macOS notifications for
-progress.
+Script Commands → *Add script directory* → pick `pdf_viewer/raycast/`).
+The wrapper is deliberately **trivial**: a `nohup` fork into
+`scripts/open-in-reader.sh`, then `echo` a HUD line and exit, with all
+output redirected to the log (Raycast's silent mode shows stderr as a
+macOS notification). The wrapper file keeps the name
+`pdf-viewer-convert.sh` so the hotkey bound to it in Raycast survives.
 
 ### 2. LaunchAgent (`~/Library/LaunchAgents/com.anders.pdf_viewer.plist`)
 
@@ -281,21 +203,21 @@ healthy daemon is left untouched. User-level agent, no sudo.
 `RunAtLoad=true`, `KeepAlive=true`, `ThrottleInterval=5`.
 Install/uninstall commands live as comments at the top of the plist.
 
-### 3. Comet extension (loaded from `extension/`)
+### 3. Chrome extension (loaded from `extension/`)
 
-Not published to a store. Install manually: `comet://extensions` →
+Not published to a store. Install manually: `chrome://extensions` →
 enable Developer mode → *Load unpacked* → point at
-`pdf_viewer/extension/`. Two static `declarativeNetRequest` rules
-(redirect + passthrough allow). Reloads on every edit to `rules.json`
-only after hitting the extension's reload button.
+`pdf_viewer/extension/`. Enable "Allow access to file URLs" in its
+details page so local PDFs open in the reader. An edit to the extension
+takes effect only after hitting its reload button.
 
 ### 4. Runtime cache (`~/.cache/pdf_viewer/`)
 
 Not checked into the repo. Bootstrapped on first run. Full design in
-[`docs/cache.md`](docs/cache.md). `_assets/` inside it is a
-**symlink** back to the repo's `assets/` so overlay edits go live
-without a restart. Nuking the whole cache loses nothing irreplaceable —
-next open re-converts.
+[`docs/cache.md`](docs/cache.md). Everything derived (page images, text,
+shells) is rebuilt on the next open; what is not rebuilt is the stored
+copy of a downloaded PDF, the library's names, and the reading state in
+`state.db`.
 
 ### 5. Vimium exclusion rule
 
@@ -304,24 +226,11 @@ keys `? s / n N h l e q E c C 0 1 2 3 4 5 6 7 8 9`, otherwise Vimium swallows th
 overlay's handlers see them. Do not add `<c-f>`: it disables `f` link hints
 ([`docs/keybindings.md`](docs/keybindings.md), "Vimium setup").
 
-### 6. Native pdf2htmlEX toolchain
-
-Conversion needs a natively-built arm64 pdf2htmlEX at
-`~/.local/opt/pdf2htmlEX/`, installed (copy-only) by
-`scripts/install-native-pdf2htmlex.sh` from the v2 build tree at
-`~/dev/external/pdf2htmlEX_v2/`. The binary links Homebrew dylibs and
-needs `/opt/homebrew/share/poppler` at runtime — these are not bundled.
-`scripts/pdf2html-convert.sh` and `scripts/index-directory.sh` fail fast
-with "native pdf2htmlEX not installed" if the binary is missing.
-**Docker is no longer needed for conversion** (ADR 0011).
-
 ### Network
 
-Port `7435`, bound to `127.0.0.1`. Deliberately different from the
-retired hardcoded script's `7433` so both can run side-by-side during
-the migration window.
+Port `7435`, bound to `127.0.0.1`.
 
-## Shortcuts (inside converted HTML)
+## Shortcuts (inside the viewer)
 
 | Key      | Action                                       |
 |----------|----------------------------------------------|
@@ -367,39 +276,35 @@ deliberately *don't* bind): [`docs/keybindings.md`](docs/keybindings.md).
 
 ## Testing
 
-Run the relevant existing automated checks and surface proof in
-[`docs/verification.md`](docs/verification.md). Comet/Raycast integration still needs its real
-host application. `scripts/doctor.sh` provides a read-only diagnosis of the daemon, asset
-symlink and native toolchain.
+Run the relevant automated checks and surface proof in
+[`docs/verification.md`](docs/verification.md): the daemon unit tests, the
+headless overlay, Vimium and extension checks (`scripts/verify-*.sh`), and
+the reader scorecard (`bench/reader/`). The real Chrome with the real
+Vimium, and Raycast, still need a manual look. `scripts/doctor.sh` gives a
+read-only diagnosis of the daemon, the launchd job and the cache dir.
 
-**Overlay-only changes** (most common): edit `assets/overlay*.js` and `assets/overlay.css`,
-⌘⇧R in an already-open converted tab. Symlink-served, no reconversion.
+**Overlay-only changes** (most common): edit `assets/overlay*.js` or
+`assets/overlay.css`, then ⌘⇧R in an open viewer tab. The daemon serves
+`/_assets/*` from the repo with revalidation on every load.
 
-**Script / injection changes**: `trash ~/.cache/pdf_viewer/<hash>/` to
-force re-conversion next run. The `<script src=…?v=<hash>>` query-string
-cache-buster is derived automatically by `scripts/inject-overlay.py`
-from a content hash of `assets/overlay*.js` and `assets/overlay.css`, so editing any overlay
-asset self-busts it — no manual version bump. Already-cached HTML with a
-stale `?v=` also self-corrects, since the daemon serves `/_assets/*`
-with an ETag and a short `max-age` that forces revalidation.
+**Reader markup changes**: bump `SHELL_VERSION` in `daemon/reader.py`, so
+cached shells are rebuilt, and restart the daemon
+(`launchctl kickstart -k gui/$UID/com.anders.pdf_viewer`).
 
 ## Further reading
 
-- [`CLAUDE.md`](CLAUDE.md) — build / debug / gotchas (also the
-  orientation doc Claude sessions are handed)
+- [`CLAUDE.md`](CLAUDE.md) — constraints and routing for agent sessions
+- [`docs/reader.md`](docs/reader.md) — the reader
 - [`docs/cache.md`](docs/cache.md) — cache layout, hash keys, URL
   normalization, failure modes
 - [`docs/ai-production.md`](docs/ai-production.md) — documentation
   ownership and Beads workflow for agent-driven work
 - [`docs/verification.md`](docs/verification.md) — browser, daemon, and
   manual verification loops for closing beads
-- [`docs/pins.md`](docs/pins.md) — pins / markers product intent and
-  open interaction questions
+- [`docs/pins.md`](docs/pins.md) — pins
 - [`docs/keybindings.md`](docs/keybindings.md) — full key + palette
   registry including Vimium conflicts
+- [`docs/observability.md`](docs/observability.md) — the open log
 - [`docs/non-goals.md`](docs/non-goals.md) — explicit scope boundaries
-- [`docs/pdf2htmlex-dom.md`](docs/pdf2htmlex-dom.md) — DOM conventions
-  of converted HTML
-- [`docs/reader.md`](docs/reader.md) — the reader engine
-- [`docs/adr/`](docs/adr/) — architectural decisions 0001–0014; the
+- [`docs/adr/`](docs/adr/) — architectural decisions 0001–0015; the
   index with each one's status is [`docs/adr/README.md`](docs/adr/README.md)

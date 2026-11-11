@@ -2,16 +2,16 @@
 
 A repeatable scorecard for the reader engine (PDFium rasters under a
 transparent, width-fitted text layer; `daemon/reader.py`) over the locally
-present corpus documents, comparable with the old engine's stored probe
-results (`bench/corpus/probe/`, pdf2htmlEX light HTML) for the same
-documents. It covers axes A1 (visual), A2 (text), A3 (time to view, partly)
+present corpus documents, comparable with the stored probe results of the
+retired pdf2htmlEX engine (`<corpus>/probe/<sha>.json`; the probe itself was
+removed with the engine, ADR 0015) for the same documents. It covers axes A1 (visual), A2 (text), A3 (time to view, partly)
 and A6 (reliability) of `docs/plans/hill-climb-week.md` §2.
 
 ## Run
 
 A daemon with the reader must be running (`/read` and `/r/<hash>/`). The
 default base is the dev daemon on port 7436; a private one can be started with
-`cd daemon && PDF_VIEWER_ENGINE=reader uv run main.py --port 7443` and passed as
+`cd daemon && PDF_VIEWER_CACHE_DIR=<scratch> uv run main.py --port 7443` and passed as
 `--base http://127.0.0.1:7443`.
 
 ```bash
@@ -26,7 +26,7 @@ Other options: `--limit N`, `--sha PREFIX` (repeatable), `--doc-timeout 300`
 for one page raster), `--include-existing` (see Cache hygiene). Only manifest
 rows whose PDF is in `<corpus>/files/` are selected; `--tier t1` includes t0.
 The run writes the JSON after every document, so an interrupted run keeps
-what it scored. Playwright is found as in `bench/corpus/probe/probe.py`.
+what it scored. Playwright is found as in `bench/corpus/probe/shared.py`.
 
 Files: `run.py` (driver, PEP 723 deps), `pdfium_ref.py` (PDFium reference, run
 as an isolated `python -I` child per call because corpus PDFs are untrusted),
@@ -107,7 +107,7 @@ kept.
 ### A1 visual (per page, `visual`)
 
 The old probe's metric, imported from `bench/corpus/probe/pdfium_worker.py`
-(`ink_compare`), with its thresholds imported from `probe.py`, so the numbers
+(`ink_compare`), with its thresholds imported from `bench/corpus/probe/shared.py`, so the numbers
 are those of the stored `visual-diff-high` class:
 
 - a pixel is ink when its luma is below 128; `extra` = screenshot ink with no

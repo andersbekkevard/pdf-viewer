@@ -2,13 +2,10 @@
 
 Routes:
     GET    /                    home page: the library, searchable (assets/home.html)
-    GET    /view?path=<local>   light HTML by default, canonical/PDF fallback
-    GET    /view?url=<remote>   light HTML by default, canonical/remote fallback
-    GET    /view-raw?<remote>   same as /view?url=, but preserves raw query strings
+    GET    /view?path=<local>   open a local PDF in the reader (also /read)
+    GET    /view?url=<remote>   open a remote PDF in the reader (also /read)
+    GET    /view-raw?<remote>   same as /view?url=, but preserves raw query strings (also /read-raw)
     GET    /view-file-raw?<file-url>  same as /view?path=, from a raw file:// URL
-    GET    /view-canonical?...  canonical HTML rollback route (also -raw)
-    GET    /view-light?...      explicit light HTML, canonical fallback (also -raw)
-    GET    /read?...            open any PDF in the reader, no conversion (also -raw)
     GET    /r/<hash>/           reader shell: PDFium rasters under transparent text
     GET    /r/<hash>/p/<n>/<w>.png  one page rendered at a device width
     GET    /r/<hash>/text/<k>.json  text and link markup of one range of pages
@@ -23,22 +20,23 @@ Routes:
     GET    /stats               visit totals + top 20 by count (hash → name enriched)
     GET    /stats/recent        raw visit timeline, most-recent first
     GET    /_assets/*           overlay.{css,js} from the repo assets dir
-    GET    /<hash>/<file>       cached pdf2htmlEX bundle (html + any sibling files)
+    GET    /<hash>/meta.json    title, author and page count of an entry
+    GET    /<hash>/<name>.html  address of a page converted by the retired engine: redirects to the reader
     GET    /healthz             liveness probe
     POST   /signal/fetch        ask the extension to fetch a source PDF with browser cookies
     PUT    /fetch/<id>          extension upload of those bytes (memory only)
-    GET    /fetch/<id>          convert-script collection of those bytes
+    GET    /fetch/<id>          collection of those bytes
     POST   /extension/open      extension claims a held reader open of a sign-in-gated URL
     PUT    /extension/open/<id> extension upload of that URL's bytes (or its fetch error)
     GET    /extension/open/<id> holding-page poll for where the tab goes next
     GET    /entry/<hash>/state  per-document position, marks and zoom (PUT .../state/<key>)
     DELETE /mapping/<hash>      drop the mapping row, rmtree the dir, forget visits and state
-    PUT    /entry/<hash>/name   rename a cache entry's HTML file (changes search name)
+    PUT    /entry/<hash>/name   rename a cache entry (changes its search name)
 
-The daemon never invokes Docker — conversion stays in the Raycast scripts
-(ADR 0004). Cache hits are O(hash + sendfile); content-hash lookups for
-local PDFs are memoized by (path, mtime_ns, size) so repeat requests on
-the same file don't re-hash.
+Nothing is converted: every page is built from the PDF on demand
+(daemon/reader.py, ADR 0014). Content-hash lookups for local PDFs are
+memoized by (path, mtime_ns, size) so repeat requests on the same file
+don't re-hash.
 
 Run:
     uv run --directory daemon main.py                          # dev
@@ -75,7 +73,6 @@ from catalog import (
     CacheCatalog,
     EntryNotFound,
     InvalidCatalogInput,
-    NameConflict,
     strip_passthrough,
     url_hash,
     with_passthrough,
@@ -109,20 +106,6 @@ app = FastAPI(title="pdf_viewer", version="0.1.0", lifespan=_lifespan)
 app.include_router(state_router)
 app.add_middleware(opens.OpenMiddleware, catalog=catalog)
 opens.configure_logging()
-
-
-def _prefer_reader() -> bool:
-    """Whether documents open in the reader (PDFium rasters, built on demand)
-    instead of pdf2htmlEX's converted HTML. The reader is the default;
-    PDF_VIEWER_ENGINE=pdf2htmlex is the rollback: converted entries then
-    serve their HTML and a cache miss falls back to the browser's viewer."""
-    return os.environ.get("PDF_VIEWER_ENGINE", "reader").strip().lower() != "pdf2htmlex"
-
-
-def _prefer_light_from_environment() -> bool:
-    """Prefer light HTML unless an explicit canonical rollback is requested."""
-    value = os.environ.get("PDF_VIEWER_PREFER_LIGHT", "")
-    return value.strip().lower() not in {"false", "0", "no", "off"}
 
 
 # -----------------------------------------------------------------------------
@@ -820,8 +803,6 @@ def extension_open(body: ExtensionOpenRequest):
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise HTTPException(400, "only http(s) URLs can be opened")
-    if not _prefer_reader():
-        return {"fetch": False}
     hash_ = url_hash(url)
     if catalog.is_disabled(hash_) or catalog.source_pdf(hash_) is not None:
         return {"fetch": False}
@@ -980,22 +961,17 @@ def healthz():
         "cache_dir": str(CACHE_DIR),
         "cache_exists": CACHE_DIR.is_dir(),
         "entries": entries,
-        # The extension installs its generic file:// rule only for the reader.
-        "engine": "reader" if _prefer_reader() else "pdf2htmlex",
+        # The only engine. Extensions before 0.4.2 read this field.
+        "engine": "reader",
     }
 
 
-# Three representation choices (environment preference, light, canonical),
-# each reachable as `?path=`/`?url=` or as a raw query string. The routes only
-# pick the representation; _view_query and _raw_url hold the shared rules.
-
-def _view_query(path: Optional[str], url: Optional[str], background: BackgroundTasks, *,
-                light: bool, reader_first: bool = False, base_url: Optional[str] = None):
+def _view_query(path: Optional[str], url: Optional[str], *, base_url: Optional[str] = None):
     if (path is None) == (url is None):
         raise HTTPException(400, "provide exactly one of: path, url")
     if path is not None:
-        return _view_path(path, background, light=light, reader_first=reader_first)
-    return _view_url(url, background, light=light, reader_first=reader_first, base_url=base_url)
+        return _view_path(path)
+    return _view_url(url, base_url=base_url)
 
 
 def _raw_url(request: Request) -> str:
@@ -1046,65 +1022,27 @@ def _raw_file_path(request: Request) -> str:
 
 
 @app.get("/view")
-def view(
-    background: BackgroundTasks,
-    path: Optional[str] = Query(None, description="absolute local path"),
-    url: Optional[str] = Query(None, description="http(s) URL"),
-    # Injected by FastAPI from the annotation; last so direct callers can omit it.
-    request: Request = None,  # type: ignore[assignment]
-):
-    return _view_query(path, url, background, light=_prefer_light_from_environment(),
-                       reader_first=_prefer_reader(),
-                       base_url=_base_url(request) if request else None)
-
-
 @app.get("/read")
-def read(
-    background: BackgroundTasks,
+def view(
     path: Optional[str] = Query(None, description="absolute local path"),
     url: Optional[str] = Query(None, description="http(s) URL"),
     # Injected by FastAPI from the annotation; last so direct callers can omit it.
     request: Request = None,  # type: ignore[assignment]
 ):
-    """Open any PDF in the reader, converted or not: a local file is read in
-    place, a remote one is downloaded once into its entry."""
-    return _view_query(path, url, background, light=True, reader_first=True,
-                       base_url=_base_url(request) if request else None)
-
-
-@app.get("/read-raw")
-def read_raw(request: Request, background: BackgroundTasks):
-    return _view_url(_raw_url(request), background, light=True, reader_first=True,
-                     base_url=_base_url(request))
-
-
-@app.get("/view-light")
-def view_light(
-    background: BackgroundTasks,
-    path: Optional[str] = Query(None, description="absolute local path"),
-    url: Optional[str] = Query(None, description="http(s) URL"),
-):
-    return _view_query(path, url, background, light=True)
-
-
-@app.get("/view-canonical")
-def view_canonical(
-    background: BackgroundTasks,
-    path: Optional[str] = Query(None, description="absolute local path"),
-    url: Optional[str] = Query(None, description="http(s) URL"),
-):
-    return _view_query(path, url, background, light=False)
+    """Open any PDF in the reader: a local file is read in place, a remote
+    one is downloaded once into its entry."""
+    return _view_query(path, url, base_url=_base_url(request) if request else None)
 
 
 @app.get("/view-raw")
-def view_raw(request: Request, background: BackgroundTasks):
+@app.get("/read-raw")
+def view_raw(request: Request):
     """Remote URL view route for extension redirects."""
-    return _view_url(_raw_url(request), background, light=_prefer_light_from_environment(),
-                     reader_first=_prefer_reader(), base_url=_base_url(request))
+    return _view_url(_raw_url(request), base_url=_base_url(request))
 
 
 @app.get("/view-file-raw")
-def view_file_raw(request: Request, background: BackgroundTasks):
+def view_file_raw(request: Request):
     """Local file view route for the extension's generic file:// rule."""
     path = pathlib.Path(_raw_file_path(request))
     previous = catalog.local_entry(path)
@@ -1115,18 +1053,7 @@ def view_file_raw(request: Request, background: BackgroundTasks):
         _queue_extension_sync_signal(previous, "local-alias")
         _queue_navigate_signal(str(request.url), path.as_uri())
         return Response("Opening local PDF in the native viewer…", media_type="text/plain")
-    return _view_path(str(path), background, light=_prefer_light_from_environment(),
-                      reader_first=_prefer_reader())
-
-
-@app.get("/view-light-raw")
-def view_light_raw(request: Request, background: BackgroundTasks):
-    return _view_url(_raw_url(request), background, light=True)
-
-
-@app.get("/view-canonical-raw")
-def view_canonical_raw(request: Request, background: BackgroundTasks):
-    return _view_url(_raw_url(request), background, light=False)
+    return _view_path(str(path))
 
 
 def _open_local_in_reader(pdf: pathlib.Path, hash_: str = ""):
@@ -1162,7 +1089,7 @@ def local_file_check(path: str, stamp: str = ""):
         return {"status": "missing", "stamp": None}
 
 
-def _view_path(path: str, background: BackgroundTasks, *, light: bool, reader_first: bool = False):
+def _view_path(path: str):
     try:
         p = pathlib.Path(catalog.local_path(pathlib.Path(path)))
         p.stat()
@@ -1171,63 +1098,34 @@ def _view_path(path: str, background: BackgroundTasks, *, light: bool, reader_fi
     if not p.is_file():
         raise HTTPException(400, f"not a regular file: {path}")
 
-    if reader_first:
-        previous = catalog.local_entry(p)
-        if not previous or not catalog.is_disabled(previous):
-            return _open_local_in_reader(p)
-    resolved = catalog.resolve_source(p, prefer_light=light)
-    opens.resolved(resolved)
-    if resolved.representation is not None:
-        if resolved.disabled:
-            return FileResponse(
-                p,
-                media_type="application/pdf",
-                filename=p.name,
-                content_disposition_type="inline",
-            )
-        background.add_task(visits.record, resolved.hash, "path")
-        return FileResponse(resolved.representation.selected, media_type="text/html; charset=utf-8")
-
-    # Cache miss. Chromium blocks http→file: redirects, so we can't 307 to
-    # file://. Stream the bytes as application/pdf — browser opens native
-    # viewer. User can then run Raycast convert to escalate into HTML.
-    return FileResponse(
-        p,
-        media_type="application/pdf",
-        filename=p.name,
-        content_disposition_type="inline",
-    )
+    previous = catalog.local_entry(p)
+    if previous and catalog.is_disabled(previous):
+        # Chromium blocks http→file: redirects, so a disabled entry's bytes
+        # are streamed as application/pdf for the browser's own viewer.
+        opens.resolved(catalog.resolve_source(p))
+        return FileResponse(p, media_type="application/pdf", filename=p.name,
+                            content_disposition_type="inline")
+    return _open_local_in_reader(p)
 
 
-def _view_url(url: str, background: BackgroundTasks, *, light: bool, reader_first: bool = False,
-              base_url: Optional[str] = None):
+def _view_url(url: str, *, base_url: Optional[str] = None):
     try:
-        resolved = catalog.resolve_source(url, prefer_light=light)
+        resolved = catalog.resolve_source(url)
     except InvalidCatalogInput as error:
         raise HTTPException(400, str(error)) from error
     opens.resolved(resolved)
-    if reader_first and not resolved.disabled:
-        if catalog.source_pdf(resolved.hash) is None:
-            # The daemon's own download, else the browser's bytes through the
-            # extension, else the browser's viewer and the relay.
-            return _open_through_browser(url, resolved.hash, resolved.source_ref, base_url)
-        elif resolved.hash not in catalog.mappings():
-            cached = catalog.source_pdf(resolved.hash)
-            catalog.register(resolved.hash, resolved.source_ref, cached.stem if cached else resolved.hash)
-        return RedirectResponse(f"/r/{resolved.hash}/", status_code=307)
-    if resolved.representation is not None:
-        if resolved.disabled:
-            return RedirectResponse(
-                with_passthrough(strip_passthrough(url)),
-                status_code=307,
-            )
-        background.add_task(visits.record, resolved.hash, "url")
-        return FileResponse(resolved.representation.selected, media_type="text/html; charset=utf-8")
-    # Cache miss: 307 to the original URL, but tag it with a marker so the
-    # browser extension's allow-rule short-circuits the redirect match —
-    # otherwise clicks on .pdf links would loop (ext redirects → daemon 307s
-    # → ext redirects → ...) until Chromium ERR_TOO_MANY_REDIRECTS.
-    return RedirectResponse(with_passthrough(url), status_code=307)
+    if resolved.disabled:
+        # The passthrough marker makes the extension's allow rule win, so the
+        # browser's own viewer opens the URL instead of looping back here.
+        return RedirectResponse(with_passthrough(strip_passthrough(url)), status_code=307)
+    cached = catalog.source_pdf(resolved.hash)
+    if cached is None:
+        # The daemon's own download, else the browser's bytes through the
+        # extension, else the browser's viewer and the relay.
+        return _open_through_browser(url, resolved.hash, resolved.source_ref, base_url)
+    if resolved.hash not in catalog.mappings():
+        catalog.register(resolved.hash, resolved.source_ref, cached.stem)
+    return RedirectResponse(f"/r/{resolved.hash}/", status_code=307)
 
 
 # -----------------------------------------------------------------------------
@@ -1444,7 +1342,7 @@ def _require_cached_entry(hash_: str) -> str:
         catalog.validate_hash(hash_)
     except InvalidCatalogInput as error:
         raise HTTPException(400, str(error)) from error
-    href = catalog.viewer_href(hash_, prefer_reader=_prefer_reader())
+    href = catalog.viewer_href(hash_)
     if href is None:
         raise HTTPException(404, f"no cached PDF viewer entry for hash {hash_}")
     return href
@@ -1455,7 +1353,12 @@ def _base_url(request: Request) -> str:
 
 
 def _viewer_url_for_hash(hash_: str, request: Request) -> str:
-    return f"{_base_url(request)}{urllib.parse.quote(_require_cached_entry(hash_))}"
+    """Where a tab reads the entry. Always on the `localhost` origin, the one
+    the extension's redirects use: the extension itself calls the daemon on
+    127.0.0.1, and a viewer opened there is a second origin with its own
+    localStorage (preferences) and, in Chrome, without the overlay's fonts."""
+    base = _base_url(request).replace("://127.0.0.1", "://localhost", 1)
+    return f"{base}{urllib.parse.quote(_require_cached_entry(hash_), safe='/?=&%')}"
 
 
 def _file_url_for_path(path: str) -> str:
@@ -1616,13 +1519,12 @@ class RenameRequest(BaseModel):
 
 @app.put("/entry/{hash_}/name")
 def rename_entry(hash_: str, body: RenameRequest):
-    """Rename a cache entry's HTML file so its search name (`html.stem`)
-    becomes `body.name`. Updates mappings.tsv and rewrites the HTML
-    `<title>` so a fresh load shows the new name in the tab.
+    """Rename a cache entry: its search name becomes `body.name`, kept in
+    the entry's manifest. No-op (200 with renamed=False) when the name is
+    unchanged.
 
     Hash is anchored to ^[a-f0-9]{6,32}$ so all path joins stay inside
-    CACHE_DIR. 409 if another file in the entry already uses the target
-    name; no-op (200 with renamed=False) when the name is unchanged.
+    CACHE_DIR.
     """
     try:
         return catalog.rename(hash_, body.name)
@@ -1630,8 +1532,6 @@ def rename_entry(hash_: str, body: RenameRequest):
         raise HTTPException(400, str(error)) from error
     except EntryNotFound as error:
         raise HTTPException(404, str(error)) from error
-    except NameConflict as error:
-        raise HTTPException(409, str(error)) from error
 
 
 @app.get("/")
@@ -1652,8 +1552,8 @@ def library(view: str = "", current: str = ""):
     `current` hash, the previous document (catalog.finder_entries).
     """
     if view == "finder":
-        return catalog.finder_entries(state.positions(), current, prefer_reader=_prefer_reader())
-    return catalog.list_entries(prefer_reader=_prefer_reader())
+        return catalog.finder_entries(state.positions(), current)
+    return catalog.list_entries()
 
 
 @app.get("/stats")
@@ -1696,6 +1596,26 @@ def stats_recent(limit: int = Query(100, ge=1, le=1000)):
     return rows
 
 
+@app.get("/{hash_}/meta.json")
+def entry_meta(hash_: str):
+    """Title, author and page count for the sidebar header."""
+    try:
+        catalog.validate_hash(hash_)
+    except InvalidCatalogInput as error:
+        raise HTTPException(400, str(error)) from error
+    path = CACHE_DIR / hash_ / "meta.json"
+    if not path.is_file():
+        raise HTTPException(404, "no metadata for this entry")
+    return FileResponse(path, media_type="application/json")
+
+
+@app.get("/{hash_}/{name}.html")
+def converted_page(hash_: str, name: str):
+    """Addresses of pages converted by the retired pdf2htmlEX engine (old
+    tabs, bookmarks, history) open the same entry in the reader."""
+    return RedirectResponse(urllib.parse.quote(_require_cached_entry(hash_), safe='/?=&%'), status_code=307)
+
+
 # -----------------------------------------------------------------------------
 # Static mounts. Registered after routes so /view, /healthz take precedence.
 # -----------------------------------------------------------------------------
@@ -1715,11 +1635,6 @@ class _RevalidatingStatic(StaticFiles):
 
 
 app.mount("/_assets", _RevalidatingStatic(directory=ASSETS_DIR), name="assets")
-
-# The whole cache. Any /<hash>/<file> request (the URL pdf2html-convert.sh
-# navigates Comet to) falls through to this mount. `html=False` prevents
-# index.html auto-serve at the root.
-app.mount("/", StaticFiles(directory=CACHE_DIR, html=False), name="cache")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # ADR 0010 — Paint-Safe Light HTML With External Rasters
 
-**Status**: Accepted
+**Status**: Superseded by [ADR 0015](0015-retire-pdf2htmlex.md) (pdf2htmlEX retired 2026-11-11)
 **Date**: 2026-05-21 (accepted 2026-07-12)
 
 ## Context

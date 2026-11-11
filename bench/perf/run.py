@@ -16,7 +16,7 @@ Usage:
         [--docs SHA_PREFIX,...] [--repeat 5] [--base http://127.0.0.1:7442] [--headed]
     python3 bench/perf/compare.py /tmp/pdfv-perf/results/perf.json
 
-The reader needs a daemon with PDF_VIEWER_ENGINE=reader on --base, with its
+The reader needs a daemon on --base, with its
 own scratch cache (see README). Trials run strictly one at a time.
 
 Privacy: corpus documents may be private. The JSON holds numbers, sha256
@@ -51,7 +51,7 @@ DRIVE = HERE / "drive.cjs"
 WORK = pathlib.Path("~/.cache/pdf_viewer-bench/perf-work").expanduser()   # outside the repository
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(REPO / "bench" / "corpus" / "probe"))
-import probe as oldprobe  # noqa: E402  (corpus location and Playwright lookup)
+import shared  # noqa: E402  (corpus location, Playwright lookup and thresholds)
 
 BENCH_VERSION = "2"
 
@@ -515,12 +515,12 @@ def main() -> int:
         if health.get("engine") != "reader" or cache == owner or owner in cache.parents:
             print(f"run: the daemon must run the reader on a scratch cache, got {health}", file=sys.stderr)
             return 2
-    node_path = oldprobe.playwright_node_path()
+    node_path = shared.playwright_node_path()
     if not node_path:
         print("run: no cached Playwright found", file=sys.stderr)
         return 2
     chromium = find_chromium()
-    corpus = oldprobe.corpus_dir(args.corpus)
+    corpus = shared.corpus_dir(args.corpus)
     rows = {}
     for line in (corpus / "manifest.jsonl").read_text().splitlines():
         if line.strip():

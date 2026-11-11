@@ -27,7 +27,7 @@ node_modules/
 .env
 .env.local
 
-# Browser-generated extension metadata (Comet compiles rules on load)
+# Browser-generated extension metadata (Chromium compiles rules on load)
 extension/_metadata/
 
 # Local scratch / one-off scripts

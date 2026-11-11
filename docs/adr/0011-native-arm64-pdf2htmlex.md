@@ -1,6 +1,6 @@
 # ADR 0011 — Native arm64 pdf2htmlEX (no Docker for conversion)
 
-**Status**: Accepted
+**Status**: Superseded by [ADR 0015](0015-retire-pdf2htmlex.md) (pdf2htmlEX retired 2026-11-11)
 **Date**: 2026-06-12
 **Supersedes**: the Docker-compute half of [ADR 0004](0004-on-demand-docker-and-daemon-split.md)
 

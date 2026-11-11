@@ -14,8 +14,8 @@
 //   Esc      clear highlights; if the bar is still open, close that too
 //
 // Highlights use the CSS Custom Highlight API so we don't wrap nodes inside
-// pdf2htmlEX's positioned .t spans (whose letter- and word-spacing utility
-// classes DOM surgery would visibly break).
+// the positioned .t spans (whose fitted widths DOM surgery would visibly
+// break).
 import { removeOverlay } from './overlay-dom.js';
 
 export function createSearch(core) {
@@ -248,7 +248,7 @@ export function createSearch(core) {
         if (!q) return;
         if (!window.CSS || !CSS.highlights || typeof Highlight === 'undefined') {
             // No Highlight API support → bar still works but nothing paints.
-            // Acceptable degradation; Comet is Chromium so this shouldn't fire.
+            // Acceptable degradation; Chromium has the API, so this shouldn't fire.
             return;
         }
 
@@ -261,10 +261,8 @@ export function createSearch(core) {
         var pages = documentModel.visiblePages();
         var inactive = new Highlight();
 
-        // Per-line flat-text search. pdf2htmlEX splits words across kerning
-        // spans (`sho<span class="_ _7"></span>ws`) and wraps every inter-word
-        // space in a spacer span — so a line's text is spread across many
-        // sibling text nodes. A naive per-text-node `indexOf` would miss any
+        // Per-line flat-text search. A line's text can be spread across
+        // several sibling text nodes. A naive per-text-node `indexOf` would miss any
         // query that crosses a span (multi-word, or even one word like
         // "shows" cut by a kerning gap). We flatten each `.t` into one string
         // with an offset map back to (textNode, localOffset), search the flat

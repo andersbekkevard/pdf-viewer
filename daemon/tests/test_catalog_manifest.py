@@ -71,7 +71,6 @@ class CatalogManifestTest(unittest.TestCase):
         entry = self.root / hash_
         entry.mkdir(exist_ok=True)
         canonical = entry / f"{name}.html"
-        canonical.write_text(f"<title>{name}</title>", encoding="utf-8")
         with self.catalog.mappings_path.open("a", encoding="utf-8") as mappings:
             mappings.write(f"2026-01-01\t{source}\t{hash_}\t{canonical}\n")
         return entry, canonical
@@ -177,12 +176,12 @@ class CatalogManifestTest(unittest.TestCase):
 
     # ---------------------------------------------------------- entry_name
 
-    def test_entry_name_prefers_canonical_html_stem(self):
+    def test_entry_name_of_a_converted_row_is_its_html_stem(self):
         self.add_converted(LOCAL_HASH, "Canon", "/x.pdf")
         self.catalog.register(LOCAL_HASH, "/x.pdf", "Manifest Name")
         self.assertEqual(self.catalog.entry_name(LOCAL_HASH), "Canon")
 
-    def test_entry_name_uses_manifest_name_without_converted_html(self):
+    def test_entry_name_uses_manifest_name_without_a_row(self):
         self.catalog.register(LOCAL_HASH, "/some/Source File.pdf", "Pretty Name")
         self.assertEqual(self.catalog.entry_name(LOCAL_HASH), "Pretty Name")
 
@@ -197,30 +196,26 @@ class CatalogManifestTest(unittest.TestCase):
     def test_viewer_href_for_manifest_only_entry_with_source_is_reader(self):
         self.catalog.register(LOCAL_HASH, str(self.write_pdf()), "Local Doc")
         self.assertEqual(self.catalog.viewer_href(LOCAL_HASH), f"/r/{LOCAL_HASH}/")
-        self.assertEqual(self.catalog.viewer_href(LOCAL_HASH, prefer_reader=True), f"/r/{LOCAL_HASH}/")
 
-    def test_viewer_href_for_converted_entry_is_html_path_unless_reader_preferred(self):
+    def test_viewer_href_for_converted_entry_is_the_reader(self):
         pdf = self.write_pdf("My Doc.pdf")
-        entry, _ = self.add_converted(LOCAL_HASH, "My Doc", str(pdf))
-        (entry / "My Doc.light.html").write_text("<title>My Doc</title>", encoding="utf-8")
-        self.assertEqual(self.catalog.viewer_href(LOCAL_HASH, prefer_reader=False),
-                         f"/{LOCAL_HASH}/My Doc.light.html")
-        self.assertEqual(self.catalog.viewer_href(LOCAL_HASH, prefer_reader=True), f"/r/{LOCAL_HASH}/")
+        self.add_converted(LOCAL_HASH, "My Doc", str(pdf))
+        self.assertEqual(self.catalog.viewer_href(LOCAL_HASH), f"/r/{LOCAL_HASH}/")
 
-    def test_viewer_href_prefers_reader_only_when_source_exists(self):
+    def test_viewer_href_is_none_when_a_local_source_is_gone(self):
         self.add_converted(LOCAL_HASH, "No Source", "/gone/missing.pdf")
-        self.assertEqual(self.catalog.viewer_href(LOCAL_HASH, prefer_reader=True),
-                         f"/{LOCAL_HASH}/No Source.html")
+        self.assertIsNone(self.catalog.viewer_href(LOCAL_HASH))
 
     def test_viewer_href_is_none_for_unknown_or_invalid_hash(self):
         self.assertIsNone(self.catalog.viewer_href(THIRD_HASH))
-        self.assertIsNone(self.catalog.viewer_href(THIRD_HASH, prefer_reader=True))
         self.assertIsNone(self.catalog.viewer_href("../escape"))
 
-    def test_manifest_only_entry_without_any_source_has_no_href(self):
+    def test_url_entry_without_a_stored_pdf_downloads_again(self):
         self.catalog.register(REMOTE_HASH, "https://example.com/a.pdf", "Remote")
-        self.assertIsNone(self.catalog.viewer_href(REMOTE_HASH))
-        self.assertNotIn(REMOTE_HASH, [entry["hash"] for entry in self.catalog.list_entries()])
+        href = "/read?url=https%3A%2F%2Fexample.com%2Fa.pdf"
+        self.assertEqual(self.catalog.viewer_href(REMOTE_HASH), href)
+        entry = {entry["hash"]: entry for entry in self.catalog.list_entries()}[REMOTE_HASH]
+        self.assertEqual((entry["href"], entry["reader_href"], entry["thumb_href"]), (href, None, None))
 
     # --------------------------------------------------------- list / ext
 
@@ -230,7 +225,6 @@ class CatalogManifestTest(unittest.TestCase):
         entries = {entry["hash"]: entry for entry in self.catalog.list_entries()}
         entry = entries[LOCAL_HASH]
         self.assertEqual(entry["href"], f"/r/{LOCAL_HASH}/")
-        self.assertIsNone(entry["canonical_href"])
         self.assertEqual(entry["reader_href"], f"/r/{LOCAL_HASH}/")
         self.assertEqual(entry["name"], "Manifest Only")
         self.assertEqual(entry["source_ref"], str(pdf))

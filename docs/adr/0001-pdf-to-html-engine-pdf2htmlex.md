@@ -1,6 +1,6 @@
 # ADR 0001 — pdf2htmlEX as the PDF-to-HTML rendering engine
 
-**Status**: Accepted
+**Status**: Superseded by [ADR 0015](0015-retire-pdf2htmlex.md) (pdf2htmlEX retired 2026-11-11)
 **Date**: 2026-04-21
 
 ## Context

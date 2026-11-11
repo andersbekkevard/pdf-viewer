@@ -181,7 +181,6 @@ export function createOcr(core) {
     }
 
     function mount() {
-        if (!documentModel.isReader()) return;
         var marked = document.querySelectorAll('.pf[data-reader-ocr="pending"]');
 
         var hash = entryHash();

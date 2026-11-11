@@ -1,8 +1,8 @@
 // Per-document state: position, marks and zoom, shared through the daemon.
 //
 // localStorage is per origin and per browser, so on its own a document's
-// state differs between localhost and 127.0.0.1, and between Chrome and
-// Comet. The daemon keeps the shared copy (daemon/state.py); localStorage
+// state differs between localhost and 127.0.0.1, and between browser
+// profiles. The daemon keeps the shared copy (daemon/state.py); localStorage
 // stays the synchronous copy that first paint and resume read.
 //
 //   get(key)          synchronous read of the in-memory copy

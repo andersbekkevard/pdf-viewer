@@ -129,7 +129,7 @@ have guards, not invented failing behavior or speculative product changes.
 ## Limits and handoff
 
 The native Cmd-F bar is not available in headless Chromium. `window.find` and
-repeated selection-event handling are established, but real Cmd-F Enter, Comet,
+repeated selection-event handling are established, but real Cmd-F Enter,
 the owner's Vimium settings, Raycast, drag-and-drop of an existing selection,
 and arbitrary PDF producers remain unproven. Upright margin notes are not
 confidently classified by the prototype; only rotated stamps are deferred. The RTL comparison replaces the changed overlay module on the same stream-order

@@ -2,7 +2,7 @@
 
 The overlay keeps a document's reading position, marks and zoom here so
 they follow the document across browser origins (localhost vs 127.0.0.1)
-and browsers (Chrome, Comet). localStorage stays the synchronous first-paint
+and browser profiles. localStorage stays the synchronous first-paint
 copy; this store is the shared one (docs/cache.md, "Per-document state").
 
 One row per (hash, key) holding a JSON value and an updated-at timestamp in

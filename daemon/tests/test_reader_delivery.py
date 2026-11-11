@@ -16,7 +16,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from fastapi import BackgroundTasks, HTTPException
+from fastapi import HTTPException
 from starlette.requests import Request
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -193,7 +193,7 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(main._start_relay(self.hash, TAB_URL, SOURCE, BASE))
         with patch.object(sources, "download") as download:
             response = await asyncio.to_thread(
-                main._view_url, SOURCE, BackgroundTasks(), light=True, reader_first=True, base_url=BASE)
+                main._view_url, SOURCE, base_url=BASE)
         download.assert_not_called()
         self.assertEqual(response.headers["location"], TAB_URL)
         await asyncio.sleep(0.05)
@@ -213,7 +213,7 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         with failing:
             # Sync routes run in a worker thread; the relay must land on the loop.
             response = await asyncio.to_thread(
-                main._view_url, SOURCE, BackgroundTasks(), light=True, reader_first=True, base_url=BASE)
+                main._view_url, SOURCE, base_url=BASE)
         self.assertEqual(response.status_code, 307)
         self.assertEqual(response.headers["location"], TAB_URL)
         for _ in range(100):
@@ -225,18 +225,10 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         # A later plain click on the same link finds the stored source.
         with patch.object(sources, "download", side_effect=AssertionError("no download")):
             again = await asyncio.to_thread(
-                main._view_url, SOURCE, BackgroundTasks(), light=True, reader_first=True, base_url=BASE)
+                main._view_url, SOURCE, base_url=BASE)
         self.assertEqual(again.headers["location"], f"/r/{self.hash}/")
         self.assertEqual(main._relays, {})
 
-    async def test_default_engine_route_never_relays(self):
-        with patch.object(sources, "download") as download:
-            response = await asyncio.to_thread(
-                main._view_url, SOURCE, BackgroundTasks(), light=True, reader_first=False, base_url=BASE)
-        download.assert_not_called()
-        self.assertEqual(response.headers["location"], TAB_URL)
-        await asyncio.sleep(0.05)
-        self.assertEqual(main._relays, {})
 
     async def test_signal_queued_from_worker_thread_wakes_pollers(self):
         waiter = asyncio.create_task(main.signal_navigate_wait(timeout=5.0, since=0))
@@ -277,33 +269,22 @@ class RawFileRouteTests(unittest.TestCase):
         self.rejects(b"file:///tmp/%FF.pdf")
         self.rejects("file:///tmp/ø.pdf".encode())
 
-    def test_route_opens_the_reader_in_reader_mode(self):
+    def test_route_opens_the_reader(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp) / "cache"
             pdf = pathlib.Path(tmp) / "My Notes.pdf"
             from test_reader import LINKS_PDF
             pdf.write_bytes(LINKS_PDF)
             query = pdf.resolve().as_uri().encode()
-            with patch.object(main, "catalog", CacheCatalog(root)), \
-                    patch.dict("os.environ", {"PDF_VIEWER_ENGINE": "reader"}):
-                response = main.view_file_raw(raw_request(query), BackgroundTasks())
+            with patch.object(main, "catalog", CacheCatalog(root)):
+                response = main.view_file_raw(raw_request(query))
                 self.assertEqual(response.status_code, 307)
                 self.assertRegex(response.headers["location"], r"^/r/[a-f0-9]{16}/\?local=")
-            with patch.object(main, "catalog", CacheCatalog(root)), \
-                    patch.dict("os.environ", {"PDF_VIEWER_ENGINE": "pdf2htmlex"}):
-                response = main.view_file_raw(raw_request(query), BackgroundTasks())
-                self.assertEqual(response.media_type, "application/pdf")
 
 
 class EngineAndSaveTests(unittest.TestCase):
     def test_healthz_reports_engine(self):
-        with patch.dict("os.environ", {"PDF_VIEWER_ENGINE": "reader"}):
-            self.assertEqual(main.healthz()["engine"], "reader")
-        with patch.dict("os.environ", {}, clear=False) as env:
-            env.pop("PDF_VIEWER_ENGINE", None)
-            self.assertEqual(main.healthz()["engine"], "reader")
-        with patch.dict("os.environ", {"PDF_VIEWER_ENGINE": "pdf2htmlex"}):
-            self.assertEqual(main.healthz()["engine"], "pdf2htmlex")
+        self.assertEqual(main.healthz()["engine"], "reader")
 
     def test_save_checks_bytes_and_names_from_disposition(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -110,7 +110,7 @@ export function createScrollOff(core) {
                 var sel = document.getSelection();
                 var root = documentModel.container();
                 if (!root || !focusInPage(sel)) return;
-                // The focus end's *visual* rect reflects pdf2htmlEX's
+                // The focus end's *visual* rect reflects the
                 // transformed text; Element.scrollIntoView uses layout rects
                 // and lands in the wrong place here.
                 var r = document.createRange();

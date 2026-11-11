@@ -95,7 +95,6 @@ export function createLinks(core) {
     }
 
     function mount() {
-        if (!documentModel.isReader()) return;
         root = documentModel.container();
         if (!root) return;
         root.addEventListener('click', onClick, true);

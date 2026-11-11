@@ -3,10 +3,10 @@
  * Overlay behavior proof against a real cached document.
  *
  * Usage: verify-overlay.cjs <viewer-url-or-path> [--base URL] [--only <group,...>]
- *   e.g. /7319a537e6c3b9da/kompendium.light.html
+ *   e.g. http://127.0.0.1:7441/r/<hash>/
  *
  * Groups (all by default):
- *   geometry    zoom lives on pages; Vimium-sized steps; pdf2htmlEX links;
+ *   geometry    zoom lives on pages; Vimium-sized steps; link destinations;
  *               zoom changes keep the reading position; sidebar shift
  *   navigation  page jumps land the page top 8 px below the viewport top;
  *               outline jumps land their destination at the viewport top;
@@ -21,7 +21,7 @@
  *   paint       (reader) after jumps, history and pins, on-screen pages paint their raster
  *
  * The document should have an outline and internal links. This is a
- * supplement to the real Comet + Vimium check, not a replacement: synthetic
+ * supplement to the real Vimium check (scripts/verify-vimium.sh), not a replacement: synthetic
  * keys reach the page, but Vimium itself is not loaded.
  */
 'use strict';
@@ -102,8 +102,8 @@ function installProbe() {
       const pf = this.page(n);
       pc.scrollTop += this.pageTop(pf) + (frac || 0) * pf.getBoundingClientRect().height;
     },
-    // Screen y (relative to the viewport top) of a pdf2htmlEX link's XYZ
-    // destination, or null when it has none.
+    // Screen y (relative to the viewport top) of a link's destination, or
+    // null when it has none.
     destY(a) {
       const reader = a.getAttribute('data-reader-dest');
       if (reader) {
@@ -112,22 +112,7 @@ function installProbe() {
         return {page: pf.id, y: r.top + d[3] * r.height / parseFloat(pf.style.height) - pc.getBoundingClientRect().top,
           atEnd: pc.scrollTop >= pc.scrollHeight - pc.clientHeight - 1};
       }
-      const v = window.pdf2htmlEX.defaultViewer;
-      let dest;
-      try { dest = JSON.parse(a.getAttribute('data-dest-detail')); } catch (e) { return null; }
-      if (!Array.isArray(dest) || dest[1] !== 'XYZ' || typeof dest[3] !== 'number') return null;
-      const idx = v.page_map[dest[0]];
-      if (idx === undefined) return null;
-      const pg = v.pages[idx];
-      const r = pg.page.getBoundingClientRect();
-      const toScreen = r.height / pg.page.offsetHeight;   // page-local px -> screen px
-      const x = dest[2] === null ? 0 : dest[2];
-      const localY = pg.height() - (pg.ctm[1] * x + pg.ctm[3] * dest[3] + pg.ctm[5]);
-      return {
-        page: pg.page.id,
-        y: r.top + localY * toScreen - pc.getBoundingClientRect().top,
-        atEnd: pc.scrollTop >= pc.scrollHeight - pc.clientHeight - 1,
-      };
+      return null;
     },
     outlineLinks() { return Array.from(document.querySelectorAll('#outline a.l[data-dest-detail], #outline a.l[data-reader-dest]')); },
     activeOutline() { return Array.from(document.querySelectorAll('#outline a.pdf2html-active')); },
@@ -173,7 +158,7 @@ async function main() {
     const resp = await page.goto(URL, { waitUntil: 'load', timeout: 60000 });
     if (!resp || !resp.ok()) throw new Error(`viewer did not load: ${URL}`);
     await page.waitForSelector('#pdf2html-pageno-current', { state: 'attached', timeout: 30000 });
-    await page.waitForFunction(() => (document.querySelector('[data-reader-raster]') || (window.pdf2htmlEX && window.pdf2htmlEX.defaultViewer))
+    await page.waitForFunction(() => document.querySelector('[data-reader-raster]')
       && document.getElementById('page-container').style.getPropertyValue('--pdf2html-zoom'),
       null, { timeout: 30000, polling: 100 });
     reader = await page.evaluate(() => !!document.querySelector('[data-reader-raster]'));
@@ -228,7 +213,7 @@ async function main() {
       record('[reader] first raster is ready', true);
     }
     record('native find works', await probe(() => window.find('heading')));
-    if (!reader) record('[pdf2htmlEX] render loop stopped', await probe(() => window.pdf2htmlEX.defaultViewer.render_timer === null));
+
   }
 
   if (run('interaction')) {
@@ -365,12 +350,11 @@ async function main() {
     await probe(() => window.__probe.scrollToPage(4, 0.6));
     await page.waitForTimeout(200);
     const current = await probe(() => ({
-      runtime: window.pdf2htmlEX ? window.pdf2htmlEX.defaultViewer.cur_page_idx + 1 : null,
       overlap: window.__probe.mostVisible(),
       counter: +document.getElementById('pdf2html-pageno-current').textContent,
     }));
-    record(reader ? '[reader] counter matches viewport overlap' : '[pdf2htmlEX] current page matches viewport overlap', (reader ? current.counter : current.runtime) === current.overlap,
-      `runtime=${current.runtime}, overlap=${current.overlap}`);
+    record('[reader] counter matches viewport overlap', current.counter === current.overlap,
+      `counter=${current.counter}, overlap=${current.overlap}`);
 
     const zoomCase = async (label, act) => {
       await probe(() => window.__probe.scrollToPage(5, 0.37));
@@ -388,10 +372,10 @@ async function main() {
     record(':zoom 1.2 applies the zoom', near(await probe(() => window.__probe.zoomVar()), 1.2, 0.001));
     await zoomCase(':zoom auto', () => palette('zoom auto'));
     const autoZoom = await probe(() => window.__probe.zoomVar());
-    await zoomCase('Cmd+= (page zoom; pdf2htmlEX also keeps its private scale at 1)', async () => { await blurToDocument(); await page.keyboard.press('Meta+Equal'); });
-    const plus = await probe(() => ({ z: window.__probe.zoomVar(), scale: (window.pdf2htmlEX ? window.pdf2htmlEX.defaultViewer.scale : 1) }));
-    record('Cmd+= raises the one page zoom', plus.z > autoZoom + 0.01 && plus.scale === 1,
-      `zoom ${autoZoom.toFixed(3)} -> ${plus.z.toFixed(3)}, pdf2htmlEX scale ${plus.scale}`);
+    await zoomCase('Cmd+= (page zoom)', async () => { await blurToDocument(); await page.keyboard.press('Meta+Equal'); });
+    const plus = await probe(() => ({ z: window.__probe.zoomVar() }));
+    record('Cmd+= raises the one page zoom', plus.z > autoZoom + 0.01,
+      `zoom ${autoZoom.toFixed(3)} -> ${plus.z.toFixed(3)}`);
     await zoomCase('Cmd+0 (back to auto-fit)', async () => { await page.keyboard.press('Meta+Digit0'); });
     record('Cmd+0 restores auto-fit', near(await probe(() => window.__probe.zoomVar()), autoZoom, 0.001));
     await zoomCase('window resize (auto)', () => page.setViewportSize({ width: 1100, height: 1000 }));
@@ -671,7 +655,7 @@ async function main() {
       const a = p.outlineLinks().find((l) => /Discussion/.test(l.textContent));
       const d = a && p.destY(a);
       const below = document.querySelector('.pdf2html-finder').getBoundingClientRect().bottom - p.pc.getBoundingClientRect().top + 16;
-      // pdf2htmlEX destinations preview at their page top (overlay-quickopen.js).
+      // A destination without a point previews at its page top (overlay-quickopen.js).
       const y = a && a.hasAttribute('data-reader-dest') ? d && d.y : p.pageTop(p.page(parseInt(a.getAttribute('href').slice(3), 16)));
       return a && { y, below, atEnd: d && d.atEnd };
     });

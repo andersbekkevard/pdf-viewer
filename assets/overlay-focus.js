@@ -47,7 +47,7 @@ export function createFocusRouting(core) {
         try { el.focus({ preventScroll: true }); } catch (e) { try { el.focus(); } catch (e2) {} }
         dispatchActivation(el);
     }
-    // Handing j/k back to the PDF. The synthetic click can make pdf2htmlEX's
+    // Handing j/k back to the PDF. The synthetic click can make the
     // text layer materialize a tiny selection range; clear it immediately.
     function activateMain() {
         setScrollFocus('main');

@@ -1,13 +1,10 @@
 # Plan: one week of hill-climbing the viewer
 
-**Status**: In progress (2026-11-10). The raster-plus-transparent-text design
-(§4) is built behind `/read` and `/r/<hash>/` and passed the §4 proofs in
-headless Chromium; see ADR 0014 and `bench/reader/`. Not done: the
-native-viewer baseline, latency and memory axes (A4, A5), the Vimium journeys
-(A9), and the switch of the default engine, which waits for Anders' check in
-Comet.
-**Date**: 2026-10-20
-**Audience**: Anders, and the autonomous agent that runs the week
+**Status**: Closed (2026-11-11). The raster-plus-transparent-text design (§4)
+became the reader (ADR 0014), then the default engine, and pdf2htmlEX was
+retired (ADR 0015). The text below is the plan as written, with pdf2htmlEX as
+the engine being measured; it is kept as history. Open follow-ups are beads
+under `pdfv-4ye` (zoom sharpness, memory) and `pdfv-yg1.18` (reading order).
 
 This plan defines what "better" means for the viewer, how to measure it, which
 structural change is most likely to move every measure at once, and how to run

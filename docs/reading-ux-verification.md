@@ -40,11 +40,11 @@ git show bc4c517:assets/overlay-sidebar.js > /tmp/pdfv-sidebar-baseline.js
 mkdir -p /tmp/pdfv-reading-shots
 PDFV_PORT=7448 PDFV_SCREENSHOTS=/tmp/pdfv-reading-shots \
   PDFV_BASELINE_SIDEBAR=/tmp/pdfv-sidebar-baseline.js \
-  scripts/verify-overlay.sh --reader
+  scripts/verify-overlay.sh
 # PASS 97/97 checks.
 
 PDFV_PORT=7448 PDFV_SCREENSHOTS=/tmp/pdfv-reading-shots \
-  scripts/verify-overlay.sh --reader --only pins
+  scripts/verify-overlay.sh --only pins
 # PASS 10/10; retakes Pins/empty screenshots at the pin location.
 
 git diff --check
@@ -89,7 +89,7 @@ Within `overlay-commands.js`, only the command table and cheatsheet changed;
 no finder implementation changes. The existing pin command was necessarily
 renamed to avoid two meanings for `:pin`.
 
-Real Comet/owner profile, physical keys and legacy pdf2htmlEX were not tested.
+The owner's real Chrome profile and physical keys were not tested.
 OCR notices and current toasts are passive status messages with no actions;
 they intentionally do not produce hints. Existing harness coverage proves hints
 for native PDF links and activation of internal destinations; external navigation

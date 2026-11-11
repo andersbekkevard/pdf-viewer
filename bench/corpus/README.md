@@ -91,6 +91,17 @@ Written by `ingest.py`, one JSON object per unique PDF:
 
 ## Probe
 
+> **Removed 2026-11-11.** The probe scored the pdf2htmlEX engine, which is
+> retired ([ADR 0015](../../docs/adr/0015-retire-pdf2htmlex.md)).
+> `probe/probe.py`, `convert.sh`, `pdf2htmlex-range.sh`, `shoot.cjs`,
+> `summary.py` and `tiers.py` are no longer in the repo. Its stored results
+> (`<corpus>/probe/<sha>.json`) and the tiers it assigned in `manifest.jsonl`
+> remain as a fixed baseline, read by `bench/reader/`. What is left in
+> `probe/`: `pdfium_worker.py` (the PDFium reference renderer and ink
+> comparison) and `shared.py` (corpus location, Playwright lookup,
+> thresholds). The description below records how the stored results were
+> produced.
+
 `probe/` runs each PDF through both pipelines and records failures:
 
 - **current viewer**: native pdf2htmlEX conversion and the light build into a

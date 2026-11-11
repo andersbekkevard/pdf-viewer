@@ -77,7 +77,7 @@ export function createTextInteraction(core) {
     }
 
     // --------------------------------------------------------------- extraction
-    // Each pdf2htmlEX visual line is a `.t`; documentModel.pageText joins them
+    // Each visual line is a `.t`; documentModel.pageText joins them
     // with '\n' to keep the line structure that textContent would collapse.
     // Offscreen pages keep their DOM (content-visibility), so this reads the
     // whole document. A reader document may still be loading text: wait for

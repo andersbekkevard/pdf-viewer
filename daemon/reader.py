@@ -2,7 +2,7 @@
 
 A reader page is the DOM the overlay already understands (`#page-container`
 of `.pf` frames, `.pc`, `img.bi`, `.t` lines, `#outline`), built straight from
-the PDF instead of converted by pdf2htmlEX:
+the PDF:
 
 - pixels come from PDFium at the device width the browser asks for, so text,
   figures and math are as sharp as in Chrome's own viewer;
@@ -543,8 +543,9 @@ class Reader:
             self.shell(hash_, pdf, title)
 
     def _store_meta(self, hash_: str, pdf: pathlib.Path, task) -> None:
-        """The sidebar header reads `<hash>/meta.json`. Converted entries get
-        it from pdfinfo; an entry opened on demand gets PDFium's copy."""
+        """The sidebar header and the library read `<hash>/meta.json`: the
+        document information PDFium reports, stored the first time an entry
+        opens (an entry converted by the retired engine keeps its own)."""
         path = self.root / hash_ / "meta.json"
         try:
             meta = task.result()

@@ -12,11 +12,11 @@ should happen on `codex/*` branches or branches explicitly named by the user.
   gotchas, and workflow rules. `AGENTS.md` is a symlink to `CLAUDE.md`; keep
   guidance single-sourced there.
 - `docs/adr/` records decisions that constrain future work. Add or amend an
-  ADR when a choice changes architecture, key strategy, daemon/conversion
+  ADR when a choice changes architecture, key strategy, daemon
   boundaries, or browser-extension behavior.
 - Focused reference docs own focused facts: `docs/keybindings.md` owns keys
   and palette commands, `docs/cache.md` owns cache semantics, and
-  `docs/pdf2htmlex-dom.md` owns converted DOM assumptions.
+  `docs/reader.md` owns the reader and its page DOM.
 - `.beads/issues.jsonl` is the active work queue. The SQLite database in
   `.beads/` is local runtime state and is intentionally ignored.
 - `TODO.md` is legacy intake. Do not add new work there; move actionable items
@@ -44,7 +44,7 @@ The smallest end-to-end behavior change that would make progress.
 
 ## Verification
 
-The exact command, browser flow, daemon check, or Raycast/Comet check that
+The exact command, browser flow, daemon check, or Raycast/Chrome check that
 proves the work.
 ```
 

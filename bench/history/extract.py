@@ -8,8 +8,7 @@ import tempfile
 import time
 from urllib.parse import urlsplit, parse_qs, unquote
 
-ROOTS = {'chrome': Path.home()/'Library/Application Support/Google/Chrome',
-         'comet': Path.home()/'Library/Application Support/Comet'}
+ROOTS = {'chrome': Path.home()/'Library/Application Support/Google/Chrome'}
 
 def profiles(browser='all', profile=None):
     for name, root in ROOTS.items():

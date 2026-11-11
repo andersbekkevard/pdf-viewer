@@ -52,19 +52,19 @@ REF = HERE / "pdfium_ref.py"
 DRIVE = HERE / "drive.cjs"
 sys.dont_write_bytecode = True  # do not leave __pycache__ in bench/corpus/probe
 sys.path.insert(0, str(REPO / "bench" / "corpus" / "probe"))
-import probe as oldprobe  # noqa: E402  (thresholds and Playwright lookup shared with the old probe)
+import shared  # noqa: E402  (corpus location, Playwright lookup and thresholds)
 
 BENCH_VERSION = "2"
 SCRATCH = pathlib.Path(os.environ.get("PDFV_BENCH_SCRATCH", "/tmp/pdfv-bench"))
 CACHE = pathlib.Path(os.environ.get("PDF_VIEWER_CACHE_DIR", str(pathlib.Path.home() / ".cache" / "pdf_viewer")))
 
 # Visual comparison geometry, as the old probe: fit-width 1600 CSS px at DPR 2.
-FIT_WIDTH_CSS = oldprobe.FIT_WIDTH_CSS
-DPR = oldprobe.DPR
-MAX_PAGE_CSS_HEIGHT = oldprobe.MAX_PAGE_CSS_HEIGHT
-INK_DARK, INK_RADIUS = oldprobe.INK_DARK, oldprobe.INK_RADIUS
-VISUAL, VISUAL_HIGH, BLUR_FAINT = oldprobe.VISUAL, oldprobe.VISUAL_HIGH, oldprobe.BLUR_FAINT
-SIZE_DELTA_PX, TEXT_LOSS_RATIO = oldprobe.SIZE_DELTA_PX, oldprobe.TEXT_LOSS_RATIO
+FIT_WIDTH_CSS = shared.FIT_WIDTH_CSS
+DPR = shared.DPR
+MAX_PAGE_CSS_HEIGHT = shared.MAX_PAGE_CSS_HEIGHT
+INK_DARK, INK_RADIUS = shared.INK_DARK, shared.INK_RADIUS
+VISUAL, VISUAL_HIGH, BLUR_FAINT = shared.VISUAL, shared.VISUAL_HIGH, shared.BLUR_FAINT
+SIZE_DELTA_PX, TEXT_LOSS_RATIO = shared.SIZE_DELTA_PX, shared.TEXT_LOSS_RATIO
 
 # Reader-only text thresholds (no old-engine counterpart; see README).
 WORDS_PER_PAGE = 8
@@ -219,7 +219,7 @@ class Bench:
         self.corpus = corpus
         self.preexisting = preexisting
         self.python = sys.executable
-        self.node_path = oldprobe.playwright_node_path()
+        self.node_path = shared.playwright_node_path()
         self.created: set[str] = set()
         self.deleted: dict[str, str] = {}
         self.lock = threading.Lock()
@@ -623,9 +623,9 @@ def main() -> int:
     except Exception as exc:
         print(f"run: daemon at {args.base} not reachable: {exc}", file=sys.stderr)
         return 2
-    corpus = oldprobe.corpus_dir(args.corpus)
-    if not oldprobe.playwright_node_path():
-        print("run: no cached Playwright found (see bench/corpus/probe/probe.py)", file=sys.stderr)
+    corpus = shared.corpus_dir(args.corpus)
+    if not shared.playwright_node_path():
+        print("run: no cached Playwright found (see bench/corpus/probe/shared.py)", file=sys.stderr)
         return 2
 
     preexisting = {p.name for p in CACHE.iterdir() if p.is_dir()} if CACHE.is_dir() else set()

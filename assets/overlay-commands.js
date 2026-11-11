@@ -739,7 +739,7 @@ export function createCommandSurface(core) {
 
 
     // ⌘, — open settings, intercepting the browser's own preferences shortcut.
-    // Capture-phase preventDefault is what keeps Comet from opening its
+    // Capture-phase preventDefault is what keeps the browser from opening its
     // settings page; Chromium only reserves ⌘T/W/Q/N hard, so ⌘, is ours to
     // take. Bypasses isInputTarget like ⌘K — chord shortcuts should work from
     // any focus state. settings.toggle() closes it again on a second press.

@@ -1,11 +1,11 @@
 // Sidebar: toggle, header, Outline / Pages / Pins tabs, keyboard list navigation,
 // and the page shift that keeps pages clear of it.
 //
-//   #sidebar                       (pdf2htmlEX)
+//   #sidebar                       (reader shell)
 //     #pdf2html-sidebar-head       title + author/pages, close button
 //     #pdf2html-sidebar-tabs       Outline / Pages tab buttons
 //     #pdf2html-sidebar-body       the scroller Vimium j/k targets
-//       #outline                   (pdf2htmlEX, moved in)
+//       #outline                   (reader shell, moved in)
 //       #pdf2html-thumbs           page cards
 //     #pdf2html-sidebar-footer     Settings + Help buttons
 //
@@ -231,8 +231,8 @@ export function createSidebar(core) {
                 sync();
             });
         }, { passive: true });
-        // Clicks take the same jump path as Enter (pdf2htmlEX destination plus
-        // the explicit-pick rule), so stop pdf2htmlEX's own link handler.
+        // Clicks take the same jump path as Enter (the entry's point plus
+        // the explicit-pick rule), not the browser's anchor scroll.
         outline.addEventListener('click', function (e) {
             var link = e.target.closest && e.target.closest('a[href^="#pf"]');
             var entry = link && entries.filter(function (x) { return x.link === link; })[0];
@@ -277,18 +277,15 @@ export function createSidebar(core) {
     }
 
     // ------------------------------------------------------------- thumbnails
-    // Real thumbnails come from /<hash>/thumbs/N.jpg (scripts/
-    // extract-pdf-thumbs.sh); entries without them keep skeleton cards.
+    // Thumbnails are small rasters of each page, rendered by the daemon on
+    // demand (/r/<hash>/p/<page>/240.png).
     function mountThumbsPanel() {
         var host = document.getElementById('pdf2html-thumbs');
         var pages = documentModel.pages();
         if (!host || !pages.length) return null;
         var hash = entryHash();
-        // Converted entries have pre-extracted JPEGs; the reader renders a
-        // small raster of the page on demand.
-        var reader = documentModel.isReader();
-        var thumbBase = !hash ? null : reader ? '/r/' + hash + '/p/' : '/' + hash + '/thumbs/';
-        var thumbSuffix = reader ? '/240.png' : '.jpg';
+        var thumbBase = !hash ? null : '/r/' + hash + '/p/';
+        var thumbSuffix = '/240.png';
         var cards = [];
 
         pages.forEach(function (pf, idx) {
@@ -372,7 +369,7 @@ export function createSidebar(core) {
             selected = Math.max(0, Math.min(selected, pins.length - 1));
             if (!pins.length) host.appendChild(el('p', { class: 'pdf2html-pins-empty' }, 'No pins yet. Type :pin or press Ctrl-Shift-P to save this spot.'));
             pins.forEach(function (p, idx) {
-                var hash = entryHash(), src = documentModel.isReader() ? '/r/' + hash + '/p/' + p.page + '/240.png' : '/' + hash + '/thumbs/' + p.page + '.jpg';
+                var hash = entryHash(), src = '/r/' + hash + '/p/' + p.page + '/240.png';
                 var jump = el('button', { class: 'pdf2html-pin-jump', title: 'Pin ' + p.number + ' · ' + p.title,
                     onClick: function () { core.pins.jump(p.number); } }, [
                     el('img', { src: src, loading: 'lazy', alt: '' }),

@@ -178,7 +178,7 @@ class OpenMiddleware:
         path = scope.get('path', '')
         shell = re.fullmatch(r'/r/([a-f0-9]{6,64})/', path)
         cached = re.fullmatch(r'/([a-f0-9]{6,64})/[^/]+\.html', path)
-        initial = path in ('/', '/read', '/read-raw', '/view', '/view-raw', '/view-file-raw', '/view-light', '/view-light-raw', '/view-canonical', '/view-canonical-raw')
+        initial = path in ('/', '/read', '/read-raw', '/view', '/view-raw', '/view-file-raw')
         if scope['type'] != 'http' or scope.get('method') != 'GET' or not (initial or shell or cached):
             return await self.app(scope, receive, send)
         started = time.perf_counter()

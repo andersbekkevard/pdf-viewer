@@ -3,7 +3,8 @@
 The reader shows a PDF as PDFium page rasters under a transparent text layer.
 It is built on demand from the PDF itself; nothing is converted ahead of time.
 [ADR 0014](adr/0014-reader-pdfium-rasters-transparent-text.md) records why it
-replaces pdf2htmlEX's converted HTML.
+replaced pdf2htmlEX's converted HTML, and [ADR 0015](adr/0015-retire-pdf2htmlex.md)
+the retirement of that engine. The reader is the only way a document is shown.
 
 ## Opening a document
 
@@ -17,21 +18,20 @@ replaces pdf2htmlEX's converted HTML.
 | `GET /r/<hash>/p/<page>/<width>.png` | The same, lossless PNG (sidebar thumbnails, tools). |
 | `GET /r/<hash>/ocr?pages=1-4&wait=20` | Recognized text of scanned pages as `.t ocr` markup, per page `done`, `pending`, `failed`, `none` or `unavailable`. See "Scanned pages". |
 
-The routes the extension redirects to (`/view`, `/view-raw`) behave like
-`/read`, so every PDF opens in the reader; that is the default.
-`PDF_VIEWER_ENGINE=pdf2htmlex` keeps converted entries on their HTML and sends a cache
-miss to the browser's own viewer; `/read` and `/r/` work either way.
+`/view` and `/view-raw`, the routes the extension redirects to, are the same
+routes as `/read` and `/read-raw`.
 
-An entry opened on demand has no `mappings.tsv` row. Its name and source live in
-`<hash>/entry.json`, and `CacheCatalog.mappings()` merges both
-([cache.md](cache.md)).
+An entry's name and source live in `<hash>/entry.json`; entries written by the
+retired conversion scripts keep theirs in `mappings.tsv`, and
+`CacheCatalog.mappings()` merges both ([cache.md](cache.md)).
 
 ## Sign-in-gated sources
 
 The extension sends a navigation to the daemon when its URL ends in `.pdf` or when the
 response is `application/pdf` (URLs such as arXiv's `/pdf/<id>` say nothing in the path);
-a PDF sent as an attachment download is left alone. With the reader engine the Raycast
-convert command does the same for the active tab instead of running pdf2htmlEX.
+a PDF sent as an attachment download is left alone. The Raycast command
+"PDF viewer: open in reader" (`scripts/open-in-reader.sh`) does the same for the
+active tab.
 
 The daemon's own download carries no cookies, so a host behind a sign-in
 answers it with a sign-in page. With extension 0.4.0 or later such a URL still
@@ -149,9 +149,10 @@ frame (ADR 0012), so page px stay valid inside a page at any zoom.
 
 ## DOM contract
 
-The shell uses the names the overlay already used for pdf2htmlEX output, so the
-selectors in [pdf2htmlex-dom.md](pdf2htmlex-dom.md) hold. The root carries
-`data-pdf2html-representation="raster-v1"`; `documentModel.isReader()` tests it.
+The shell keeps the element names pdf2htmlEX's output had (`#page-container`,
+`.pf`, `.pc`, `img.bi`, `.t`, `#sidebar`, `#outline`); the overlay was written
+against them. Page ids are hexadecimal (`#pf1`, `#pfa`, …). The root carries
+`data-pdf2html-representation="raster-v1"`, which the overlay's CSS selects on.
 
 ```html
 <div id="sidebar"><div id="outline">
@@ -429,14 +430,13 @@ scripts/verify-vimium.sh --engine reader
 
 The local proof requires an already-running scratch reader on port 7444 (override
 with `PDFV_TEST_BASE`), never the personal daemon. The extension harness passed
-all 9 checks and the real-Vimium harness all 49 checks. Comet and the owner's real
-extension profile were not touched. `smoke-viewer.sh` is deliberately not run:
-it hardcodes the personal cache/port, violating this task's isolation boundary.
+all 9 checks and the real-Vimium harness all 49 checks. The owner's real
+extension profile was not touched.
 
 ## Selection and reading order verification
 
 The text layer remains native selectable text, including the offscreen lines
-needed by browser find. `scripts/verify-overlay.sh --reader --only selection`
+needed by browser find. `scripts/verify-overlay.sh --only selection`
 generates single/two/three-column pages, captions, a footnote, a rotated stamp,
 a table, a line-end hyphen and Hebrew text. Mouse drags use trusted Chromium
 input; clear a previous selection before each drag, since pressing within it

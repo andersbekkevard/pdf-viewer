@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import pathlib
 import sys
 import tempfile
@@ -17,7 +16,6 @@ import time
 import unittest
 from unittest.mock import patch
 
-from fastapi import BackgroundTasks
 from starlette.requests import Request
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -61,7 +59,6 @@ class BrowserOpenTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "_OPEN_HOLD_SEC", 0.6),
             patch.object(main, "_OPEN_CLAIM_WAIT_SEC", 0.5),
             patch.object(main, "_extension_open_seen", time.monotonic()),
-            patch.dict(os.environ, {"PDF_VIEWER_ENGINE": "reader"}),
             # A fallback must not leave a relay asking a missing extension.
             patch.object(main, "_request_relay"),
         ]
@@ -80,7 +77,7 @@ class BrowserOpenTests(unittest.IsolatedAsyncioTestCase):
     def tab(self, url: str = SOURCE):
         """The tab's held navigation, as FastAPI runs a sync route."""
         return asyncio.create_task(asyncio.to_thread(
-            main._view_url, url, BackgroundTasks(), light=True, reader_first=True, base_url=BASE))
+            main._view_url, url, base_url=BASE))
 
     async def claim(self, url: str = SOURCE) -> dict:
         return await asyncio.to_thread(main.extension_open, main.ExtensionOpenRequest(url=url))
@@ -197,10 +194,6 @@ class BrowserOpenTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_claim_without_an_open_gives_up(self):
         self.assertEqual(await self.claim(), {"fetch": False})
-
-    async def test_claims_are_refused_by_the_pdf2htmlex_engine(self):
-        with patch.dict(os.environ, {"PDF_VIEWER_ENGINE": "pdf2htmlex"}):
-            self.assertEqual(await self.claim(), {"fetch": False})
 
     async def test_only_one_claim_and_one_answer_count(self):
         main._remember_gated_host(SOURCE)

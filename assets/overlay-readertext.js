@@ -181,7 +181,7 @@ export function createReaderText(core) {
 
     function mount() {
         var html = root();
-        if (!documentModel.isReader() || !html || html.getAttribute('data-reader-text') !== 'loading') {
+        if (!html || html.getAttribute('data-reader-text') !== 'loading') {
             finished = true;
             return;
         }

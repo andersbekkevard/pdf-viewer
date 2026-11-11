@@ -123,7 +123,8 @@ class FinderEntriesTest(unittest.TestCase):
                                  (C, "gamma", str(tmp / "gamma.pdf"))):
             entry = self.root / hash_
             entry.mkdir()
-            (entry / f"{name}.html").write_text("x", encoding="utf-8")
+            if ref.startswith("/"):
+                pathlib.Path(ref).write_bytes(b"%PDF-1.4")
             lines.append(f"1\t{ref}\t{hash_}\t{entry / (name + '.html')}\n")
         (self.root / A / "meta.json").write_text(json.dumps({"title": "Alpha Book", "author": "Ada", "pages": 214}),
                                                  encoding="utf-8")
@@ -147,7 +148,7 @@ class FinderEntriesTest(unittest.TestCase):
                          ("Alpha Book", "Ada", 214, 37, "alpha.pdf"))
         self.assertEqual(alpha["last_read"], self.now - DAY)   # the saved page is newer than the last open
         self.assertEqual((rows[B]["host"], rows[B]["file"]), ("example.org", "beta two.pdf"))
-        for heavy in ("search_text", "thumb_href", "canonical_href", "light_href", "reader_href"):
+        for heavy in ("search_text", "thumb_href", "reader_href"):
             self.assertNotIn(heavy, alpha)
 
     def test_frecency_order_and_the_previous_document(self):

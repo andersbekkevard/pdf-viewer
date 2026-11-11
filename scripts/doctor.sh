@@ -9,14 +9,13 @@
 # *required* check fails; WARN-only checks (optional features) never fail.
 #
 # The chain (parent epic: pdfv-6el):
-#   browser extension → daemon (:7435) → cache + _assets symlink →
-#   native pdf2htmlEX binary + Homebrew dylibs + poppler data.
+#   browser extension → daemon (:7435) → cache dir → overlay assets.
 #
 # WHY: most historical debugging sessions (stale overlay assets, daemon down,
-# missing toolchain, broken symlink) reduce to checking one link in this
+# unwritable cache) reduce to checking one link in this
 # chain. That knowledge lived in heads and docs; this puts it in a tool.
 #
-# This script NEVER mutates state: no Docker, no network beyond localhost
+# This script NEVER mutates state: no network beyond localhost
 # probes against the already-running daemon, no file writes. Safe to run
 # anytime.
 #
@@ -39,14 +38,8 @@ PORT="${PDF_VIEWER_PORT:-7435}"
 LAUNCHD_LABEL="com.anders.pdf_viewer"
 
 CACHE_DIR="$HOME/.cache/pdf_viewer"
-ASSET_LINK="$CACHE_DIR/_assets"
-MAPPINGS="$CACHE_DIR/mappings.tsv"
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REPO_ASSETS="$REPO_DIR/assets"
-
-NATIVE_BIN="$HOME/.local/opt/pdf2htmlEX/bin/pdf2htmlEX"
-POPPLER_DATA_DIR="/opt/homebrew/share/poppler"
 
 # --- output helpers ----------------------------------------------------------
 
@@ -97,115 +90,7 @@ else
 fi
 
 # ============================================================================
-# 3. _assets symlink resolves into the repo's assets/
-# ============================================================================
-
-if [ ! -L "$ASSET_LINK" ]; then
-    fail "_assets is not a symlink ($ASSET_LINK)" \
-         "ln -s $REPO_ASSETS $ASSET_LINK"
-else
-    resolved="$( (cd "$ASSET_LINK" && pwd -P) 2>/dev/null || true)"
-    repo_real="$( (cd "$REPO_ASSETS" && pwd -P) 2>/dev/null || true)"
-    if [ -n "$resolved" ] && [ "$resolved" = "$repo_real" ]; then
-        pass "_assets symlink → $resolved"
-    else
-        fail "_assets symlink does not resolve into repo assets (→ ${resolved:-<broken>})" \
-             "rm $ASSET_LINK && ln -s $REPO_ASSETS $ASSET_LINK"
-    fi
-fi
-
-# ============================================================================
-# 4. Native pdf2htmlEX binary exists + --version sane (report poppler)
-# ============================================================================
-
-if [ ! -x "$NATIVE_BIN" ]; then
-    fail "native pdf2htmlEX binary missing: $NATIVE_BIN" \
-         "build + install it: scripts/install-native-pdf2htmlex.sh"
-else
-    ver_out="$("$NATIVE_BIN" --version 2>&1 || true)"
-    ver_line="$(printf '%s\n' "$ver_out" | head -1)"
-    case "$ver_line" in
-        *"pdf2htmlEX version"*)
-            poppler_ver="$(printf '%s\n' "$ver_out" | sed -n 's/.*poppler[[:space:]]*\([0-9.]*\).*/\1/p' | head -1)"
-            pass "native pdf2htmlEX binary: ${ver_line} (poppler ${poppler_ver:-unknown})"
-            case "$ver_line" in
-                *"+pdfv"*) ;;
-                *) warn "pdf2htmlEX lacks the text-fidelity patches (doubled letters, oversized selection boxes)" \
-                        "rebuild with patches/pdf2htmlEX, see ADR 0013" ;;
-            esac
-            ;;
-        *)
-            fail "pdf2htmlEX --version unexpected: ${ver_line:-<empty>}" \
-                 "reinstall: scripts/install-native-pdf2htmlex.sh"
-            ;;
-    esac
-fi
-
-# ============================================================================
-# 5. Every /opt/homebrew dylib in otool -L of the binary resolves
-# ============================================================================
-
-if [ ! -x "$NATIVE_BIN" ]; then
-    warn "dylib check skipped (binary missing)" "see binary check above"
-elif ! command -v otool >/dev/null 2>&1; then
-    warn "otool not found; cannot check linked dylibs" "install Xcode command line tools: xcode-select --install"
-else
-    missing_dylibs=""
-    while IFS= read -r lib; do
-        case "$lib" in
-            /opt/homebrew/*)
-                [ -e "$lib" ] || missing_dylibs="${missing_dylibs}${lib}\n"
-                ;;
-        esac
-    done < <(otool -L "$NATIVE_BIN" 2>/dev/null | awk 'NR>1 {print $1}')
-    if [ -z "$missing_dylibs" ]; then
-        pass "all /opt/homebrew dylibs linked by the binary resolve"
-    else
-        fail "linked Homebrew dylib(s) missing:\n$(printf '%b' "$missing_dylibs" | sed 's/^/        /')" \
-             "brew install the owning formula(e) (e.g. cairo glib freetype poppler)"
-    fi
-fi
-
-# ============================================================================
-# 6. poppler data dir (WARN only — needed for CJK/CID PDFs)
-# ============================================================================
-
-if [ -d "$POPPLER_DATA_DIR" ]; then
-    pass "poppler data dir present: $POPPLER_DATA_DIR"
-else
-    warn "poppler data dir missing: $POPPLER_DATA_DIR" \
-         "brew install poppler — CJK/CID-encoded PDFs may render wrong without it"
-fi
-
-# ============================================================================
-# 7. pdftocairo / pdfinfo on PATH (WARN only — optional thumbs/meta)
-# ============================================================================
-
-for tool in pdftocairo pdfinfo; do
-    if command -v "$tool" >/dev/null 2>&1; then
-        pass "$tool on PATH ($(command -v "$tool"))"
-    else
-        warn "$tool not on PATH" \
-             "brew install poppler — optional thumbnail/metadata extraction will be skipped"
-    fi
-done
-
-# ============================================================================
-# 8. mappings.tsv exists + writable
-# ============================================================================
-
-if [ ! -f "$MAPPINGS" ]; then
-    fail "mappings.tsv missing: $MAPPINGS" \
-         "convert any PDF to seed it, or check CACHE_DIR=$CACHE_DIR exists"
-elif [ ! -w "$MAPPINGS" ]; then
-    fail "mappings.tsv not writable: $MAPPINGS" \
-         "chmod u+w $MAPPINGS"
-else
-    pass "mappings.tsv exists + writable ($(wc -l < "$MAPPINGS" | tr -d ' ') rows)"
-fi
-
-# ============================================================================
-# 9. Cache dir writable
+# 3. Cache dir writable
 # ============================================================================
 
 if [ -d "$CACHE_DIR" ] && [ -w "$CACHE_DIR" ]; then
@@ -216,7 +101,7 @@ else
 fi
 
 # ============================================================================
-# 10. /_assets/overlay.js returns 200 through the daemon
+# 4. /_assets/overlay.js returns 200 through the daemon
 # ============================================================================
 
 code="$(curl -s -o /dev/null -w '%{http_code}' -m 3 "http://127.0.0.1:${PORT}/_assets/overlay.js" 2>/dev/null || true)"
@@ -224,15 +109,15 @@ if [ "$code" = "200" ]; then
     pass "/_assets/overlay.js → 200 through the daemon"
 else
     fail "/_assets/overlay.js → ${code:-no-response} through the daemon" \
-         "daemon down or _assets symlink broken — see checks above"
+         "daemon down or not serving this repo's assets/ — see checks above"
 fi
 
 # ============================================================================
-# 11. Extension — manual verification instruction (no cheap automated probe)
+# 5. Extension — manual verification instruction (no cheap automated probe)
 # ============================================================================
 
-info "Extension (Comet MV3): no read-only automated probe exists. Verify manually —"
-info "  open any *.pdf URL in Comet; it should redirect to localhost:${PORT} and render the overlay."
+info "Extension (Chrome MV3): no read-only automated probe exists. Verify manually —"
+info "  open any *.pdf URL in Chrome; it should redirect to localhost:${PORT} and render the overlay."
 info "  If it stays on the native viewer, check extension/ is loaded + its declarativeNetRequest rules are enabled."
 
 # ============================================================================

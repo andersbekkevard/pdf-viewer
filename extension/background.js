@@ -15,11 +15,11 @@
 // 3, the passthrough allow uses 2, and the static redirect and the generic
 // file rule use 1. Highest priority wins, so:
 //   - disabled cached URL click → dynamic allow (p4) → native viewer
-//   - cached URL click → dynamic (p3) → /view-raw serves HTML
+//   - cached URL click → dynamic (p3) → /view-raw opens the reader
 //   - unknown `.pdf$` URL → static (p1) → /view-raw 307s with marker
 //   - 307-target with marker → allow (p2) → native viewer
 //   - cache miss on non-.pdf URL → no rule → browser opens natively
-//   - uncached `file://….pdf`, reader engine only → generic (p1) →
+//   - uncached `file://….pdf` → generic (p1) →
 //     /view-file-raw opens the reader
 //
 // Service workers in MV3 can be terminated, so we use chrome.alarms (survives
@@ -34,7 +34,7 @@
 // on a connection error page.
 
 // The service worker talks to the daemon on 127.0.0.1; redirected documents
-// open on VIEWER, the origin the static rule, the convert script and the
+// open on VIEWER, the origin the static rule, the open script and the
 // Vimium exclusion use, so the viewer's localStorage is not split in two.
 const DAEMON = 'http://127.0.0.1:7435';
 const VIEWER = 'http://localhost:7435';
@@ -47,8 +47,7 @@ const SYNC_ALARM = 'pdfviewer-sync';
 // valid URL/file paths we care about.
 const URLFILTER_META = /[*^|]/;
 
-// Any local PDF, for the reader engine, which opens files without
-// conversion. `/view-file-raw` reads the raw query because the substitution
+// Any local PDF. `/view-file-raw` reads the raw query because the substitution
 // cannot percent-encode the capture. Per-entry file rules (p3, p4) win, so a
 // disabled entry's allow rule still keeps it native.
 const GENERIC_FILE_PRIORITY = 1;
@@ -89,7 +88,6 @@ function syncCachedRules() {
 
 async function _runSync() {
     let entries;
-    let engine;
     try {
         const health = await fetch(`${DAEMON}/healthz`, { cache: 'no-store' });
         setDaemonDown(false);
@@ -97,8 +95,6 @@ async function _runSync() {
             console.warn(`pdf_viewer: /healthz returned ${health.status}`);
             return;
         }
-        // Daemons older than the reader report no engine: pdf2htmlEX.
-        engine = (await health.json()).engine || 'pdf2htmlex';
         const resp = await fetch(`${DAEMON}/cache-urls`, { cache: 'no-store' });
         if (!resp.ok) {
             console.warn(`pdf_viewer: /cache-urls returned ${resp.status}`);
@@ -128,20 +124,18 @@ async function _runSync() {
     const addRules = [];
     let ruleIdCounter = DYNAMIC_RULE_ID_BASE;
 
-    if (engine === 'reader') {
-        addRules.push({
-            id: ruleIdCounter++,
-            priority: GENERIC_FILE_PRIORITY,
-            action: {
-                type: 'redirect',
-                redirect: { regexSubstitution: `${VIEWER}/view-file-raw?\\0` }
-            },
-            condition: {
-                regexFilter: GENERIC_FILE_REGEX,
-                resourceTypes: ['main_frame']
-            }
-        });
-    }
+    addRules.push({
+        id: ruleIdCounter++,
+        priority: GENERIC_FILE_PRIORITY,
+        action: {
+            type: 'redirect',
+            redirect: { regexSubstitution: `${VIEWER}/view-file-raw?\\0` }
+        },
+        condition: {
+            regexFilter: GENERIC_FILE_REGEX,
+            resourceTypes: ['main_frame']
+        }
+    });
 
     for (const entry of entries) {
         let rule;
@@ -299,7 +293,7 @@ async function _runSync() {
     // on the next sync.
     _appliedRulesKey = skipped.length === 0 ? rulesKey : null;
     console.log(
-        `pdf_viewer: synced ${installed}/${addRules.length} rules (engine ${engine}) ` +
+        `pdf_viewer: synced ${installed}/${addRules.length} rules ` +
         `(${removeRuleIds.length} stale rules removed, ${skipped.length} skipped)`
     );
 }
@@ -307,11 +301,11 @@ async function _runSync() {
 // -----------------------------------------------------------------------------
 // Navigation signals — extension-mediated tab navigation.
 //
-// The convert script POSTs {from_url, to_url} to the daemon after a cache-miss
+// The open script POSTs {from_url, to_url} to the daemon after a cache-miss
 // conversion finishes. This long-poll loop picks up those signals and calls
 // chrome.tabs.update(tabId, {url}) on matching tabs.
 //
-// Why not AppleScript from the convert script itself: Chromium's Apple Event
+// Why not AppleScript from the open script itself: Chromium's Apple Event
 // handler pulls the browser to the front on *any* tab mutation, causing a
 // visible focus flash even with snapshot-and-restore tricks. chrome.tabs.update
 // has no such side effect.
@@ -337,7 +331,7 @@ async function navigateTab({ from_url, to_url }) {
     try {
         // `chrome.tabs.query({url: matchPattern})` ignores query strings, so
         // we query all tabs and filter by exact-URL match (the from_url the
-        // convert script captured includes the `_pdfvw=passthrough` marker
+        // open script captured includes the `_pdfvw=passthrough` marker
         // and must match byte-for-byte).
         const allTabs = await chrome.tabs.query({});
         const matches = allTabs.filter(t => sameUrl(t.url, from_url));
@@ -356,7 +350,7 @@ async function navigateTab({ from_url, to_url }) {
     }
 }
 
-// Fetch signals — the convert script's curl download, or the reader's own
+// Fetch signals — the open script's curl download, or the reader's own
 // download in the daemon, hit an auth wall (Cloudflare Access, campus SSO)
 // because neither has the browser's cookies. Fetch the same URL here, where
 // the session lives, and hand the bytes back through the daemon. Only URLs open in one of this browser's tabs

@@ -87,8 +87,6 @@ export function createLibrary(core) {
         if (pick && pick.href) location.href = pick.href;
     }
     function currentName() {
-        var m = location.pathname.match(/^\/[a-f0-9]{6,32}\/(.+)\.html?$/i);
-        if (m) { try { return decodeURIComponent(m[1]); } catch (_) { return m[1]; } }
         var hash = entryHash();
         if (hash && entries) for (var i = 0; i < entries.length; i++) {
             if (entries[i].hash === hash) return String(entries[i].name || '');

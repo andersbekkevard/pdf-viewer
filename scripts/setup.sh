@@ -4,15 +4,14 @@
 # pdf_viewer — setup.sh
 #
 # Idempotent fresh-Mac bootstrap. One command stands the whole system up;
-# two manual steps (Comet extension, Raycast script dir) it can't automate
+# two manual steps (Chrome extension, Raycast script dir) it can't automate
 # are printed at the end. Safe to re-run on an already-configured machine:
 # every step is a no-op when its target is already correct (no duplicate
 # launchd jobs, no clobbered symlinks, the running daemon is left untouched
 # unless the plist content actually changed).
 #
 # The chain it wires (parent epic: pdfv-6el):
-#   brew runtime deps → uv → native pdf2htmlEX toolchain →
-#   templated launchd job (:7435) → cache dir + _assets symlink →
+#   uv → templated launchd job (:7435) → cache dir →
 #   scripts/doctor.sh (the success gate).
 #
 # WHY templating the plist: launchd/com.anders.pdf_viewer.plist hardcodes
@@ -34,9 +33,7 @@
 #                          (default: the repo this script lives in).
 #   PDF_VIEWER_PORT        forwarded to scripts/doctor.sh (default 7435).
 #
-# This script installs MISSING brew formulas (that is the point of a
-# bootstrap) but never UPGRADES existing ones, never auto-installs uv,
-# never starts Docker, and never restarts a healthy daemon.
+# This script never auto-installs uv and never restarts a healthy daemon.
 # ============================================================================
 
 set -euo pipefail
@@ -44,7 +41,6 @@ set -euo pipefail
 # --- paths -------------------------------------------------------------------
 
 REPO_DIR="${PDF_VIEWER_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-BREWFILE="$REPO_DIR/Brewfile"
 REPO_ASSETS="$REPO_DIR/assets"
 
 LAUNCHD_LABEL="com.anders.pdf_viewer"
@@ -53,11 +49,7 @@ LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 PLIST_DEST="${PDF_VIEWER_PLIST_OUT:-$LAUNCH_AGENTS_DIR/${LAUNCHD_LABEL}.plist}"
 
 CACHE_DIR="$HOME/.cache/pdf_viewer"
-ASSET_LINK="$CACHE_DIR/_assets"
 
-NATIVE_PREFIX="$HOME/.local/opt/pdf2htmlEX"
-NATIVE_BIN="$NATIVE_PREFIX/bin/pdf2htmlEX"
-INSTALL_TOOLCHAIN="$REPO_DIR/scripts/install-native-pdf2htmlex.sh"
 DOCTOR="$REPO_DIR/scripts/doctor.sh"
 
 # Original hardcoded values in the repo plist — what we substitute OUT.
@@ -98,28 +90,13 @@ render_plist() {
 # 0. Preconditions
 # ============================================================================
 
-[ -f "$BREWFILE" ]          || die "Brewfile not found: $BREWFILE"
 [ -f "$PLIST_TEMPLATE" ]    || die "plist template not found: $PLIST_TEMPLATE"
-[ -x "$INSTALL_TOOLCHAIN" ] || die "toolchain installer not found/executable: $INSTALL_TOOLCHAIN"
 [ -x "$DOCTOR" ]            || die "doctor not found/executable: $DOCTOR"
 [ -d "$REPO_ASSETS" ]      || die "repo assets dir not found: $REPO_ASSETS"
 
 # ============================================================================
-# 1. Homebrew runtime deps + uv
+# 1. uv
 # ============================================================================
-
-step "Homebrew runtime dependencies ($BREWFILE)"
-if ! command -v brew >/dev/null 2>&1; then
-    die "Homebrew not installed. Install it first:
-       /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
-fi
-if brew bundle check --no-upgrade --file="$BREWFILE" >/dev/null 2>&1; then
-    ok "all Brewfile formulas already present (no upgrade)"
-else
-    note "missing formulas — installing (no upgrade of existing ones)…"
-    brew bundle --no-upgrade --file="$BREWFILE"
-    ok "Brewfile satisfied"
-fi
 
 step "uv (Python runner)"
 if command -v uv >/dev/null 2>&1; then
@@ -133,37 +110,7 @@ else
 fi
 
 # ============================================================================
-# 2. Native pdf2htmlEX toolchain
-# ============================================================================
-
-step "Native pdf2htmlEX toolchain ($NATIVE_BIN)"
-toolchain_ok=0
-native_ver=""
-if [ -x "$NATIVE_BIN" ]; then
-    # Capture to a var (not a head|grep pipeline): under `set -o pipefail` the
-    # SIGPIPE from an early-closing `head` can race the binary's multi-line
-    # --version output and spuriously fail the check, forcing a needless
-    # reinstall on an already-healthy machine.
-    native_ver="$("$NATIVE_BIN" --version 2>&1 || true)"
-    case "$native_ver" in
-        *"pdf2htmlEX version"*) toolchain_ok=1 ;;
-    esac
-fi
-if [ "$toolchain_ok" -eq 1 ]; then
-    ok "pdf2htmlEX already installed: $(printf '%s\n' "$native_ver" | head -1)"
-else
-    note "binary missing or unhealthy — running install-native-pdf2htmlex.sh…"
-    if "$INSTALL_TOOLCHAIN"; then
-        ok "toolchain installed"
-    else
-        die "toolchain install failed. If no local build tree exists, install the tap and re-run:
-       brew tap andersbekkevard/tools && brew install pdf2htmlex
-       ./scripts/setup.sh"
-    fi
-fi
-
-# ============================================================================
-# 3. launchd job — templated plist, idempotent load
+# 2. launchd job — templated plist, idempotent load
 # ============================================================================
 
 step "launchd job ($LAUNCHD_LABEL)"
@@ -224,35 +171,15 @@ else
 fi
 
 # ============================================================================
-# 4. Cache dir + _assets symlink
+# 3. Cache dir
 # ============================================================================
 
-step "Cache dir + _assets symlink"
+step "Cache dir"
 mkdir -p "$CACHE_DIR"
 ok "cache dir present: $CACHE_DIR"
 
-repo_assets_real="$( (cd "$REPO_ASSETS" && pwd -P) )"
-link_ok=0
-if [ -L "$ASSET_LINK" ]; then
-    resolved="$( (cd "$ASSET_LINK" && pwd -P) 2>/dev/null || true)"
-    [ -n "$resolved" ] && [ "$resolved" = "$repo_assets_real" ] && link_ok=1
-fi
-
-if [ "$link_ok" -eq 1 ]; then
-    ok "_assets symlink already correct → $repo_assets_real (untouched)"
-elif [ -e "$ASSET_LINK" ] || [ -L "$ASSET_LINK" ]; then
-    # Wrong target (or a non-symlink in the way) — replace it.
-    note "_assets present but wrong target — replacing…"
-    rm -rf "$ASSET_LINK"
-    ln -s "$REPO_ASSETS" "$ASSET_LINK"
-    ok "_assets symlink → $REPO_ASSETS"
-else
-    ln -s "$REPO_ASSETS" "$ASSET_LINK"
-    ok "_assets symlink created → $REPO_ASSETS"
-fi
-
 # ============================================================================
-# 5. Success gate — doctor.sh
+# 4. Success gate — doctor.sh
 # ============================================================================
 
 step "Running doctor.sh (success gate)"
@@ -273,17 +200,17 @@ if [ "$doctor_rc" -ne 0 ]; then
 fi
 
 # ============================================================================
-# 6. Manual steps doctor can't automate
+# 5. Manual steps doctor can't automate
 # ============================================================================
 
 cat <<EOF
 
-${C_OK}setup: OK${C_OFF} — daemon, toolchain, launchd job, and cache are all green.
+${C_OK}setup: OK${C_OFF} — daemon, launchd job, and cache are all green.
 
 Two manual steps remain (one-time, can't be scripted):
 
-  1. Comet extension — load it unpacked:
-       comet://extensions → enable Developer mode → Load unpacked →
+  1. Chrome extension — load it unpacked:
+       chrome://extensions → enable Developer mode → Load unpacked →
        point at: $REPO_DIR/extension/
 
   2. Raycast script directory — add the entrypoints:

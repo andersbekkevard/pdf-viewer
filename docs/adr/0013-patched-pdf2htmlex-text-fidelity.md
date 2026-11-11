@@ -1,6 +1,6 @@
 # ADR 0013 — Patch pdf2htmlEX for Text-Layer Fidelity
 
-**Status**: Accepted
+**Status**: Superseded by [ADR 0015](0015-retire-pdf2htmlex.md) (pdf2htmlEX retired 2026-11-11)
 **Date**: 2026-10-20
 **Supersedes**: the "zero patches to pdf2htmlEX source" clause of [ADR 0011](0011-native-arm64-pdf2htmlex.md)
 

@@ -6,21 +6,22 @@ Explicitly out of scope. Revisit carefully before adding any of these.
   corporate SSO). The scripts and daemon hold no credentials and run no
   sign-in flow. A source open in a signed-in tab is fetched by the
   extension inside that browser session (`POST /signal/fetch`, see
-  README); anything else: let the browser download it and convert the
-  local copy.
-- **Smart auto-detection of PDFs without a `.pdf` extension.** The
-  extension deliberately does not try to sniff Content-Type. A URL the
-  daemon already knows is matched by its per-entry rule; anything else:
-  open it with `/read?url=`.
+  [reader.md](reader.md), "Sign-in-gated sources"); anything else: let the
+  browser download it and open the local copy.
+- **Catching PDFs served as downloads.** The extension redirects `.pdf`
+  URLs and `application/pdf` responses shown inline; a PDF sent as an
+  attachment download is left to the browser.
 - **In-viewer annotations or notes.** Use Obsidian or Preview.
 - **Real-time collaboration / multi-user.**
 - **Mobile-native app.** Tailscale-to-laptop-daemon is the fallback
   (phase 8, unbuilt).
 - **Public URLs.** Daemon always binds to `127.0.0.1`.
-- **Auto-installing the conversion toolchain.** Conversion uses a native
-  arm64 pdf2htmlEX binary (ADR 0011); scripts fail fast with "native
-  pdf2htmlEX not installed" rather than building or fetching it. (Docker
-  is no longer involved in conversion at all.)
+- **A second rendering engine or ahead-of-time conversion.** pdf2htmlEX is
+  retired (ADR 0015); a document the reader shows badly is opened in the
+  browser's own viewer with `:disable`.
+- **Bulk indexing of folders.** Nothing needs preparing before a PDF is
+  opened; the library holds what has been opened.
+- **Browsers other than Chrome.** Comet is no longer a target.
 - **Cloud OCR, OCR of born-digital pages, and writing recognized text back
   into the PDF.** Scanned pages are recognized on this Mac only (Apple
   Vision, `daemon/ocr.py`); pages that already have text, including a

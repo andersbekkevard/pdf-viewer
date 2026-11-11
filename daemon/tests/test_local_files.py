@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from urllib.parse import urlsplit, parse_qs
-from fastapi import BackgroundTasks, HTTPException
+from fastapi import HTTPException
 from starlette.requests import Request
 import main
 import state
@@ -37,7 +37,7 @@ class LocalFiles(unittest.TestCase):
         self.tmp.cleanup()
 
     def open(self, path=None):
-        response = main._view_path(str(path or self.path), BackgroundTasks(), light=True, reader_first=True)
+        response = main._view_path(str(path or self.path))
         return response.headers['location'].split('/')[2]
 
     def test_changed_path_inherits_clamped_state_and_collects_derived_data(self):
@@ -84,8 +84,7 @@ class LocalFiles(unittest.TestCase):
     def test_raw_and_query_share_entry(self):
         old = self.open()
         request = Request({'type': 'http', 'query_string': self.path.as_uri().encode(), 'headers': []})
-        with patch.dict('os.environ', {'PDF_VIEWER_ENGINE': 'reader'}):
-            raw = main.view_file_raw(request, BackgroundTasks())
+        raw = main.view_file_raw(request)
         self.assertIn('/r/' + old + '/', raw.headers['location'])
 
     def test_moved_renamed_and_symlink_preserve_identity_and_file_url(self):
@@ -106,7 +105,7 @@ class LocalFiles(unittest.TestCase):
         request = Request({'type': 'http', 'scheme': 'http', 'server': ('localhost', 7444),
             'path': '/view-file-raw', 'query_string': alias.as_uri().encode(), 'headers': []})
         with patch.object(main, '_queue_navigate_signal') as navigate, patch.object(main, '_queue_extension_sync_signal'):
-            main.view_file_raw(request, BackgroundTasks())
+            main.view_file_raw(request)
         self.assertEqual(navigate.call_args.args[1], alias.as_uri())
         self.assertIn(str(alias), [e['path'] for e in self.catalog.extension_entries()])
 
