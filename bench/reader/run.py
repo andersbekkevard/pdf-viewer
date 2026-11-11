@@ -435,7 +435,8 @@ class Bench:
                 cls.append("bench-error")
                 pg["error"] = dp["error"][:200]
             pg.update({"raster_state": dp.get("rasterState"), "jump_ms": dp.get("jumpMs"),
-                       "jump_landed": dp.get("jumpLanded"), "scroll_ms": dp.get("scrollMs"), "decode_wait_ms": dp.get("decodeWaitMs"), "raster_px": dp.get("naturalWidth"),
+                       "jump_landed": dp.get("jumpLanded"), "scroll_ms": dp.get("scrollMs"), "decode_wait_ms": dp.get("decodeWaitMs"),
+                       "text_wait": dp.get("textWait"), "text_wait_ms": dp.get("textWaitMs"), "raster_px": dp.get("naturalWidth"),
                        "device_px": dp.get("deviceWidth")})
             if dp.get("paletteMissing"):
                 cls.append("palette-missing")

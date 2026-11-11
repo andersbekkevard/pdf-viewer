@@ -46,7 +46,11 @@ replace the first:
    painted by the browser.
 3. **On demand, no conversion.** Opening a PDF registers it and builds the
    page shell from it directly. Rasters are rendered when a page nears the
-   viewport and cached with a size limit.
+   viewport and cached with a size limit. The first open does not wait for
+   the text of every page: the shell carries all page frames and the text of
+   the first pages, and the overlay fetches the rest in ranges, nearest the
+   viewport first (`docs/reader.md`, Loading). Once all text is cached the
+   complete shell is served in one response.
 4. **The same DOM contract.** The shell uses the page-frame, raster, text-line
    and outline names the overlay already reads, so the overlay modules other
    than `overlay-document.js` and two small new ones do not know which engine
@@ -59,17 +63,20 @@ replace the first:
 
 ## Rationale
 
-Measured on this Mac (M-series, 12 cores), same documents:
+Measured on this Mac (M-series, 12 cores), same documents; reader first opens
+are medians of three cold opens (no `<hash>/reader/`) on a running daemon,
+2026-11-10, under other load:
 
 | | pdf2htmlEX path | Reader |
 |---|---|---|
-| First open, 342-page book | 27 s conversion, started by hand | 1.1 s, automatic |
-| First open, 1,677-page book | minutes | 7.3 s |
-| Later opens, 1,677-page book | — | 0.5–1.2 s to first page |
+| First open, 342-page book: first page / all text | 27 s conversion, started by hand | 0.26 s / 0.39 s, automatic |
+| First open, 1,677-page book: first page / all text | minutes | 0.54 s / 2.3 s (0.8–0.9 s to first page right after a daemon restart) |
+| Later opens, 1,677-page book | — | 0.4–0.6 s to first page, all text in the first response |
 | Uncached arXiv URL to reader | native viewer until converted | 0.3 s |
 | Page markup, 342 pages | 8.7 MB, 29.6 k lines / 191 k spans | 2.5 MB, 17.5 k lines |
 | Raster width at fit-width, 2× display | 1191 px, upscaled | exact device px (2720) |
 | One page render, 2720 px wide | — | 70–150 ms, in parallel workers |
+| Text extraction, 1,677-page book | — | 5.4 s CPU over the workers (10.5 s before the per-page work was shared between text and links) |
 
 Scorecard over the 57 tier-1 corpus documents present locally
 (`bench/reader/`, 2026-11-10), same documents for both engines:
@@ -109,6 +116,10 @@ scripts, and the manual step on a cache miss.
 - **Scanned PDFs have no text.** The page still shows; a text source such as
   OCR could feed the same text-layer format later.
 - **The daemon needs `pypdfium2` and Pillow** (wheels, no local build).
+- **Text arrives after the first page on a first open.** Until it has,
+  native find and `/` search see only pages that have text; on the largest
+  local book (1,677 pages) all text was in the DOM within about 2.5 s, and
+  the pages on screen get theirs first. `:yank` waits for it.
 - **Rasters cost CPU on first view** and disk afterwards
   (`PDF_VIEWER_RASTER_CACHE_MB`, default 1500).
 - **Sign-in-gated sources** fall back to the browser's viewer first; the
@@ -121,8 +132,7 @@ scripts, and the manual step on a cache miss.
 
 - Deleting the pdf2htmlEX path. It stays until the reader has been the
   default for some days of real use.
-- Streaming the shell for very large books, tiling, and the image format; see
-  the open beads.
+- Tiling and the image format; see the open beads.
 
 ## Related
 

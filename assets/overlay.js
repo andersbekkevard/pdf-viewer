@@ -22,6 +22,7 @@ import { createScrollOff } from './overlay-scrolloff.js';
 import { createTextInteraction } from './overlay-text.js';
 import { createTextFit } from './overlay-textfit.js';
 import { createLinks } from './overlay-links.js';
+import { createReaderText } from './overlay-readertext.js';
 import { createSearch } from './overlay-search.js';
 import { createFinger } from './overlay-finger.js';
 import { createLibrary } from './overlay-library.js';
@@ -70,10 +71,13 @@ preparePdf2htmlEx({ document: document, window: window });
         var toast = createToast(base);
         // The library is built below; the quote reference reads it late.
         var library = null;
+        var readerText = createReaderText(withBase({ fetch: fetch.bind(window), documentModel: documentModel,
+            navigation: navigation }));
         var text = createTextInteraction(withBase({
             navigator: navigator, navigation: navigation, documentModel: documentModel, scrollOff: scrollOff,
             location: location, notify: toast.show,
             sourceRef: function () { return library ? library.currentSourceRef() : ''; },
+            readerText: readerText,
         }));
         // Finger and search each yield to the other; the late binding keeps
         // construction order simple.
@@ -126,6 +130,7 @@ preparePdf2htmlEx({ document: document, window: window });
         createTextFit(withBase({ documentModel: documentModel })).mount();
         createLinks(withBase({ documentModel: documentModel, navigation: navigation })).mount();
         documentModel.mountRasterLifecycle();
+        readerText.mount();
         scrollOff.mount();
         search.mount();
         sidebar.mount();

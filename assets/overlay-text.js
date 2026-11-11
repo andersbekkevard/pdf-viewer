@@ -10,6 +10,7 @@ export function createTextInteraction(core) {
     var notify = core.notify || function () {};
     var sourceRef = core.sourceRef || function () { return ''; };
     var location = core.location;
+    var readerText = core.readerText;
 
     // ---------------------------------------------------------------- selection
     function selectionPageSpan(sel) {
@@ -79,14 +80,20 @@ export function createTextInteraction(core) {
     // Each pdf2htmlEX visual line is a `.t`; documentModel.pageText joins them
     // with '\n' to keep the line structure that textContent would collapse.
     // Offscreen pages keep their DOM (content-visibility), so this reads the
-    // whole document.
+    // whole document. A reader document may still be loading text: wait for
+    // the pages first, and name any whose text could not be loaded rather
+    // than copy a partial document silently.
     function pageRangeText(startPage, endPageExcl) {
-        var out = [];
-        for (var p = startPage; p < endPageExcl; p++) {
-            var t = documentModel.pageText(p);
-            if (t) out.push(t);
-        }
-        return out.join('\n\n');
+        return readerText.whenLoaded(startPage, endPageExcl).then(function (loaded) {
+            var missing = loaded.missing || [];
+            var out = [];
+            for (var p = startPage; p < endPageExcl; p++) {
+                var t = missing.indexOf(p) >= 0 ? '[text of page ' + p + ' could not be loaded]'
+                    : documentModel.pageText(p);
+                if (t) out.push(t);
+            }
+            return out.join('\n\n');
+        });
     }
 
     // Copy, then say what was copied (or that nothing was).
@@ -115,18 +122,20 @@ export function createTextInteraction(core) {
     }
     function yankPage() {
         var page = navigation.page();
-        copy(documentModel.pageText(page), 'page ' + page);
+        pageRangeText(page, page + 1).then(function (body) { copy(body, 'page ' + page); });
     }
     function yankChapter() {
         var r = navigation.chapterRange(navigation.page());
         if (!r) { notify('This document has no chapters', { error: true }); return; }
-        copy((r.label ? r.label + '\n\n' : '') + pageRangeText(r.start, r.end),
-            'chapter (' + plural(r.end - r.start, 'page') + ')');
+        pageRangeText(r.start, r.end).then(function (body) {
+            copy(body ? (r.label ? r.label + '\n\n' : '') + body : '', 'chapter (' + plural(r.end - r.start, 'page') + ')');
+        });
     }
     function yankDocument() {
         var total = documentModel.totalPages();
-        var body = pageRangeText(1, total + 1);
-        copy(body ? (document.title || 'Document').trim() + '\n\n' + body : '', 'document (' + plural(total, 'page') + ')');
+        pageRangeText(1, total + 1).then(function (body) {
+            copy(body ? (document.title || 'Document').trim() + '\n\n' + body : '', 'document (' + plural(total, 'page') + ')');
+        });
     }
     // The selection as a quote that says where it is from, for pasting into
     // notes or a model's context:

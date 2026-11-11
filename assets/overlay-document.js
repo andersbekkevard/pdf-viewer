@@ -213,6 +213,8 @@ export function createDocumentModel(core) {
     function isReader() {
         return !!html() && html().getAttribute('data-pdf2html-representation') === 'raster-v1';
     }
+    // A reader page whose text has not arrived yet (overlay-readertext.js).
+    function isTextPending(pf) { return !!pf && pf.hasAttribute('data-reader-pending'); }
     function textMode() {
         var root = html();
         if (!root) return 'canonical';
@@ -359,6 +361,7 @@ export function createDocumentModel(core) {
         representation: representation,
         isLight: isLight,
         isReader: isReader,
+        isTextPending: isTextPending,
         textMode: textMode,
         isTextFlattened: isTextFlattened,
         mountRasterLifecycle: mountRasterLifecycle,

@@ -86,7 +86,9 @@ kept.
   redirect hop (`/read` should answer 307 to `/r/<hash>/`, which answers 200).
 - `first_raster_ms`: from the start of navigation to `/read` until the first
   `.pf` has `data-pdf2html-raster-state="ready"`. The entry is new, so this is
-  a cold open including the shell build (PDFium text extraction of every page).
+  a cold open: the shell with text for the first pages, the rest loading after
+  (`docs/reader.md`, Loading). The text pass waits for each page's text
+  (`text_wait_ms`; `text_wait` is `timeout` if it never arrived).
   It is not the native-viewer ratio of plan A3; there is no native adapter yet.
 - `jump_ms_median`: palette Enter to the target page's raster being ready at
   the exact device width (includes the smooth scroll), median over pages.
