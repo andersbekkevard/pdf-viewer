@@ -19,7 +19,7 @@ try {
         const observer = new MutationObserver(checkText);
         observer.observe(document.documentElement, {attributes: true, attributeFilter: ['data-reader-text']});
         const raster = safe(img => {
-            if (!img?.matches?.('.pf img.bi') || !img.complete || !img.naturalWidth || data.first_page_ms !== null || painting) return;
+            if (!img?.matches?.('.pf img.bi') || !img.complete || img.naturalWidth < 2 || data.first_page_ms !== null || painting) return;   // < 2: the reader's 1 px placeholder
             const r = img.getBoundingClientRect();
             if (r.bottom <= 0 || r.top >= innerHeight || !r.width) return;
             painting = true;

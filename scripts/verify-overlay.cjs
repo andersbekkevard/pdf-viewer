@@ -16,6 +16,7 @@
  *   search      `/` search, Enter lands inside the scrolloff band, n cycles
  *   interaction arrows, paging/history/zoom keys, dark, counter, quote, state
  *   smoke       boot, raster readiness (reader), find, assets, console
+ *   paint       (reader) after jumps, history and pins, on-screen pages paint their raster
  *
  * The document should have an outline and internal links. This is a
  * supplement to the real Comet + Vimium check, not a replacement: synthetic
@@ -672,6 +673,76 @@ async function main() {
     await page.reload(); await page.waitForSelector('.pdf2html-pin-marker');
     record('daemon restores pin after clearing localStorage', await page.locator('.pdf2html-pin-marker').count()===1);
     if (process.env.PDFV_SCREENSHOTS) await page.screenshot({path:process.env.PDFV_SCREENSHOTS+'/pin-marker.png'});
+  }
+  if (run('paint') && (await load({ reset: true }), reader)) {
+    // Every page on screen after a jump shows its raster. The defect this
+    // guards: an image given its source while its page was still
+    // content-visibility-skipped got no layout box once the page came back on
+    // screen, so a loaded, decoded raster painted nothing (white page) until
+    // something reattached it; it did not clear by waiting (seen past 800 ms
+    // and after further frames). Bound: 2 s per step for the raster to be
+    // decoded and laid out over its page. A fixture raster renders in tens of
+    // ms; 2 s leaves room for a loaded machine, and the defect never clears in
+    // that time. Six rounds because it hit about a third of rounds before.
+    const onScreen = () => probe(() => {
+      const pc = document.getElementById('page-container'), box = pc.getBoundingClientRect();
+      return Array.from(pc.querySelectorAll('.pf')).map((pf) => {
+        const r = pf.getBoundingClientRect();
+        if (Math.min(r.bottom, box.bottom) - Math.max(r.top, box.top) < 40) return null;
+        const img = pf.querySelector('img.bi'), ir = img.getBoundingClientRect();
+        return { page: parseInt(pf.id.slice(2), 16), state: pf.dataset.pdf2htmlRasterState, decoded: img.complete && img.naturalWidth > 1,
+          covers: Math.abs(ir.width - r.width) < 2 && Math.abs(ir.height - r.height) < 2,
+          x: r.left, y: Math.max(r.top, box.top), w: r.width, h: Math.min(r.bottom, box.bottom) - Math.max(r.top, box.top) };
+      }).filter(Boolean);
+    });
+    // Share of dark pixels inside each rect of a real screenshot, decoded in a helper page.
+    const helper = await context.newPage();
+    const ink = async (rects) => {
+      const png = await page.screenshot();
+      return helper.evaluate(async ({ b64, rects }) => {
+        const img = new Image(); img.src = 'data:image/png;base64,' + b64; await img.decode();
+        const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+        const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+        const sx = img.width / innerWidth;
+        return rects.map((r) => {
+          const d = g.getImageData(Math.round(r.x * sx), Math.round(r.y * sx), Math.max(1, Math.round(r.w * sx)), Math.max(1, Math.round(r.h * sx))).data;
+          let dark = 0; for (let i = 0; i < d.length; i += 4) if (d[i] + d[i + 1] + d[i + 2] < 384) dark++;
+          return dark / (d.length / 4);
+        });
+      }, { b64: png.toString('base64'), rects });
+    };
+    const far = Math.min(total - 2, Math.max(8, Math.floor(total / 2)));
+    let worst = 0, failures = [], steps = 0;
+    for (let round = 0; round < 6; round++) {
+      await load({ reset: true });
+      const seq = [
+        ['pin p1', () => page.keyboard.press('Control+Shift+P')], ['page 8', () => palette('page 8')],
+        ['back to pin', () => page.keyboard.press('Control+Shift+O')], ['undo', () => page.keyboard.press('Meta+z')],
+        ['pins sidebar', () => palette('pins')], ['escape', () => page.keyboard.press('Escape')],
+        ['far jump', () => palette(String(far))], ['back', async () => { await blurToDocument(); await page.keyboard.press('Meta+z'); }],
+        ['forward', () => page.keyboard.press('Meta+Shift+z')], ['sidebar', () => page.keyboard.press('Meta+b')],
+        ['back again', () => page.keyboard.press('Meta+z')], ['sidebar off', () => page.keyboard.press('Meta+b')],
+      ];
+      for (const [name, act] of seq) {
+        await act();
+        const t0 = Date.now();
+        let pages;
+        do {
+          await page.waitForTimeout(50);
+          pages = await onScreen();
+        } while (pages.some((x) => x.state !== 'ready' || !x.decoded || !x.covers) && Date.now() - t0 < 2000);
+        steps++;
+        const bad = pages.filter((x) => x.state !== 'ready' || !x.decoded || !x.covers);
+        const inks = bad.length ? [] : await ink(pages);
+        const white = pages.filter((x, i) => inks[i] !== undefined && inks[i] < 0.002);
+        if (bad.length || white.length) failures.push(`round ${round} ${name}: ` + JSON.stringify([...bad, ...white].map((x) => ({ p: x.page, state: x.state, decoded: x.decoded, covers: x.covers }))));
+        else worst = Math.max(worst, Date.now() - t0);
+      }
+      await page.keyboard.press('Escape').catch(() => {});
+    }
+    await helper.close();
+    record('[reader] after every jump, on-screen pages show a decoded raster covering the page within 2 s',
+      failures.length === 0, failures.length ? failures.slice(0, 3).join(' | ') : `${steps} steps, slowest ${worst} ms`);
   }
   if (run('hierarchy') && reader) {
     // Generated shell only: replace its outline before the model reads it.

@@ -319,6 +319,14 @@ export function createDocumentModel(core) {
     // and requests for a width or page no longer wanted are cancelled at once:
     // the daemon drops a queued render whose request went away.
     var NEAR_MARGIN = '100% 0px', KEEP_MARGIN = '300% 0px';
+    // A page without a raster shows this transparent pixel, never no source.
+    // Chromium gives an image that gets its source while its page is still
+    // content-visibility-skipped no layout box when the page is un-skipped a
+    // frame later: the raster is loaded and decoded but the page stays white
+    // until something reattaches the image (seen after a far jump back to a
+    // released page; scripts/verify-overlay.cjs "on-screen pages paint").
+    // Going from one image to another never takes that path.
+    var PLACEHOLDER = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
     var MAX_REQUESTS = 3, ZOOM_SETTLE_MS = 120;
     // A page on screen with nothing to show (a far jump, a scrollbar drag)
     // first gets a raster at 1/PREVIEW_DIVISOR of its width, which renders and
@@ -365,7 +373,7 @@ export function createDocumentModel(core) {
         function release(entry) {
             cancel(entry);
             entry.failed = null;
-            if (entry.img.hasAttribute('src')) entry.img.removeAttribute('src');
+            if (entry.img.getAttribute('src') !== PLACEHOLDER) entry.img.setAttribute('src', PLACEHOLDER);
             entry.shown = null;
             updateState(entry);
         }
@@ -476,7 +484,7 @@ export function createDocumentModel(core) {
                 near: false, kept: false, visible: false, shown: null, failed: null, job: null, preview: null,
             };
             if (!entry.cssWidth) return;
-            if (img.hasAttribute('src')) img.removeAttribute('src');
+            img.setAttribute('src', PLACEHOLDER);
             entries.set(pf, entry);
             order.push(entry);
             setState(entry, 'unloaded');

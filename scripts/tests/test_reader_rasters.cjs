@@ -94,6 +94,9 @@ async function main() {
         await flush();
     }
     const state = (i) => frames[i].dataset.pdf2htmlRasterState;
+    // A page without a raster holds the transparent placeholder, never no source.
+    const isPlaceholder = (img) => /^data:image\/gif;/.test(img.getAttribute('src') || '');
+    assert(frames.every((f) => isPlaceholder(f.img)), 'every page starts on the placeholder');
 
     // Open on pages 10-11 (indices 9, 10); near adds 8 and 11.
     await view(9, 11);
@@ -102,7 +105,7 @@ async function main() {
     assert.deepEqual(previews().map((i) => i.src).sort(), ['/r/h/p/10/600.jpg', '/r/h/p/11/600.jpg'],
         'empty pages on screen also get a half-width preview');
     assert.equal(state(9), 'loading');
-    assert(!frames[9].img.hasAttribute('src'), 'nothing is shown before it has decoded');
+    assert(isPlaceholder(frames[9].img), 'nothing is shown before it has decoded');
     previews().find((i) => i.src === '/r/h/p/10/600.jpg').finish();
     await flush();
     assert.equal(frames[9].img.getAttribute('src'), '/r/h/p/10/600.jpg', 'the preview fills the empty page');
@@ -149,12 +152,12 @@ async function main() {
     await view(29, 30);
     assert.equal(urls()[0], '/r/h/p/30/1680.jpg');
     assert.deepEqual(previews().map((i) => i.src), ['/r/h/p/30/840.jpg']);
-    assert(!frames[9].img.hasAttribute('src'), 'rasters far from the viewport are released');
+    assert(isPlaceholder(frames[9].img), 'rasters far from the viewport are released to the placeholder');
     assert.equal(state(9), 'unloaded');
     // A late completion of a cancelled request cannot revive a released page.
     stale.forEach((i) => { try { i.finish(); } catch (_) { /* already rejected */ } });
     await flush();
-    assert(!frames[9].img.hasAttribute('src'));
+    assert(isPlaceholder(frames[9].img));
 
     // A failed raster shows as an error and is retried when the page comes back.
     pending().find((i) => i.src === '/r/h/p/30/1680.jpg').finish(false);

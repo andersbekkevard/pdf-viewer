@@ -166,7 +166,7 @@ async function main() {
                     const zoom = parseFloat(root.style.getPropertyValue('--pdf2html-zoom')) || 1;
                     const want = Math.max(64, Math.round(parseFloat(pf.style.width) * zoom * dpr));
                     const src = img.getAttribute('src') || '';
-                    if (st === 'ready' && src.endsWith('/' + want + '.png') && img.complete && img.naturalWidth) return 'ready';
+                    if (st === 'ready' && (src.endsWith('/' + want + '.png') || src.endsWith('/' + want + '.jpg')) && img.complete && img.naturalWidth) return 'ready';
                     return false;
                 };
                 entry.rasterState = await page.waitForFunction(wanted, { pid: id, dpr: spec.dpr },

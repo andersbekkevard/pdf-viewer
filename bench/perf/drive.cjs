@@ -444,7 +444,7 @@ async function main() {
         out.readerDom = await page.evaluate(() => {
             const pfs = [...document.querySelectorAll('#page-container > .pf')];
             let decoded = 0, withSrc = 0;
-            for (const img of document.querySelectorAll('img.bi[src]')) {
+            for (const img of document.querySelectorAll('img.bi[src]:not([src^="data:"])')) {   // not the placeholder
                 withSrc += 1;
                 if (img.complete) decoded += img.naturalWidth * img.naturalHeight * 4;
             }
