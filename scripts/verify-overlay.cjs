@@ -603,6 +603,11 @@ async function main() {
     await page.keyboard.press('Escape');
   }
 
+  if (run('selection')) {
+    await load({reset: true});
+    if (await page.evaluate(() => document.documentElement.dataset.pdf2htmlRepresentation === 'raster-v1')) await require('./verify-reader-selection.cjs')(page, BASE, record);
+  }
+
   // ======================================================================= search
   if (run('search')) {
     await load({ reset: true, prefs: { 'pdf2html-pinned': '0', 'pdf2html-scrolloff': '0.25' } });
