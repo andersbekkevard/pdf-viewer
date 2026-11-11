@@ -731,7 +731,9 @@ def render_raster(path: str, index: int, width_px: int, fmt: str = "png") -> byt
             image = bitmap.to_pil()
             buffer = io.BytesIO()
             if fmt == "jpg":
-                image.convert("RGB").save(buffer, format="JPEG", quality=JPEG_QUALITY, subsampling=0)
+                if image.mode != "RGB":   # PDFium's BGR comes out as RGB; no copy then
+                    image = image.convert("RGB")
+                image.save(buffer, format="JPEG", quality=JPEG_QUALITY, subsampling=0)
             else:
                 image.save(buffer, format="PNG", compress_level=1)
             return buffer.getvalue()
