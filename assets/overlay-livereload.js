@@ -41,11 +41,11 @@ export function createLiveReload(core) {
             }
             candidate = result.status === 'changed' ? result.stamp : null;
         } catch (_) { /* save in progress, deleted file, or daemon unavailable: retry */ }
-        if (run === epoch && !stopped && prefs.get('liveReload')) timer = setTimeout(poll, 1500);
+        if (run === epoch && !stopped && prefs.get('liveReload')) timer = setTimeout(poll, 500);
     }
     function start() {
         stop(); stopped = false; candidate = null;
-        if (path && prefs.get('liveReload')) timer = setTimeout(poll, 1500);
+        if (path && prefs.get('liveReload')) timer = setTimeout(poll, 500);
     }
     prefs.onChange('liveReload', start);
     window.addEventListener('pagehide', stop);

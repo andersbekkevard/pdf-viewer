@@ -246,7 +246,7 @@ alignment. See its README.
 ## Local files and live reload
 
 Local opens capture a stable parsed snapshot; the reader never renders a half-written
-original. Tabs poll `/local-file/check` every 1.5 seconds (a stat, no filesystem
+original. Tabs poll `/local-file/check` every 0.5 seconds (a stat, no filesystem
 watcher). A changed stamp must persist across two polls before a validated `/read`
 open. Current position, marks and zoom are saved before transferring to the new
 hash and replacing the tab's URL. Invalid/incomplete saves and missing files leave
