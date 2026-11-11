@@ -17,6 +17,11 @@
 # is resolved from the local npx module cache.
 set -euo pipefail
 
+if [[ "${1:-}" = --reader ]]; then
+    export PDFV_FIXTURE_PAGES=1
+    exec "$(cd "$(dirname "$0")" && pwd)/verify-overlay.sh" --reader --only smoke
+fi
+
 PORT=7435
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CACHE_DIR="$HOME/.cache/pdf_viewer"

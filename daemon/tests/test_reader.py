@@ -327,28 +327,42 @@ class TextRangeTest(unittest.TestCase):
 
     def test_urgent_tasks_run_first(self):
         """A page render submitted after a backlog of text tasks runs first."""
-        order = []
-        lock = threading.Lock()
-        with self.reader._queued:
-            # Hold the dispatcher, as if every worker were busy.
-            self.reader._active += self.reader.workers
-        background = [self.reader._submit(pdfium_doc.page_sizes, str(self.pdf), urgent=False) for _ in range(3)]
-        ocr_task = self.reader._submit(pdfium_doc.page_sizes, str(self.pdf), priority=2)
-        urgent = self.reader._submit(pdfium_doc.page_sizes, str(self.pdf))
-        for name, future in [("background", f) for f in background] + [("urgent", urgent), ("ocr", ocr_task)]:
-            future.add_done_callback(lambda _f, name=name: (lock.acquire(), order.append(name), lock.release()))
-        with self.reader._queued:
-            # One worker frees up: the urgent task takes it.
-            self.reader._active -= self.reader.workers - 1
-            self.reader._queued.notify_all()
-        urgent.result(timeout=30)
-        with self.reader._queued:
-            self.reader._active -= 1
-            self.reader._queued.notify_all()
-        for future in background:
-            future.result(timeout=30)
-        ocr_task.result(timeout=30)
-        self.assertEqual(order, ["urgent", "background", "background", "background", "ocr"])
+        # Priority specifies dispatch order, not completion order across workers.
+        # A controllable pool keeps one slot occupied until we release it and
+        # records submissions before any PDFium/process scheduling can interfere.
+        submitted = []
+        condition = threading.Condition()
+
+        class Pool:
+            def submit(self, fn, *args):
+                future = concurrent.futures.Future()
+                with condition:
+                    submitted.append(future)
+                    condition.notify_all()
+                return future
+
+        def dispatched(count):
+            with condition:
+                self.assertTrue(condition.wait_for(lambda: len(submitted) == count, timeout=5))
+                return submitted[-1]
+
+        with patch.object(self.reader, "pool", return_value=Pool()):
+            with self.reader._queued:
+                self.reader._active = self.reader.workers
+            background = [self.reader._submit(pdfium_doc.page_sizes, str(self.pdf), urgent=False) for _ in range(3)]
+            ocr_task = self.reader._submit(pdfium_doc.page_sizes, str(self.pdf), priority=2)
+            urgent = self.reader._submit(pdfium_doc.page_sizes, str(self.pdf))
+            with self.reader._queued:
+                self.reader._active -= 1  # exactly one slot, throughout the test
+                self.reader._queued.notify_all()
+            for index, expected in enumerate([urgent, *background, ocr_task], 1):
+                inner = dispatched(index)
+                self.assertTrue(expected.running())
+                self.assertFalse(expected.done())
+                inner.set_result(index)
+                self.assertEqual(expected.result(timeout=5), index)
+            with self.reader._queued:
+                self.reader._active -= self.reader.workers - 1
 
 
 class RouteTest(unittest.TestCase):
