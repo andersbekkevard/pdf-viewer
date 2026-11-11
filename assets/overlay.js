@@ -1,3 +1,4 @@
+import './overlay-timing.js';
 // ============================================================================
 // pdf_viewer overlay — runtime layer on top of pdf2htmlEX's output.
 //
