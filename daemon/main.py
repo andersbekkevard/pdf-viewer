@@ -1300,10 +1300,10 @@ def _prewarm_first_raster(hash_: str, pdf: pathlib.Path, viewport: Optional[str]
 
 
 @app.get("/r/{hash_}/")
-def reader_shell(hash_: str, request: Request, background: BackgroundTasks):
+def reader_shell(hash_: str, background: BackgroundTasks, request: Request = None):
     pdf = _reader_source(hash_)
     saved = _saved_page(hash_)
-    preload = _prewarm_first_raster(hash_, pdf, request.cookies.get(_VIEWPORT_COOKIE))
+    preload = _prewarm_first_raster(hash_, pdf, request.cookies.get(_VIEWPORT_COOKIE)) if request else None
     try:
         shell = reader.shell(hash_, pdf, catalog.entry_name(hash_), near_pages=(saved,) if saved else ())
     except Exception as error:
