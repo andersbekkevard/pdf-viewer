@@ -8,35 +8,50 @@ reported with its spread, and compared only beyond a noise band.
 
 ## Run
 
-The reader needs its own daemon on a scratch cache (ports 7480–7489 only; never
-the real cache):
+The reader needs its own daemon on a scratch cache (never the real cache or
+the owner's daemon on 7435, which `run.py` refuses):
 
 ```bash
-cd daemon && PDF_VIEWER_ENGINE=reader PDF_VIEWER_CACHE_DIR=/tmp/pdfv-perf/cache \
-  PDFV_STATE_DB=/tmp/pdfv-perf/state.db uv run main.py --port 7481
+B=~/.cache/pdf_viewer-bench/daemon; mkdir -p $B
+cd daemon && PDF_VIEWER_ENGINE=reader PDF_VIEWER_CACHE_DIR=$B/cache \
+  PDFV_STATE_DB=$B/state.db uv run uvicorn main:app --host 127.0.0.1 --port 7442
 ```
 
-Then, with nothing else heavy running:
+Then, with as little else running as possible:
 
 ```bash
-uv run bench/perf/run.py --out /tmp/pdfv-perf/results/perf.json            # 8 docs, both engines, 5 trials
-uv run bench/perf/run.py --out /tmp/pdfv-perf/results/one.json --docs fa9b7cc99c1e --repeat 1
-python3 bench/perf/compare.py /tmp/pdfv-perf/results/perf.json             # table; writes perf.md beside it
+R=~/.cache/pdf_viewer-bench/results
+uv run bench/perf/run.py --out $R/perf.json --repeat 3          # 6 docs, both engines
+uv run bench/perf/run.py --out $R/one.json --docs fa9b7cc99c1e --repeat 1
+python3 bench/perf/compare.py $R/perf.json                     # table; writes perf.md beside it
 ```
 
 Options: `--engine reader|native|both`, `--docs SHA,SHA` (manifest sha256
-prefixes; default the 8-document set in `run.py`), `--repeat N`, `--base`
-(daemon, default `http://127.0.0.1:7481`), `--native-port` (default 7482),
-`--headless` (new-headless full Chromium instead of a window; not used for the
-reported numbers), `--max-load` (each trial waits up to 2 minutes while the
-1-minute load average is above it; default 4), `--keep-frames DIR` (private
-content; refused inside the repository).
+prefixes; default the 6-document set in `run.py`, 3 to 1,677 pages),
+`--repeat N` (default 5), `--base` (daemon, default `http://127.0.0.1:7442`),
+`--native-port` (default 0, any free port), `--work DIR` (frames while a trial
+is scored; default `~/.cache/pdf_viewer-bench/perf-work`), `--headed` (a
+visible window instead of new-headless; it takes keyboard focus on the desktop
+it opens on, so never while someone works at the machine; not used for any
+reported number),
+`--max-load` (each trial waits up to 2 minutes while the 1-minute load average
+is above it; default 12), `--keep-frames DIR` (private content). Frame and
+work directories are refused inside the repository.
 
-A trial takes about 30–40 s, so the default run (8 × 2 × 5 = 80 trials) takes
-about 45 minutes. Trials run strictly one at a time. Each opens a headed
-Chromium for Testing window of 1320×840 at screen position (320, 1100), which
-on Anders' desk is the Mac's built-in display below the main one; it never
-needs focus.
+Every trial records the load average and free memory at its start and end
+(`machine`, `machine_end`). The machine is shared with other agents; compare
+runs only alongside their load, and compare the engines within one run, where
+they alternate trial by trial.
+
+A trial takes about 40 s, so the default run with `--repeat 3`
+(6 × 2 × 3 = 36 trials) takes about 25 minutes. Trials run strictly one at a
+time, each in a new-headless Chromium for Testing (`--headless=new`: full
+Chromium, Chrome's PDF viewer included) with a 1300×820 window.
+
+**All numbers are new-headless.** There is no display: frames are paced by a
+virtual 60 Hz begin-frame source, so frame-based times move in 16.7 ms steps
+and the held-scroll stall measure uses that source in place of the display's
+vsync (see Metrics). A headed run (version 1 of this bench) is not comparable.
 
 Files: `run.py` (orchestration, pixel and trace analysis; PEP 723 deps),
 `drive.cjs` (one trial in one fresh browser), `compare.py` (stdlib only).
@@ -52,12 +67,14 @@ temporary profile), one engine, one document:
 | `open_cold` | navigate to the document. Reader: `/read?path=<pdf>` after `DELETE /mapping/<hash>`, so no shell, raster or state exists; the daemon and its worker pool are already running. Native: `http://127.0.0.1:7482/doc.pdf#zoom=125` from a tiny range-capable server in the driver, fresh browser cache |
 | `open_warm` | close that tab, open the same URL in a new tab of the same browser (reader: entry and rasters on disk, browser cache warm; reading state reset so it opens at page 1) |
 | `scroll10` | wheel events of 100 CSS px every 16 ms at the window centre, enough for 10 pages; traced, no screencast |
-| `jump` | type the middle page number and press Enter: reader palette (`:` n Enter), native toolbar page field (click, ⌘A, n, Enter). Timed from Enter |
+| `jump` | type the middle page number and press Enter: reader palette (`:` n Enter), native toolbar page field (click, ⌘A, n, Enter). Timed from the Enter keydown |
 | `scroll5` | the same wheel input for 5 more pages; timed from the last wheel event |
 | memory | screencast off, 3 s idle, `footprint` again |
-| `zoom` | one zoom-in step: native toolbar "Zoom in" (125 % → 150 %); reader `:zoom 2.0000` (same factor). Timed from the click / Enter |
+| `zoom` | one zoom-in step: native toolbar "Zoom in" (125 % → 150 %, ×1.2); reader ⌘+ (×1/0.9 = 1.11, the key its owner uses). Timed from the pointerdown / keydown |
+| `zoom_burst` | four zoom-out steps 60 ms apart: native "Zoom out", reader ⌘−. Timed from the last input |
+| memory | screencast off, 3 s idle, `footprint` again (`memory_after_zoom_mb`) |
 
-Geometry is identical for both engines: window 1320×840 (viewport 1320×753
+Geometry is identical for both engines: window 1300×820 (viewport about 1300×733
 CSS px), device scale factor 2 (`--force-device-scale-factor=2`, real window,
 no viewport emulation), and the same on-screen page size. Native 100 % is 4/3
 CSS px per PDF point, the reader's zoom is CSS px per point, so native 125 %
@@ -67,10 +84,19 @@ after each phase agree between engines (e.g. 1 → 11 after `scroll10`, 839 at
 the jump, 844 after `scroll5`), which checks that both covered the same
 distance.
 
-The reader's ⌘+ has no overlay handler (in Chromium it falls through to
-browser zoom), so the reader's zoom step uses the palette's documented `:zoom`
-command; the native step uses the toolbar button. Both are one discrete step
-of the same factor.
+The zoom steps are each engine's own: the native toolbar's next preset
+(×1.2) and the reader's ⌘+ (×1.11). The reader's step is slightly smaller, so
+its sharp raster is slightly smaller to render.
+
+**Input time.** Playwright takes tens of milliseconds between a `click()` or
+`press()` call and the event reaching the page (actionability checks,
+scrolling, CDP round trips), more for a click inside the native viewer's frame
+than for a key. Version 1 timed from the call, which added that overhead to
+both engines unequally. Every discrete input is now timed from the event as
+the receiving frame saw it: a capture listener records
+`performance.timeOrigin + event.timeStamp` (the same epoch clock as the
+screencast timestamps) in the reader's document or the native viewer's
+extension frame.
 
 ## The visual signal
 
@@ -100,9 +126,20 @@ way for both engines:
   Two frames match when fewer than 0.2 % of the region's pixels differ in luma
   by more than 40 levels.
 
-**Complete** (the latency reported for open, jump, scroll settle and zoom):
-the timestamp of the earliest frame from which every later frame in the phase
-matches the phase's final frame, minus the time of the input.
+**Complete** (sharp; the latency reported for open, jump, scroll settle and
+zoom): the timestamp of the earliest frame from which every later frame in the
+phase matches the phase's final frame, minus the time of the input.
+
+**Coarse** (`coarse_ms`: zoom *applied*, jump *legible*): the same, with frames
+compared at a coarse scale: luma averaged over 8×8 device-px blocks (4×4 CSS
+px), a block differing by more than 24 levels, and a match when fewer than 1 %
+of blocks differ. A raster scaled from the previous zoom, or a lower-resolution
+raster of the right page, matches the sharp final frame; the old page, the old
+size and a blank page do not. Because every later frame must match too, a
+blank or old-size frame after the first good one pushes the time later, so
+flicker counts against it. Checked on kept frames: the reader's scaled interim
+after ⌘+ matches coarsely and not finely; its blank page during a jump matches
+neither.
 
 ### Signal validation
 
@@ -126,8 +163,8 @@ matches the phase's final frame, minus the time of the input.
   page for ~30 ms before the raster; the reader's zoom shows the scaled old
   raster until the new one arrives.
 
-Time resolution is one display frame (8.3 ms at 120 Hz) plus JPEG capture
-latency, which is the same for both engines.
+Time resolution is one begin frame (16.7 ms in new-headless) plus JPEG
+capture latency, which is the same for both engines.
 
 ## Metrics
 
@@ -136,18 +173,23 @@ latency, which is the same for both engines.
 | `open_cold_ms` | navigation start → *complete* for the first viewport, reader with no cache entry, native in a fresh profile | trusted; for the reader it includes the shell build (see costs) |
 | `open_warm_ms` | the same, second open in a new tab of the same browser | trusted |
 | `open_cold_first_content_ms` | first frame whose region is not uniform (anything painted) | informational |
-| `scroll_stall_fraction` | during `scroll10`, share of 16 ms input periods in which the display compositor presented no frame (`Display::DrawAndSwap` in the GPU process, trace clock aligned with a `performance.mark`) | trusted for stalls; see below |
-| `scroll_long_frames` | `scroll10` swap intervals longer than two input periods (32 ms) | trusted |
+| `scroll_stall_fraction` | during `scroll10`, share of periods (the slower of the 16 ms wheel interval and the frame source's interval: 16.7 ms in new-headless, from `ExternalBeginFrameSource::OnBeginFrame`) in which the display compositor presented no frame (`Display::DrawAndSwap` in the GPU process, trace clock aligned with a `performance.mark`) | trusted for stalls; see below |
+| `scroll_long_frames` | `scroll10` swap intervals longer than two such periods | trusted |
 | `scroll_fps` | swaps per second during `scroll10` | information only, not a quality measure |
 | `scroll_settle_ms` | last wheel event of `scroll5` → *complete* | trusted, documents ≥ 16 pages only |
-| `jump_ms` | Enter → *complete* | trusted |
-| `zoom_ms` | click / Enter → *complete* at the new zoom | trusted |
+| `jump_legible_ms` | Enter → *coarse*: the target page legible on screen | trusted |
+| `jump_ms` | Enter → *complete*: sharp | trusted |
+| `zoom_applied_ms` | input → *coarse*: the page visibly at the new size | trusted |
+| `zoom_ms` | input → *complete*: sharp at the new zoom | trusted |
+| `zoom_burst_applied_ms`, `zoom_burst_ms` | last of four steps → *coarse* / *complete*; the reader's raster requests during the burst are in `rasters.by_phase.zoom_burst` (`widths`, `stale_requests`) | trusted |
+| `memory_after_zoom_mb` | as `memory_browser_mb`, after the zoom phases | trusted as a whole-browser number |
 | `memory_browser_mb` | sum of `phys_footprint` over the browser process and all its descendants after the journey, minus the same browser's empty-tab baseline; the tracing service process (exists only because the bench traced) is excluded | trusted as a whole-browser number; per-process split is noisy (the GPU process can shrink below its baseline) |
 | `memory_total_mb` | reader: browser delta + growth of the daemon tree (daemon and worker processes, `footprint`) during the trial; native: browser delta | partly; see below |
-| reader rasters | number and bytes of `/r/<hash>/p/<n>/<w>.png` responses per phase (Playwright `requestfinished`, `responseBodySize`), request time | trusted |
+| reader rasters | number and bytes of `/r/<hash>/p/<n>/<w>.{png,jpg}` responses per phase (Playwright `requestfinished`, `responseBodySize`), request time | trusted |
 
-Why the scroll measure is stalls and not dropped vsyncs: the built-in display
-runs at 120 Hz while wheel input arrives every 16 ms (62.5 Hz). The native
+Why the scroll measure is stalls and not dropped vsyncs (written for the
+headed version 1, whose display ran at 120 Hz; in new-headless both engines
+are paced at 60 Hz): wheel input arrives every 16 ms (62.5 Hz). The native
 viewer animates each wheel step across vsyncs and presents ~119 frames per
 second; the reader's scroller moves once per wheel event and presents ~80.
 Counting missed vsyncs would score that as 35 % dropped frames for the

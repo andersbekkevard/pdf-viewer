@@ -196,9 +196,13 @@ let browserRef = null;
 async function main() {
     const server = await startServer();
     out.serverClose = () => server && server.close();
-    const args = [`--window-size=${spec.window.width},${spec.window.height}`,
-        `--window-position=${spec.windowPosition.x},${spec.windowPosition.y}`, `--force-device-scale-factor=${spec.dpr}`];
-    if (spec.headless) args.push('--headless=new');
+    // New-headless full Chromium by default (Chrome's PDF viewer included).
+    // A headed window (spec.headless === false, run.py --headed) takes keyboard
+    // focus on the owner's desktop, so it is opt-in only.
+    const headless = spec.headless !== false;
+    const args = [`--window-size=${spec.window.width},${spec.window.height}`, `--force-device-scale-factor=${spec.dpr}`];
+    if (headless) args.push('--headless=new');
+    else args.push(`--window-position=${spec.windowPosition.x},${spec.windowPosition.y}`);
     const browser = await chromium.launch({ executablePath: spec.chromium, headless: false, args });
     browserRef = browser;
     // The browser process is this driver's direct child (Playwright launches it over a pipe).
@@ -206,7 +210,7 @@ async function main() {
     if (own.length !== 1) throw new Error(`browser process: ${own.length} candidates`);
     const browserPid = own[0].pid;
     out.browserVersion = browser.version();
-    out.mode = spec.headless ? 'new-headless' : 'headed';
+    out.mode = headless ? 'new-headless' : 'headed';
     const context = await browser.newContext({ viewport: null, serviceWorkers: 'block' });
     await context.addInitScript((zoom) => {
         try { localStorage.setItem('pdf2html-zoom', String(zoom)); } catch (e) { /* ignore */ }
@@ -276,7 +280,7 @@ async function main() {
         screencasting = false;
     };
 
-    const rasterRe = /\/r\/[0-9a-f]+\/p\/(\d+)\/(\d+)\.png$/;
+    const rasterRe = /\/r\/[0-9a-f]+\/p\/(\d+)\/(\d+)\.(?:png|jpg)$/;
     const watch = (page) => {
         page.on('requestfinished', async (req) => {
             const m = rasterRe.exec(new URL(req.url()).pathname);

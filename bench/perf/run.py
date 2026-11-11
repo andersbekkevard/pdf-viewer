@@ -5,7 +5,7 @@
 # ///
 """Perf bench: time to view, interaction latency and memory, reader vs Chrome's native PDF viewer.
 
-Each trial is one fresh full Chromium (Chromium for Testing, headed by default)
+Each trial is one fresh full Chromium (Chromium for Testing, new-headless by default)
 running the same journey on one document with one engine (drive.cjs). Latency
 is read from screencast frames, identically for both engines; frame pacing
 from a trace of the display compositor; memory from macOS `footprint` over
@@ -13,7 +13,7 @@ every browser process. Definitions: bench/perf/README.md.
 
 Usage:
     uv run bench/perf/run.py --out /tmp/pdfv-perf/results/perf.json [--engine reader|native|both]
-        [--docs SHA_PREFIX,...] [--repeat 5] [--base http://127.0.0.1:7481] [--headless]
+        [--docs SHA_PREFIX,...] [--repeat 5] [--base http://127.0.0.1:7442] [--headed]
     python3 bench/perf/compare.py /tmp/pdfv-perf/results/perf.json
 
 The reader needs a daemon with PDF_VIEWER_ENGINE=reader on --base, with its
@@ -67,10 +67,12 @@ DEFAULT_DOCS = [
 # Also present locally and usable with --docs: 09b124f6a862 (125 p slides), 40d976c83c18 (714 p),
 # 00bf2159e2ab (1137 p).
 
-# Geometry. The headed window is placed on the Mac's built-in display (below the
-# main display), so it never covers the owner's work: position and size are fixed.
-# Headed, because frame pacing and paint latency need the real display's vsync
-# (new-headless runs on a virtual 60 Hz begin-frame source).
+# Geometry. Trials run in new-headless full Chromium (`--headless=new`, which
+# still runs Chrome's PDF viewer): a headed window takes keyboard focus on the
+# owner's Mac while he works, wherever it is placed. `--headed` exists for a
+# deliberate check only. Frames in new-headless come from a virtual 60 Hz
+# begin-frame source, not the display, so frame times are in 16.7 ms steps.
+# The window position applies to --headed only.
 # Native zoom 125 % is 5/3 CSS px per PDF point (native 100 % = 4/3 px/pt); the
 # reader's zoom is CSS px per point, so 1.6667 is the same page size on screen.
 # 125 % -> 150 % is the native viewer's next preset step.
@@ -267,6 +269,14 @@ def analyze_trace(path: pathlib.Path, ph: dict) -> dict | None:
     if len(vs) <= 10:
         vs = sorted(e["ts"] / 1000 for e in events if e.get("name") == "OnVSyncPresentation")
         vsync_source = "OnVSyncPresentation"
+    if len(vs) <= 10:
+        # New-headless: no display; the virtual begin-frame source (60 Hz) paces frames.
+        by_thread = {}
+        for e in events:
+            if e.get("name") == "ExternalBeginFrameSource::OnBeginFrame":
+                by_thread.setdefault((e.get("pid"), e.get("tid")), []).append(e["ts"] / 1000)
+        vs = sorted(max(by_thread.values(), key=len)) if by_thread else []
+        vsync_source = "ExternalBeginFrameSource"
     vsync = float(statistics.median(np.diff(vs))) if len(vs) > 10 else None
     if not vsync:
         return {"error": "no vsync events"}
@@ -279,7 +289,10 @@ def analyze_trace(path: pathlib.Path, ph: dict) -> dict | None:
     # engine that does not animate between events (the reader) can only update that
     # often, while one that does (native) updates every vsync. The comparable
     # question is how often a whole input period passed with no presented frame.
-    period = ph.get("intervalMs") or 16
+    # A frame source slower than the input (new-headless: 60 Hz against 62.5 Hz
+    # wheel input) leaves an input period without a frame now and then even
+    # when keeping up, so the period is the slower of the two.
+    period = max(ph.get("intervalMs") or 16, vsync)
     bins = np.arange(t0, t1 - period, period)
     idx = np.searchsorted(np.array(win), bins)
     nxt = np.array(win + [float("inf")])[idx]
@@ -464,7 +477,9 @@ def main() -> int:
     ap.add_argument("--native-port", type=int, default=0, help="port of the native viewer's PDF server (0: any free port)")
     ap.add_argument("--work", default=str(WORK), help="scratch directory for frames (private content; outside the repo)")
     ap.add_argument("--corpus")
-    ap.add_argument("--headless", action="store_true", help="new-headless full Chromium instead of a headed window")
+    ap.add_argument("--headed", action="store_true",
+                    help="a visible browser window instead of new-headless; it TAKES KEYBOARD FOCUS on the "
+                         "desktop it opens on, so never use it while someone works at the machine")
     ap.add_argument("--keep-frames", help="keep screencast frames here (private content!)")
     ap.add_argument("--max-load", type=float, default=12.0,
                     help="wait (up to 2 min) before a trial while the 1-minute load average is above this")
@@ -529,7 +544,7 @@ def main() -> int:
                     "memory_gb": round(int(sh(["sysctl", "-n", "hw.memsize"]) or 0) / 2**30),
                     "macos": platform.mac_ver()[0]},
         "chromium": chromium.split("/ms-playwright/")[-1].split("/")[0],
-        "mode": "new-headless" if args.headless else "headed",
+        "mode": "headed" if args.headed else "new-headless",
         "window": WINDOW, "window_position": WINDOW_POSITION, "dpr": DPR, "native_zoom": [NATIVE_ZOOM, NATIVE_ZOOM_STEP],
         "reader_zoom": [READER_ZOOM, READER_ZOOM_STEP], "region": REGION,
         "wheel": {"delta": WHEEL_DELTA, "interval_ms": WHEEL_INTERVAL_MS},
@@ -573,7 +588,7 @@ def main() -> int:
                 wdir.mkdir(parents=True)
                 deleted = http("DELETE", f"{args.base}/mapping/{hash16}") if engine == "reader" else None
                 spec = {
-                    "engine": engine, "pdfPath": str(pdf), "chromium": chromium, "headless": args.headless,
+                    "engine": engine, "pdfPath": str(pdf), "chromium": chromium, "headless": not args.headed,
                     "readUrl": f"{args.base}/read?path={urllib.parse.quote(str(pdf))}",
                     "stateResetUrl": f"{args.base}/entry/{hash16}/state",
                     "nativePort": args.native_port, "nativeZoom": NATIVE_ZOOM,
