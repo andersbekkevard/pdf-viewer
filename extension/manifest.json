@@ -1,10 +1,11 @@
 {
     "manifest_version": 3,
     "name": "Anders PDF Viewer",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "description": "Redirect PDF URLs to the pdf_viewer daemon — static .pdf URLs + dynamic matches against the cache.",
     "permissions": [
         "declarativeNetRequestWithHostAccess",
+        "webRequest",
         "alarms"
     ],
     "host_permissions": [
