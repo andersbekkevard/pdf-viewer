@@ -1302,6 +1302,9 @@ def _prewarm_first_raster(hash_: str, pdf: pathlib.Path, viewport: Optional[str]
     return f"/r/{hash_}/p/{page}/{width}.jpg"
 
 
+_FIRST_IMG = '<img class="bi" alt=""'
+
+
 @app.get("/r/{hash_}/")
 def reader_shell(hash_: str, background: BackgroundTasks, request: Request = None):
     pdf = _reader_source(hash_)
@@ -1316,6 +1319,17 @@ def reader_shell(hash_: str, background: BackgroundTasks, request: Request = Non
     if preload:
         # The browser fetches the first page image while the overlay scripts load.
         headers["Link"] = f"<{preload}>; rel=preload; as=image"
+    if preload and f"/p/1/" in preload:
+        # Page 1 is on screen as soon as the markup is parsed, so its image
+        # goes into the markup itself and paints without waiting for the
+        # overlay. Only page 1: a source set on a page that content-visibility
+        # still skips can leave the image without a box (docs/reader.md).
+        try:
+            text = shell if isinstance(shell, str) else shell.read_text(encoding="utf-8")
+            marked = text.replace(_FIRST_IMG, f'{_FIRST_IMG} src="{preload}"', 1)
+            return Response(marked, media_type="text/html; charset=utf-8", headers=headers)
+        except OSError:
+            pass
     if isinstance(shell, str):
         # Text still loading: the overlay fetches the rest by range.
         return Response(shell, media_type="text/html; charset=utf-8", headers=headers)

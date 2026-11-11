@@ -334,7 +334,7 @@ async function firstRasterAt(page) {
     const img = document.querySelector('.pf img.bi');
     if (!img || !img.complete || !img.naturalWidth) return null;
     const entry = performance.getEntriesByType('resource')
-      .find((e) => /\/p\/1\/\d+\.png$/.test(e.name));
+      .find((e) => /\/p\/1\/\d+\.(png|jpg)$/.test(e.name));
     return entry ? performance.timeOrigin + entry.responseEnd : null;
   }).catch(() => null);
 }

@@ -484,10 +484,16 @@ export function createDocumentModel(core) {
                 near: false, kept: false, visible: false, shown: null, failed: null, job: null, preview: null,
             };
             if (!entry.cssWidth) return;
-            img.setAttribute('src', PLACEHOLDER);
+            // The daemon may have put the first page's raster straight into the
+            // shell (daemon/main.py, reader_shell) so it paints before this
+            // module runs: keep it. A wrong guess of the width is shown scaled
+            // until the sharp raster replaces it, as after a zoom.
+            var given = img.getAttribute('src');
+            if (given && given.indexOf(entry.base) === 0) entry.shown = given;
+            else img.setAttribute('src', PLACEHOLDER);
             entries.set(pf, entry);
             order.push(entry);
-            setState(entry, 'unloaded');
+            setState(entry, entry.shown ? 'ready' : 'unloaded');
         });
         if (!entries.size) return;
 
