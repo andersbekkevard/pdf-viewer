@@ -670,7 +670,7 @@ export function createCommandSurface(core) {
     // ------------------------------------------------------------------------
     var quickOpen = createQuickOpen({
         document: document, window: window, location: location, navigation: navigation,
-        documentModel: core.documentModel, library: library, notify: notify,
+        documentModel: core.documentModel, library: library, notify: notify, pins: core.pins,
         saveSelection: saveSelection, restoreSelection: restoreSelection,
         commands: function () { return COMMANDS; },
         runCommand: function (cmd, selection) {

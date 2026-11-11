@@ -193,6 +193,17 @@ export function createQuickOpen(core) {
                 navigation.gotoMark(item.letter);
             } };
     }
+    // Pins (overlay-pins.js): numbered return points of this document.
+    function pinItems() { return core.pins ? core.pins.list() : []; }
+    function pinRow(pin) {
+        return { kind: 'mark', key: 'pin' + pin.number, primary: prepare(pin.title || 'Page ' + pin.page),
+            hits: null, secondary: pin.section || '', marker: '<span class="letter">' + pin.number + '</span>',
+            hint: 'p. ' + pin.page, place: { page: pin.page }, alt: 'New tab',
+            commit: function (alt) {
+                if (alt) return window.open(newTabHref(pin.page), '_blank');
+                core.pins.jump(pin.number);
+            } };
+    }
     function docRow(item, hit, mixed) {
         var e = item.entry;
         var bits = [];
@@ -252,25 +263,33 @@ export function createQuickOpen(core) {
     // Each list returns {rows, select} where `select` is the key to select.
     function sectionsList(q) {
         var items = sections(), tokens = parseQuery(q), rows = [], n = digitsOf(q);
-        var markItems = marks();
+        var markItems = marks(), pinned = pinItems();
         if (!tokens.length) {
+            if (pinned.length) {
+                rows.push(heading('Pins'));
+                pinned.forEach(function (pin) { rows.push(pinRow(pin)); });
+            }
             if (markItems.length) {
                 rows.push(heading('Marks'));
                 markItems.forEach(function (m) { rows.push(markRow(m)); });
             }
             var current = currentSectionIndex();
             if (items.length) {
-                if (markItems.length) rows.push(heading('Sections'));
+                if (markItems.length || pinned.length) rows.push(heading('Sections'));
                 items.forEach(function (item) { rows.push(sectionRow(item, null, {})); });
                 return { rows: rows, select: current >= 0 ? 's' + current : 's0', center: true };
             }
-            if (markItems.length) rows.push(heading('Pages'));
+            if (markItems.length || pinned.length) rows.push(heading('Pages'));
             pages().forEach(function (item) { rows.push(pageRow(item, null, false)); });
             return { rows: rows, select: 'p' + navigation.page(), center: true };
         }
         if (n && pageValid(n)) rows.push(gotoPageRow(n));
         markItems.forEach(function (m) {
             if (tokens.length === 1 && tokens[0] === m.letter) rows.push(markRow(m));
+        });
+        var needle = q.trim().toLowerCase();
+        pinned.forEach(function (pin) {
+            if (needle && String(pin.title || '').toLowerCase().indexOf(needle) !== -1) rows.push(pinRow(pin));
         });
         var found = items.length
             ? ranked(items, tokens, sectionFields, function (item, hit) { return sectionRow(item, hit, { flat: true }); })
