@@ -27,7 +27,10 @@ export function createZoom(core) {
     var requestAnimationFrame = core.requestAnimationFrame;
 
     var GLOBAL_KEY = 'pdf2html-zoom';
-    var MIN_AUTO = 0.5, MAX_AUTO = 3.0;
+    // Auto opens a document as Chrome's own viewer does: fit to width, but
+    // never above the PDF's 100 % (96 CSS px per inch = 4/3 px per point).
+    // daemon/main.py (_first_raster) repeats this arithmetic.
+    var MIN_AUTO = 0.5, MAX_AUTO = 4 / 3;
     var MIN_MANUAL = 0.25, MAX_MANUAL = 10;
     var mode = 'auto';
     var zoom = 1.0;

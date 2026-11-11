@@ -1276,7 +1276,7 @@ def _first_raster(hash_: str, pdf: pathlib.Path, viewport: Optional[str]) -> Opt
             if not 0.25 <= zoom <= 10:
                 raise ValueError
         except (TypeError, ValueError):
-            zoom = min(3.0, max(0.5, 0.85 * container_width / round(sizes[0][0], 2)))
+            zoom = min(4 / 3, max(0.5, 0.85 * container_width / round(sizes[0][0], 2)))
         # Widths as the shell declares them (two decimals).
         return page, max(64, math.floor(round(sizes[page - 1][0], 2) * zoom * ratio + 0.5))
     except Exception:
