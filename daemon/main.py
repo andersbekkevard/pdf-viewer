@@ -57,6 +57,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import pdfium_doc
 import sources
 import state
 import visits
@@ -514,6 +515,20 @@ async def _relay_source(hash_: str, tab_url: str, source_ref: str, base_url: str
     return True
 
 
+_file_scheme_access: Optional[bool] = None
+_FILE_ACCESS_HINT = 'Enable “Allow access to file URLs” in the PDF viewer extension settings to open local PDFs automatically.'
+
+
+@app.post("/extension/file-access")
+async def extension_file_access(request: Request):
+    global _file_scheme_access
+    body = await request.json()
+    if not isinstance(body, dict) or type(body.get("allowed")) is not bool:
+        raise HTTPException(400, "allowed must be a boolean")
+    _file_scheme_access = body["allowed"]
+    return {"ok": True}
+
+
 @app.get("/healthz")
 def healthz():
     entries = 0
@@ -524,6 +539,8 @@ def healthz():
         )
     return {
         "status": "ok",
+        "file_scheme_access": _file_scheme_access,
+        "file_access_hint": _FILE_ACCESS_HINT if _file_scheme_access is False else None,
         "cache_dir": str(CACHE_DIR),
         "cache_exists": CACHE_DIR.is_dir(),
         "entries": entries,
@@ -653,7 +670,16 @@ def view_raw(request: Request, background: BackgroundTasks):
 @app.get("/view-file-raw")
 def view_file_raw(request: Request, background: BackgroundTasks):
     """Local file view route for the extension's generic file:// rule."""
-    return _view_path(_raw_file_path(request), background, light=_prefer_light_from_environment(),
+    path = pathlib.Path(_raw_file_path(request))
+    previous = catalog.local_entry(path)
+    if previous and catalog.is_disabled(previous):
+        # The browser cannot follow an HTTP redirect to file:. Let the
+        # extension navigate, preserving the exact symlink URL it received.
+        catalog.register(previous, catalog.local_path(path), path.stem)
+        _queue_extension_sync_signal(previous, "local-alias")
+        _queue_navigate_signal(str(request.url), path.as_uri())
+        return Response("Opening local PDF in the native viewer…", media_type="text/plain")
+    return _view_path(str(path), background, light=_prefer_light_from_environment(),
                       reader_first=_prefer_reader())
 
 
@@ -667,23 +693,53 @@ def view_canonical_raw(request: Request, background: BackgroundTasks):
     return _view_url(_raw_url(request), background, light=False)
 
 
-def _open_local_in_reader(pdf: pathlib.Path, hash_: str):
-    """Register a local PDF (no conversion) and send the tab to its reader."""
-    catalog.register(hash_, str(pdf), pdf.stem)
-    return RedirectResponse(f"/r/{hash_}/", status_code=307)
+def _open_local_in_reader(pdf: pathlib.Path, hash_: str = ""):
+    try:
+        hash_, stamp = catalog.open_local(pdf,
+            lambda snapshot: reader._run(pdfium_doc.page_sizes, str(snapshot)), state.inherit_local)
+    except (OSError, ValueError, InvalidCatalogInput) as error:
+        raise HTTPException(409, str(error)) from error
+    except Exception as error:
+        raise HTTPException(409, "local PDF is not ready to read; retry after saving") from error
+    query = urllib.parse.urlencode({"local": catalog.local_path(pdf), "stamp": stamp})
+    return RedirectResponse(f"/r/{hash_}/?{query}", status_code=307)
+
+
+@app.get("/local-file/current")
+def local_file_current(hash: str):
+    manifest = catalog.manifests().get(hash, {})
+    source = manifest.get("source_ref", "")
+    stamp = manifest.get("local_stamps", {}).get(source)
+    return {"path": source if stamp else None, "stamp": stamp}
+
+
+@app.get("/local-file/check")
+def local_file_check(path: str, stamp: str = ""):
+    # No watcher or retained subscription: closing the tab stops all work.
+    p = pathlib.Path(path)
+    if not catalog.local_entry(p):
+        raise HTTPException(404, "local path is not registered")
+    try:
+        current = catalog.local_stamp(p)
+        return {"status": "unchanged" if current == stamp else "changed", "stamp": current}
+    except OSError:
+        return {"status": "missing", "stamp": None}
 
 
 def _view_path(path: str, background: BackgroundTasks, *, light: bool, reader_first: bool = False):
     try:
-        p = pathlib.Path(path).expanduser().resolve(strict=True)
-    except FileNotFoundError:
+        p = pathlib.Path(catalog.local_path(pathlib.Path(path)))
+        p.stat()
+    except (OSError, ValueError):
         raise HTTPException(404, f"file not found: {path}")
     if not p.is_file():
         raise HTTPException(400, f"not a regular file: {path}")
 
+    if reader_first:
+        previous = catalog.local_entry(p)
+        if not previous or not catalog.is_disabled(previous):
+            return _open_local_in_reader(p)
     resolved = catalog.resolve_source(p, prefer_light=light)
-    if reader_first and resolved.hash and not resolved.disabled:
-        return _open_local_in_reader(p, resolved.hash)
     if resolved.representation is not None:
         if resolved.disabled:
             return FileResponse(

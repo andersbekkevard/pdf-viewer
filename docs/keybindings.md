@@ -148,3 +148,10 @@ Two details that `scripts/verify-vimium.sh` checks with the real extension:
 
 Vimium's own marks (`m` / `'`) do nothing here: they store the window's scroll
 position, and the viewer scrolls `#page-container`. Use `:mark` / `:jump`.
+
+### Local-file live reload
+
+`:livereload` toggles watching local PDF saves; `:livereload on` and
+`:livereload off` set it explicitly. This is a global overlay preference
+(default on), stored through `overlay-prefs.js`. It introduces no direct key
+binding and does not claim any Vimium key.

@@ -516,3 +516,17 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // was terminated and got woken up by an event other than the ones above).
 syncCachedRules();
 startNavPollLoop();
+
+// Isolated from rule sync and the sign-in relay for easy independent merging.
+function reportFileSchemeAccess() {
+    chrome.extension.isAllowedFileSchemeAccess((allowed) => {
+        fetch(DAEMON + '/extension/file-access', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ allowed }),
+        }).catch(() => {});
+    });
+}
+reportFileSchemeAccess();
+chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === SYNC_ALARM) reportFileSchemeAccess();
+});

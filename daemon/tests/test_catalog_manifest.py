@@ -95,7 +95,8 @@ class CatalogManifestTest(unittest.TestCase):
         self.catalog.register(LOCAL_HASH, "/old/place/a.pdf", "Original Name")
         self.catalog.register(LOCAL_HASH, "/new/place/a.pdf", "Different Name")
         self.assertEqual(self.read_manifest(LOCAL_HASH),
-                         {"name": "Original Name", "source_ref": "/new/place/a.pdf"})
+                         {"name": "Original Name", "source_ref": "/new/place/a.pdf",
+                      "source_refs": ["/old/place/a.pdf", "/new/place/a.pdf"]})
 
     def test_register_rejects_invalid_hashes_without_writing(self):
         for bad in ("../escape", "ABCDEF123456", "xyz123456789", "abc"):
