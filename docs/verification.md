@@ -185,6 +185,23 @@ Use the smallest proof that exercises the changed behavior:
 - **Docs-only work**: verify links, command accuracy, `git diff --check`, and
   `br sync --status`.
 
+### Scorecard isolation caveat
+
+The current `bench/reader/run.py` hardcodes both `CACHE` (the owner's cache)
+and `SCRATCH` (`/tmp/pdfv-bench`). A custom `--base` does not change those
+paths: cache-skip/cleanup counts are unreliable for a scratch daemon, and
+concurrent scorecard runs can delete each other's work files. Serialize runs
+and use separate scratch directories when investigating failures. Do not
+interpret a `bench-error` from a missing work file as a viewer regression.
+
+Known scorecard finding (2026-11-10): on documents `8567362c2276` and
+`8abe6308619d`, the unmodified driver can report loaded/decoded rasters with
+zero image bounds and blank screenshots (`raster-no-box`, `blank-page`,
+`visual-diff-high`). A diagnostic delay after hiding benchmark chrome cleared the first document,
+while disabling content visibility in screenshot CSS cleared the second; neither
+intervention cleared both. Layout/paint readiness remains an unresolved known
+finding. Keep the original failures visible rather than relaxing the scorecard. Text/copy/find remain intact.
+
 ## Artifacts
 
 - Keep temporary Browser/Playwright output out of commits unless it is useful
