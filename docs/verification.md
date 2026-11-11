@@ -142,9 +142,16 @@ Use the smallest proof that exercises the changed behavior:
   scripts must not auto-install or auto-build it.
 - **Extension redirect behavior**: run `scripts/verify-extension.sh`, which
   loads a patched copy of the extension in Chromium against a scratch daemon,
-  cache and web origin (open PDF, sign-in-gated PDF, `file://`, disabled
-  entries). Then verify in Comet with the unpacked extension loaded: the
-  script cannot prove the real profile, Vimium or a real sign-in host.
+  cache and web origin (open PDF; sign-in-gated PDF on a new and on a known
+  host, with the time from navigation start to the first raster; gated
+  reopen; a slow transfer through the holding page; HTML instead of a PDF; an
+  HTML page on the gated host; expired session; `file://`; disabled entries;
+  daemon down and back). `PDFV_VERIFY_PORT=<port>` moves the scratch daemon
+  (the origin goes to that port + 1000) when another checkout runs it too;
+  `PDFV_VERIFY_RTT_MS` and `PDFV_VERIFY_MBPS` shape the origin's network
+  (default 60 ms, 100 Mbit/s). Then verify in Comet with the unpacked
+  extension loaded: the script cannot prove the real profile, Vimium, a real
+  sign-in host or its cookie policy.
 - **Reader (`daemon/reader.py`, `daemon/pdfium_doc.py`, reader overlay
   modules)**: `uv run --directory daemon python -m unittest discover -s tests`,
   then `uv run bench/reader/run.py --tier t1 --out <json>` and

@@ -123,9 +123,15 @@ scripts, and the manual step on a cache miss.
   the pages on screen get theirs first. `:yank` waits for it.
 - **Rasters cost CPU on first view** and disk afterwards
   (`PDF_VIEWER_RASTER_CACHE_MB`, default 1500).
-- **Sign-in-gated sources** fall back to the browser's viewer first; the
-  extension then hands the tab's bytes to the daemon and the tab moves to the
-  reader.
+- **Sign-in-gated sources** go straight to the reader. The daemon holds the
+  tab's navigation while the extension (0.4.0) downloads the URL with the
+  browser's session and uploads the bytes, so no browser viewer appears.
+  Hosts that needed the session are remembered and skip the daemon's
+  cookie-less download next time. The tab ends on the site's own page when
+  the browser gets no PDF (an expired session), and on the browser's viewer
+  when the daemon is down. Without a claiming extension the older relay
+  applies: the browser's viewer first, then a swap to the reader about a
+  second or more later. See `docs/reader.md`, "Sign-in-gated sources".
 - **Rollback** is `PDF_VIEWER_ENGINE=pdf2htmlex` (the default today):
   converted entries serve their HTML as before.
 

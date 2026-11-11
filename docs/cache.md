@@ -37,6 +37,7 @@ preserving ADR 0004's accepted daemon/compute split.
 ├── log                  timestamped convert / download / server events
 ├── mappings.tsv         pdf-source ↔ hash ↔ html-path index (grep-friendly)
 ├── disabled.json        per-hash custom-viewer disable list
+├── _gated_hosts.json    hosts whose PDFs need the browser's session (docs/reader.md)
 ├── visits.db            SQLite event log (hash, ts, kind) — see below
 ├── state.db             per-document viewer state (position, marks, zoom) — see below
 ├── <hash>/              one dir per unique document
@@ -202,6 +203,14 @@ or invokes Docker
   `application/pdf`**. A 307 to `file://` would work in the native
   viewer but Chromium blocks http→file redirects, so we stream
   instead.
+
+With `PDF_VIEWER_ENGINE=reader` a remote miss is opened instead: the daemon
+downloads the source into `_source/`, or, for a host behind a sign-in, holds
+the navigation while the extension supplies the bytes from the browser's
+session ([reader.md](reader.md), "Sign-in-gated sources"). `_gated_hosts.json`
+(`{"hosts": [...]}`, at most 500) lists the hosts for which that was needed, so
+their later opens skip the cookie-less download. Deleting the file only costs
+one cookie-less attempt per host.
 
 ## Native fallback / disabled entries
 

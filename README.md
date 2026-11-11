@@ -101,8 +101,11 @@ All core phases done (1 → 7). What works end-to-end today:
   SSO) defeat the direct `curl` download, which has no cookies; the script
   then asks the extension to fetch the URL inside the signed-in browser
   session (`POST /signal/fetch`, bytes handed back through daemon memory,
-  only for URLs open in a tab). A changed `extension/background.js` needs a
-  reload in `chrome://extensions` before it runs.
+  only for URLs open in a tab). In reader mode the extension does the same
+  for a tab's own navigation, so a gated PDF opens straight in the reader
+  (`docs/reader.md`, "Sign-in-gated sources"). A changed
+  `extension/background.js` needs a reload in `chrome://extensions` before
+  it runs.
 - **Overlay injection** — `scripts/inject-overlay.py`, shared between
   fresh conversions and bulk upgrades. Idempotent.
 - **Bulk upgrade** — `scripts/upgrade-cache.sh --mode={inject,reconvert,light}`.
