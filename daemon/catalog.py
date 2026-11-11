@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import hashlib
 import html as html_lib
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -117,6 +118,23 @@ def with_passthrough(url: str) -> str:
     if PASSTHROUGH_MARKER in items:
         return url
     return urllib.parse.urlunparse(parsed._replace(query="&".join(items + [PASSTHROUGH_MARKER])))
+
+
+_LOCAL_QUIET_SEC = 0.6
+
+
+def _snapshot_file(source: pathlib.Path, dest: pathlib.Path) -> None:
+    """Copy-on-write clone where the filesystem has one (APFS): no bytes move."""
+    dest.unlink(missing_ok=True)
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.clonefile(os.fsencode(source), os.fsencode(dest), 0) == 0:
+            return
+    except (AttributeError, OSError):
+        pass
+    dest.unlink(missing_ok=True)
+    shutil.copyfile(source, dest)
 
 
 class CacheCatalog:
@@ -278,8 +296,14 @@ class CacheCatalog:
             self.root.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(prefix="_local-", dir=self.root) as scratch:
                 snapshot = pathlib.Path(scratch) / "source.pdf"
-                shutil.copyfile(path, snapshot)
-                time.sleep(0.6)
+                _snapshot_file(path, snapshot)
+                # Only a file written in the last moments can still be mid-save;
+                # an older one is opened without waiting.
+                quiet = _LOCAL_QUIET_SEC - (time.time() - path.stat().st_mtime)
+                if quiet > 0:
+                    time.sleep(min(quiet, _LOCAL_QUIET_SEC))
+                    if before != self.local_stamp(path):
+                        raise InvalidCatalogInput("local PDF is still being written; retry shortly")
                 if before != self.local_stamp(path):
                     raise InvalidCatalogInput("local PDF is still being written; retry shortly")
                 with snapshot.open("rb") as stream:

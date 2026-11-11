@@ -129,6 +129,7 @@ preparePdf2htmlEx({ document: document, window: window });
         // measures pages, and the sidebar before focus routing hooks into it.
         pdf2htmlex.adaptDocument();
         zoom.mount();
+        rememberViewport(documentModel);
         pdf2htmlex.adaptRuntime();
         var textFit = createTextFit(withBase({ documentModel: documentModel }));
         textFit.mount();
@@ -194,6 +195,18 @@ preparePdf2htmlEx({ document: document, window: window });
                 e.stopPropagation();
             }
         }, true);
+    }
+
+    // The daemon repeats the first-raster arithmetic from this cookie and
+    // starts rendering (and preloading) that page image with the shell, before
+    // any script has run (daemon/main.py, _first_raster).
+    function rememberViewport(documentModel) {
+        try {
+            var root = documentModel.container();
+            if (!root || !root.clientWidth) return;
+            document.cookie = 'pdfv_vp=' + root.clientWidth + 'x' + (window.devicePixelRatio || 1)
+                + '; path=/; max-age=31536000; samesite=lax';
+        } catch (e) {}
     }
 
     // ⌘/Ctrl with + − 0 zooms the pages, never the browser: browser zoom

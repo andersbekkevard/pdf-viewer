@@ -53,6 +53,7 @@ import html as html_lib
 import json
 import os
 import pathlib
+import math
 import threading
 import time
 import urllib.parse
@@ -1250,16 +1251,68 @@ def _saved_page(hash_: str) -> Optional[int]:
     return page if isinstance(page, int) and page > 1 else None
 
 
+_VIEWPORT_COOKIE = "pdfv_vp"
+
+
+def _first_raster(hash_: str, pdf: pathlib.Path, viewport: Optional[str]) -> Optional[tuple[int, int]]:
+    """(page, device width) of the raster the overlay will ask for first.
+
+    The overlay leaves the pages' container width and the pixel ratio of its
+    last load in a cookie; with the saved page and zoom that is enough to
+    repeat its arithmetic (overlay-zoom.js autoFit, overlay-document.js
+    sourceFor). A wrong guess costs one unused render, nothing else."""
+    try:
+        container, _, ratio = (viewport or "").partition("x")
+        container_width, ratio = float(container), float(ratio)
+        if not (200 <= container_width <= 10000 and 0.5 <= ratio <= 4):
+            return None
+        sizes = reader.sizes(pdf)
+        saved = state.get_all(hash_)
+        page = saved.get("position", {}).get("value", {}).get("page")
+        page = page if isinstance(page, int) and 1 <= page <= len(sizes) else 1
+        zoom = saved.get("zoom", {}).get("value")
+        try:
+            zoom = float(zoom)
+            if not 0.25 <= zoom <= 10:
+                raise ValueError
+        except (TypeError, ValueError):
+            zoom = min(3.0, max(0.5, 0.85 * container_width / round(sizes[0][0], 2)))
+        # Widths as the shell declares them (two decimals).
+        return page, max(64, math.floor(round(sizes[page - 1][0], 2) * zoom * ratio + 0.5))
+    except Exception:
+        return None
+
+
+def _prewarm_first_raster(hash_: str, pdf: pathlib.Path, viewport: Optional[str]) -> Optional[str]:
+    """Start rendering that raster now; returns its URL for a preload header."""
+    first = _first_raster(hash_, pdf, viewport)
+    if first is None:
+        return None
+    page, width = first
+
+    def render():
+        try:
+            reader.raster(hash_, pdf, page, width)
+        except Exception:
+            pass
+    threading.Thread(target=render, daemon=True).start()
+    return f"/r/{hash_}/p/{page}/{width}.png"
+
+
 @app.get("/r/{hash_}/")
-def reader_shell(hash_: str, background: BackgroundTasks):
+def reader_shell(hash_: str, request: Request, background: BackgroundTasks):
     pdf = _reader_source(hash_)
     saved = _saved_page(hash_)
+    preload = _prewarm_first_raster(hash_, pdf, request.cookies.get(_VIEWPORT_COOKIE))
     try:
         shell = reader.shell(hash_, pdf, catalog.entry_name(hash_), near_pages=(saved,) if saved else ())
     except Exception as error:
         raise HTTPException(502, f"could not read PDF: {error}") from error
     background.add_task(visits.record, hash_, "reader")
     headers = {"Cache-Control": "no-cache"}
+    if preload:
+        # The browser fetches the first page image while the overlay scripts load.
+        headers["Link"] = f"<{preload}>; rel=preload; as=image"
     if isinstance(shell, str):
         # Text still loading: the overlay fetches the rest by range.
         return Response(shell, media_type="text/html; charset=utf-8", headers=headers)
