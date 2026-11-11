@@ -40,6 +40,21 @@ class OpensTests(unittest.TestCase):
             opens.timing('abcdef',dict(load_id='a'*32,first_page_ms=ms))
         self.assertEqual(opens.summary()['1']['timing_samples'],1)
 
+    def test_not_pdf_is_not_assumed_to_be_a_session(self):
+        token=opens._hint.set({})
+        try:
+            opens.hint(ValueError('response is not a PDF (a sign-in page?)'))
+            self.assertEqual(opens._hint.get()['failure'],'not-a-pdf')
+        finally:
+            opens._hint.reset(token)
+
+    def test_direct_relay_call_has_no_telemetry_side_effect(self):
+        @opens.relay
+        async def relay(hash_):return True
+        with patch.object(opens,'record') as record:
+            self.assertTrue(asyncio.run(relay('abcdef')))
+            record.assert_not_called()
+
     def test_write_failure_is_nonfatal(self):
         with patch.object(opens,'connect',side_effect=sqlite3.OperationalError):
             opens.record('a',None,'url','error')

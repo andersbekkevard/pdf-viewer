@@ -22,16 +22,31 @@ import uuid
 DB_PATH = Path(os.environ.get('PDF_VIEWER_CACHE_DIR') or Path.home()/'.cache/pdf_viewer')/'opens.db'
 _HASH = re.compile(r'^[a-f0-9]{6,64}$')
 _hint = contextvars.ContextVar('open_failure', default=None)
-CLASSES = {'cache-miss', 'disabled', 'download-failed', 'not-a-pdf', 'pdfium-failed', 'needs-session', 'not-found', 'invalid-input', 'internal-error'}
 
 def resolved(entry):
     if _hint.get() is not None:
         _hint.get().update(hash=entry.hash, disabled=entry.disabled)
+        try:
+            path = Path(entry.source_ref)
+            if path.is_absolute():
+                _hint.get()['size'] = path.stat().st_size
+        except (OSError, ValueError, TypeError):
+            pass
 
 def hint(error):
     """One-line route hook. Never retain exception text."""
     text = str(error).lower()
-    value = 'needs-session' if any(s in text for s in ('403', '401', 'sign-in', 'login')) else 'not-a-pdf' if 'not a pdf' in text or 'not pdf' in text else 'download-failed'
+    code = getattr(error.__cause__, 'code', None)
+    if code in (401, 403):
+        value = 'needs-session'
+    elif code in (404, 410):
+        value = 'not-found'
+    elif 'not a pdf' in text or 'not pdf' in text:
+        value = 'not-a-pdf'
+    elif 'sign-in' in text or 'login' in text:
+        value = 'needs-session'
+    else:
+        value = 'download-failed'
     if _hint.get() is not None:
         _hint.get()['failure'] = value
 
@@ -57,7 +72,10 @@ def connect():
 def record(id_, hash_, route, outcome, class_=None, ms=0, pages=None, size=None):
     try:
         with connect() as db:
-            db.execute('INSERT OR REPLACE INTO opens VALUES (?,?,?,?,?,?,?,?,?)',
+            db.execute('''INSERT INTO opens VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+                  hash=excluded.hash, route=excluded.route, outcome=excluded.outcome,
+                  class=excluded.class, pages=excluded.pages, source_size=excluded.source_size,
+                  shell_ms=excluded.shell_ms''',
                        (id_, time.time(), hash_ if hash_ and _HASH.fullmatch(hash_) else None, route, outcome, class_, pages, size, ms))
     except (OSError, sqlite3.Error):
         pass
@@ -102,7 +120,7 @@ def relay(fn):
             return ok
         finally:
             await asyncio.to_thread(record, uuid.uuid4().hex, hash_, 'relay',
-                                    'relay-ready' if ok else 'error', None if ok else 'needs-session',
+                                    'relay-ready' if ok else 'error', None if ok else 'relay-failed',
                                     (time.perf_counter()-started)*1000)
     return wrapped
 
@@ -184,11 +202,11 @@ class OpenMiddleware:
                     message['headers'] = [(k,v) for k,v in message['headers'] if k!=b'location']+[(b'location', (location+'?_open='+id_).encode())]
                 elif location or b'application/pdf' in headers.get(b'content-type', b''):
                     outcome, failure = 'fallback', _hint.get().get('failure') or ('disabled' if _hint.get().get('disabled') else 'cache-miss')
-                pages = size = None
+                pages, size = None, _hint.get().get('size')
                 try:
                     if hash_:
                         pdf = self.catalog.source_pdf(hash_)
-                        size = pdf.stat().st_size if pdf else None
+                        size = pdf.stat().st_size if pdf else size
                         # sizes are already cached by shell generation; never call PDFium here.
                         meta = self.catalog.root/hash_/'meta.json'
                         if meta.is_file():
