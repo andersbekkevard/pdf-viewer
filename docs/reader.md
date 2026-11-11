@@ -363,3 +363,36 @@ with `PDFV_TEST_BASE`), never the personal daemon. The extension harness passed
 all 9 checks and the real-Vimium harness all 49 checks. Comet and the owner's real
 extension profile were not touched. `smoke-viewer.sh` is deliberately not run:
 it hardcodes the personal cache/port, violating this task's isolation boundary.
+
+## Selection and reading order verification
+
+The text layer remains native selectable text, including the offscreen lines
+needed by browser find. `scripts/verify-overlay.sh --reader --only selection`
+generates single/two/three-column pages, captions, a footnote, a rotated stamp,
+a table, a line-end hyphen and Hebrew text. Mouse drags use trusted Chromium
+input; clear a previous selection before each drag, since pressing within it
+can start native drag-and-drop instead of a fresh selection. The tests also
+check double/triple click, page-spanning selection and native clipboard copy.
+The existing real-Vimium harness checks `j`/`k` across pages and `j` across a
+column and a figure. A passing fixture does not establish all PDF producers.
+
+Caret-follow lives in `overlay-scrolloff.js`. It follows **changes to the
+focus endpoint**, not repeated `selectionchange` notifications for the same
+native-find result. Search Enter/n/N still deliberately promote a match and
+scroll under the search module's existing suppression. `window.find` followed
+by scrolling, Enter and a repeated selection event is covered headlessly;
+the real browser Cmd-F bar and its Enter handling remain a manual check.
+
+`PDF_VIEWER_GEOMETRIC_TEXT_ORDER=1` enables an **experimental** page-local
+XY ordering pass in `pdfium_doc.reading_order`. Horizontal empty bands split
+headings/captions/footnotes from column regions; persistent x gutters split
+columns, then upright lines sort top to bottom. Overlapping/ambiguous groups
+retain stream order, rotated text follows the upright body, and a page with
+RTL text retains its original order. Segments, characters and hyphens are
+unchanged. Tables with a row represented by multiple segments stay rows.
+Both shell and text versions invalidate caches; experimental extraction has
+a distinct text version, so toggling the flag cannot reuse its text as the
+default layer. This is opt-in because the existing scorecard compares copied
+text against PDFium **stream order**, and geometric ordering has not met that
+copy/find fidelity gates. Do not enable it by default on the strength of synthetic
+fixtures. See `bench/reader/README.md` for the independent order diagnostics.

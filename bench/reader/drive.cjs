@@ -87,7 +87,7 @@ async function main() {
         out.redirects = hops;
         await page.waitForLoadState('domcontentloaded', { timeout: spec.openTimeoutMs }).catch(() => {});
         out.domMs = Date.now() - t0;
-        out.firstRasterMs = await page.waitForFunction(
+        out.firstRasterMs = spec.textOnly ? null : await page.waitForFunction(
             () => document.querySelector('#page-container > .pf[data-pdf2html-raster-state="ready"]'),
             null, { timeout: spec.rasterWaitMs, polling: 20 },
         ).then(() => Date.now() - t0).catch(() => null);
@@ -115,6 +115,7 @@ async function main() {
             const entry = { page: job.page };
             out.pages.push(entry);
             const id = 'pf' + job.page.toString(16);
+            if (spec.textOnly) continue;
             try {
                 if (!(await page.$('#' + id))) { entry.missing = true; continue; }
                 // Jump with the palette, as a reader would.
@@ -249,7 +250,21 @@ async function main() {
                     sel.selectAllChildren(pc);
                     const selText = sel.toString();
                     sel.removeAllRanges();
-                    return { domText: lines.map((t) => t.textContent).join('\n'), selText, lineCount: lines.length };
+                    // Geometry-only inversions: earlier DOM lines below later
+                    // lines in the same horizontal lane. Rotated/RTL text and
+                    // table segments are excluded because their order is ambiguous.
+                    const upright=lines.filter(l=>!l.style.transform && l.dir!=='rtl' && !l.querySelector('.g'));
+                    const boxes=upright.map(l=>l.getBoundingClientRect());
+                    let orderInversions=0, orderPairs=0;
+                    for(let i=0;i<boxes.length;i++) for(let j=i+1;j<boxes.length;j++) {
+                        const a=boxes[i], b=boxes[j];
+                        const overlap=Math.min(a.right,b.right)-Math.max(a.left,b.left);
+                        if(overlap < .5*Math.min(a.width,b.width)) continue;
+                        if(Math.abs(a.top-b.top)<Math.max(a.height,b.height)) continue;
+                        orderPairs++;
+                        if(a.top>b.top) orderInversions++;
+                    }
+                    return { orderInversions, orderPairs, domText: lines.map((t) => t.textContent).join('\n'), selText, lineCount: lines.length };
                 }, id));
                 // Find and highlight geometry for each sampled word.
                 entry.words = await page.evaluate(({ pid, words }) => {
