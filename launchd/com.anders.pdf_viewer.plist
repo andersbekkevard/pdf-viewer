@@ -34,7 +34,7 @@
     <array>
         <string>/bin/sh</string>
         <string>-c</string>
-        <string>/Users/andersbekkevard/.local/bin/uv sync --directory /Users/andersbekkevard/dev/misc/pdf_viewer/daemon --quiet &amp;&amp; exec /Users/andersbekkevard/dev/misc/pdf_viewer/daemon/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 7435</string>
+        <string>/Users/andersbekkevard/.local/bin/uv sync --directory /Users/andersbekkevard/repos/pdf-viewer/daemon --quiet &amp;&amp; exec /Users/andersbekkevard/repos/pdf-viewer/daemon/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 7435</string>
     </array>
 
     <key>RunAtLoad</key>
@@ -47,7 +47,7 @@
     <integer>5</integer>
 
     <key>WorkingDirectory</key>
-    <string>/Users/andersbekkevard/dev/misc/pdf_viewer/daemon</string>
+    <string>/Users/andersbekkevard/repos/pdf-viewer/daemon</string>
 
     <key>StandardOutPath</key>
     <string>/Users/andersbekkevard/.cache/pdf_viewer/daemon.log</string>
