@@ -14,3 +14,12 @@ dependencies = [
 [build-system]
 requires = ["setuptools>=77", "cython==3.3.1"]
 build-backend = "setuptools.build_meta"
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "setup.py" },
+    { file = "MANIFEST.in" },
+    { file = "pdfium_doc.py" },
+    { file = "pdfium_text_bindings.pxd" },
+]
