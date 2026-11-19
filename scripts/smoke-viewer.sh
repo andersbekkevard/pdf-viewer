@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# smoke-viewer.sh — overlay smoke test. The standard pre-close check for
-# overlay beads (see docs/verification.md): the smoke group of
+# smoke-viewer.sh — overlay smoke test. The standard check for
+# overlay changes (see docs/verification.md): the smoke group of
 # verify-overlay.sh on a one-page fixture, in headless Chromium against a
 # scratch daemon. Exits non-zero on any failure.
 set -euo pipefail

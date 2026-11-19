@@ -184,13 +184,60 @@ class BrowserOpenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.headers["location"], f"/r/{self.hash}/")
         self.assertEqual(self.gated_hosts(), [])
 
-    async def test_claim_for_a_stored_source_returns_at_once(self):
+    async def test_claim_for_a_stored_source_without_an_open_gives_up(self):
         source_dir = self.root / self.hash / "_source"
         source_dir.mkdir(parents=True)
         (source_dir / "notes.pdf").write_bytes(PDF)
         start = time.monotonic()
         self.assertEqual(await self.claim(), {"fetch": False})
-        self.assertLess(time.monotonic() - start, 0.1)
+        self.assertLess(time.monotonic() - start, 0.8)
+
+    async def test_gated_reopen_replaces_old_bytes_even_with_a_new_filename(self):
+        source_dir = self.root / self.hash / "_source"
+        source_dir.mkdir(parents=True)
+        old = source_dir / "old.pdf"
+        old.write_bytes(PDF)
+        main._remember_gated_host(SOURCE)
+        tab = self.tab()
+        claim = await self.claim()
+        self.assertTrue(claim["fetch"])
+        await self.answer(claim, PDF + b" updated")
+        response = await tab
+        self.assertEqual(response.headers["location"], f"/r/{self.hash}/")
+        self.assertEqual(old.read_bytes(), PDF + b" updated")
+        self.assertEqual(list(source_dir.glob("*.pdf")), [old])
+
+    async def test_browser_conditional_304_keeps_the_stored_source(self):
+        source_dir = self.root / self.hash / "_source"
+        source_dir.mkdir(parents=True)
+        pdf = source_dir / "old.pdf"
+        pdf.write_bytes(PDF)
+        stamp = pdf.stat().st_mtime_ns
+        sources.remember_validators(source_dir, SOURCE, pdf.name, '"v1"', scope="browser")
+        main._remember_gated_host(SOURCE)
+        tab = self.tab()
+        claim = await self.claim()
+        self.assertEqual(claim["headers"], {"If-None-Match": '"v1"'})
+        self.assertEqual(await self.answer(claim, b"", {"X-Source-Not-Modified": "1"}), {"accepted": True})
+        self.assertEqual((await tab).headers["location"], f"/r/{self.hash}/")
+        self.assertEqual(pdf.read_bytes(), PDF)
+        self.assertEqual(pdf.stat().st_mtime_ns, stamp)
+
+    async def test_browser_304_without_a_valid_cached_source_is_rejected(self):
+        main._remember_gated_host(SOURCE)
+        tab = self.tab()
+        claim = await self.claim()
+        self.assertEqual(await self.answer(claim, b"", {"X-Source-Not-Modified": "1"}), {"accepted": False})
+        self.assertEqual((await tab).headers["location"], FALLBACK)
+
+    async def test_browser_response_saves_validators_for_the_next_open(self):
+        main._remember_gated_host(SOURCE)
+        tab = self.tab()
+        claim = await self.claim()
+        await self.answer(claim, PDF, {"X-Source-ETag": '"v2"'})
+        await tab
+        self.assertEqual(sources.conditional_headers(self.root / self.hash / "_source", SOURCE, "browser"),
+                         {"If-None-Match": '"v2"'})
 
     async def test_claim_without_an_open_gives_up(self):
         self.assertEqual(await self.claim(), {"fetch": False})

@@ -218,8 +218,7 @@ export function createQuickOpen(core) {
             hint: bits.join(' · '), alt: 'New tab',
             commit: function (alt) {
                 if (!e.href) return;
-                if (alt) return window.open(e.href, '_blank');
-                location.href = e.href;
+                core.daemon.open(e.href, alt);
             } };
     }
     function commandRow(item, hit) {

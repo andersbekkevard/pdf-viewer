@@ -8,7 +8,7 @@
 # line per check, each with a one-line fix hint. Exits non-zero iff a
 # *required* check fails; WARN-only checks (optional features) never fail.
 #
-# The chain (parent epic: pdfv-6el):
+# The chain:
 #   browser extension → daemon (:7435) → cache dir → overlay assets.
 #
 # WHY: most historical debugging sessions (stale overlay assets, daemon down,

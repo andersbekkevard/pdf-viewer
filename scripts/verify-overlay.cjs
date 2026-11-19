@@ -125,7 +125,7 @@ function installProbe() {
 }
 
 async function main() {
-  const browser = activeBrowser = await chromium.launch({ headless: true });
+  const browser = activeBrowser = await chromium.launch({ headless: true, executablePath: process.env.PDFV_CHROMIUM });
   const context = await browser.newContext({ viewport: VIEWPORT });
   await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new globalThis.URL(URL).origin });
   const page = await context.newPage();
@@ -558,6 +558,12 @@ async function main() {
     const clip = await probe(() => window.__probe.clips.slice(-1)[0] || '');
     record(':yank ref copies chapter and page', clip.endsWith('p. ' + yankPage), JSON.stringify(clip));
 
+    if (process.env.PDFV_SYNTHETIC === '1') {
+      await palette('link');
+      const source = await probe(() => window.__probe.clips.slice(-1)[0] || '');
+      record(':link copies the recorded source', source.endsWith('/fixture.pdf'), JSON.stringify(source));
+    }
+
     // Settings modal reflects and edits the same preferences.
     await blurToDocument();
     await page.keyboard.press('Meta+Comma');
@@ -949,7 +955,12 @@ async function main() {
   }
   if (run('hierarchy') && reader) {
     // Generated shell only: replace its outline before the model reads it.
-    await page.route(URL, async route => {
+    // The shell moves to its titled address (/r/<hash>/<slug>), which a
+    // reload then asks for, so both addresses are intercepted.
+    const shellPath = new globalThis.URL(URL).pathname.match(/^\/r\/[a-f0-9]+\//)?.[0];
+    const shellUrl = (url) => url.href === URL || (Boolean(shellPath) && url.pathname.startsWith(shellPath)
+      && /^(?!ocr$|icon$)[a-z0-9-]*$/.test(url.pathname.slice(shellPath.length)));
+    await page.route(shellUrl, async route => {
       const r = await route.fetch(); let html = await r.text();
       const children = Array.from({length:1998}, (_,i)=>'<li><a href="#pf8">Detail '+i+'</a></li>').join('');
       html = html.replace(/<div id="outline">[\s\S]*?<\/div>/, '<div id="outline"><ul><li><a href="#pf1">Chapter</a><ul><li><a href="#pf4">Section</a><ul>'+children+'</ul></li></ul></li></ul></div>');
@@ -992,7 +1003,7 @@ async function main() {
     record('current branch opens automatically', await page.locator('#outline ul[hidden]').count()===0);
     await palette('counter');
     record('counter prefers top-level chapter with deep hover', await page.locator('#pdf2html-pageno').innerText().then(t=>t.includes('Chapter')&&!t.includes('Detail')) && await page.locator('#pdf2html-pageno').getAttribute('title').then(t=>t.includes('Detail')));
-    await page.unroute(URL);
+    await page.unroute(shellUrl);
   }
 
   record('no failed asset requests', failedAssets.length===0, failedAssets.join(' | '));

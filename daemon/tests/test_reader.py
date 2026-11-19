@@ -221,6 +221,17 @@ class TextRangeTest(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_deferred_shell_never_waits_for_uncached_text(self):
+        with patch.object(self.reader, "_extract_start", side_effect=AssertionError("text blocks paint")):
+            shell = self.reader.shell(self.hash, self.pdf, "Doc", defer_text=True)
+        self.assertEqual(shell.count("data-reader-pending"), self.PAGES)
+        self.assertIn('data-reader-text="loading"', shell)
+        self.assertFalse(self.reader.shell_path(self.hash).exists())
+        self.reader.text_range(self.hash, self.pdf, 0)
+        shell = self.reader.shell(self.hash, self.pdf, "Doc", defer_text=True)
+        self.assertIn("Page 32<br>", shell)
+        self.assertEqual(shell.count("data-reader-pending"), 8)
+
     def test_first_shell_has_first_range_only(self):
         shell = self.reader.shell(self.hash, self.pdf, "Doc")
         self.assertIsInstance(shell, str)
@@ -266,9 +277,12 @@ class TextRangeTest(unittest.TestCase):
         shell = self.reader.shell(self.hash, self.pdf, "Doc")
         self.assertIsInstance(shell, pathlib.Path)
         self.assertEqual(self.extractions, [0, 1])
-        self.assertEqual(shell.read_text(encoding="utf-8"), reader.build_shell(
+        stat = self.pdf.stat()
+        expected = reader.build_shell(
             self.hash, "Doc", pdfium_doc.page_sizes(str(self.pdf)), pdfium_doc.outline(str(self.pdf)),
-            pdfium_doc.pages_text(str(self.pdf), 0, 40), pdfium_doc.pages_links(str(self.pdf), 0, 40)))
+            pdfium_doc.pages_text(str(self.pdf), 0, 40), pdfium_doc.pages_links(str(self.pdf), 0, 40))
+        self.assertEqual(shell.read_text(encoding="utf-8"), expected.replace(
+            f"/r/{self.hash}/p/", f"/r/{self.hash}/rev/{stat.st_mtime_ns}-{stat.st_size}/p/"))
 
     def test_invalidation(self):
         self.reader.shell(self.hash, self.pdf, "Doc", near_pages=(35,))
@@ -392,7 +406,10 @@ class RouteTest(unittest.TestCase):
         response = self.main.reader_shell(self.hash, BackgroundTasks())
         self.assertNotIsInstance(response, self.main.FileResponse)
         self.assertIn(b'data-reader-text="loading"', response.body)
+        self.assertEqual(response.body.count(b"data-reader-pending"), TextRangeTest.PAGES)
         tasks = BackgroundTasks()
+        first = json.loads(self.main.reader_text(self.hash, 0, tasks).body)
+        self.assertEqual((first["first"], len(first["pages"])), (1, 32))
         response = self.main.reader_text(self.hash, 1, tasks)
         data = json.loads(response.body)
         self.assertEqual(data["first"], 33)

@@ -1,7 +1,7 @@
 // ============================================================================
 // pdf_viewer overlay — finger ("hint") mode.
 //
-// Extracted verbatim from overlay.js (bead pdfv-6el.8). Hint-to-copy mode for
+// Extracted verbatim from overlay.js. Hint-to-copy mode for
 // visible URL / DOI / ISBN / long-ID tokens, using only keys in the Vimium
 // pass-through alphabet. The cluster owns its own `fingerState`; the entry
 // module observes activeness via the returned `isActive()` accessor.

@@ -1,7 +1,8 @@
 // Local-file polling belongs to the tab: no server watcher survives pagehide.
 export function createLiveReload(core) {
     var window = core.window, prefs = core.prefs;
-    var query = new URLSearchParams(window.location.search);
+    var daemon = core.daemon;
+    var query = daemon ? daemon.query : new URLSearchParams(window.location.search);
     var path = query.get('local'), stamp = query.get('stamp');
     var timer = null, controller = null, stopped = false, candidate = null, epoch = 0;
     function stop() {
@@ -35,7 +36,9 @@ export function createLiveReload(core) {
                 var opened = await core.fetch('/read?' + new URLSearchParams({ path: path }),
                     { cache: 'no-store', redirect: 'follow', signal: controller.signal });
                 if (run === epoch && opened.ok && !stopped && prefs.get('liveReload')) {
-                    window.location.replace(opened.url);
+                    // At the PDF's own address a reload opens the new bytes.
+                    if (daemon && daemon.embedded) window.location.reload();
+                    else window.location.replace(opened.url);
                     return;
                 }
             }

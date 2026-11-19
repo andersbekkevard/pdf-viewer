@@ -1,11 +1,16 @@
 [project]
 name = "daemon"
-version = "0.1.0"
+version = "0.2.0"
 description = "Add your description here"
 requires-python = ">=3.12"
 dependencies = [
+    "cython==3.3.1",
     "fastapi>=0.136.0",
     "pillow>=13.0.0",
     "pypdfium2>=5.15.2",
     "uvicorn[standard]>=0.45.0",
 ]
+
+[build-system]
+requires = ["setuptools>=77", "cython==3.3.1"]
+build-backend = "setuptools.build_meta"

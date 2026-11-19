@@ -14,7 +14,6 @@ import re
 import shutil
 import threading
 import tempfile
-import time
 import urllib.parse
 from typing import Optional, Protocol
 
@@ -102,9 +101,6 @@ def with_passthrough(url: str) -> str:
     if PASSTHROUGH_MARKER in items:
         return url
     return urllib.parse.urlunparse(parsed._replace(query="&".join(items + [PASSTHROUGH_MARKER])))
-
-
-_LOCAL_QUIET_SEC = 0.6
 
 
 def _snapshot_file(source: pathlib.Path, dest: pathlib.Path) -> None:
@@ -270,7 +266,9 @@ class CacheCatalog:
         st = path.stat()
         return f"{st.st_dev}:{st.st_ino}:{st.st_size}:{st.st_mtime_ns}:{st.st_ctime_ns}"
 
-    def open_local(self, path: pathlib.Path, validate, inherit) -> tuple[str, str]:
+    def open_local(self, path: pathlib.Path, validate, inherit) -> tuple[
+        str, str, tuple[pathlib.Path, list[tuple[float, float]]] | None
+    ]:
         """Publish an immutable, parsed snapshot, then move just this path's reference.
 
         The lock serializes reference/state transfers and GC. PDFium validation
@@ -283,18 +281,13 @@ class CacheCatalog:
             previous = self.local_entry(path)
             old = self.manifests().get(previous, {})
             if old.get("local_stamps", {}).get(source) == before and self.cached_source(previous):
-                return previous, before
+                return previous, before, None
             self.root.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(prefix="_local-", dir=self.root) as scratch:
                 snapshot = pathlib.Path(scratch) / "source.pdf"
                 _snapshot_file(path, snapshot)
-                # Only a file written in the last moments can still be mid-save;
-                # an older one is opened without waiting.
-                quiet = _LOCAL_QUIET_SEC - (time.time() - path.stat().st_mtime)
-                if quiet > 0:
-                    time.sleep(min(quiet, _LOCAL_QUIET_SEC))
-                    if before != self.local_stamp(path):
-                        raise InvalidCatalogInput("local PDF is still being written; retry shortly")
+                # A complete, stable snapshot is safe even if the file was
+                # just saved. Recheck the original after PDFium validation too.
                 if before != self.local_stamp(path):
                     raise InvalidCatalogInput("local PDF is still being written; retry shortly")
                 with snapshot.open("rb") as stream:
@@ -335,7 +328,7 @@ class CacheCatalog:
                         self._write_manifest(previous, old)
                     else:
                         self.delete(previous)
-                return hash_, before
+                return hash_, before, (dest, pages)
 
     def _content_hash(self, path: pathlib.Path) -> str:
         stat = path.stat()
@@ -531,7 +524,8 @@ class CacheCatalog:
             score = scores.get(hash_, {"raw_count": 0, "rank": 0, "last_seen": None,
                                        "age_multiplier": 0.0, "frecency_score": 0.0})
             name = self.entry_name(hash_)
-            has_source = self.source_pdf(hash_) is not None
+            source = self.source_pdf(hash_)
+            has_source = source is not None
             meta = self._entry_meta(hash_)
             out.append({"hash": hash_, "name": name, "source_ref": mapping.source_ref,
                         "search_text": self._search_text(name, mapping.source_ref),
@@ -541,7 +535,11 @@ class CacheCatalog:
                         "last_seen": score["last_seen"], "age_multiplier": score["age_multiplier"],
                         "frecency_score": score["frecency_score"],
                         # Home page (assets/home.js): meta.json fields and a page-1 thumbnail.
-                        "pages": meta.get("pages"), "title": meta.get("title"),
+                        # The work's own title: metadata, else the first page's.
+                        "pages": meta.get("pages"),
+                        "title": self.document_title(meta.get("title"), meta.get("heading")),
+                        "heading": meta.get("heading"),
+                        "source_file": source.name if source else None,
                         "author": meta.get("author"),
                         "thumb_href": self._thumb_href(hash_, has_source)})
         out.sort(key=lambda entry: (-entry["frecency_score"], -(entry["last_seen"] or 0), entry["name"].lower()))
@@ -560,15 +558,32 @@ class CacheCatalog:
         return pathlib.PurePath(source_ref).stem
 
     @classmethod
-    def display_title(cls, name: str, source_ref: str, meta_title: Optional[str]) -> str:
-        """What a reader calls the document: a name chosen with :rename (any
-        name that is not the source file's stem), else a usable metadata
-        title, else the name."""
-        renamed = bool(name) and name != cls._source_stem(source_ref or "") and not HASH_RE.fullmatch(name)
-        title = (meta_title or "").strip()
-        if not renamed and len(title) >= 3 and not cls._JUNK_TITLE.match(title) and not HASH_RE.fullmatch(title):
+    def _usable(cls, title: Optional[str]) -> Optional[str]:
+        title = (title or "").strip()
+        if len(title) >= 3 and not cls._JUNK_TITLE.match(title) and not HASH_RE.fullmatch(title):
             return title
-        return name
+        return None
+
+    @classmethod
+    def document_title(cls, meta_title: Optional[str], heading: Optional[str] = None) -> Optional[str]:
+        """The work's own title: a usable metadata title, else the title
+        printed on the first page (meta.json `heading`), else None."""
+        return cls._usable(meta_title) or cls._usable(heading)
+
+    @classmethod
+    def display_title(cls, name: str, source_ref: str, meta_title: Optional[str],
+                      heading: Optional[str] = None, source_file: Optional[str] = None) -> str:
+        """What a reader calls the document (tab title, finder rows): a name
+        chosen with :rename, else the document's own title, else the name.
+        A name is chosen when it is neither the source's file stem nor that
+        of the PDF on disk (`source_file`: a download is saved under the
+        server's file name, `2610.20563v1.pdf` for `arxiv.org/pdf/2610.20563`)."""
+        given = {cls._source_stem(source_ref or "")}
+        if source_file:
+            given.add(pathlib.PurePath(source_file).stem)
+        renamed = bool(name) and name not in given and not HASH_RE.fullmatch(name)
+        title = None if renamed else cls.document_title(meta_title, heading)
+        return title or name
 
     def finder_entries(self, positions: dict, current: str = "") -> list[dict]:
         """The library as the overlay's quick-open rows (⌘P, ⌘K, :open).
@@ -589,7 +604,8 @@ class CacheCatalog:
             saved = positions.get(entry["hash"])
             last_read = max(entry["last_seen"] or 0, saved[1] // 1000 if saved else 0) or None
             out.append({"hash": entry["hash"], "href": entry["href"], "name": entry["name"],
-                        "title": self.display_title(entry["name"], ref, entry["title"]),
+                        "title": self.display_title(entry["name"], ref, entry["title"], entry["heading"],
+                                                    entry["source_file"]),
                         "author": entry["author"], "host": parsed.netloc.lower() if web else None,
                         "file": pathlib.PurePosixPath(path).name or None, "source_ref": entry["source_ref"],
                         "pages": entry["pages"], "page": saved[0] if saved else None,
@@ -612,7 +628,8 @@ class CacheCatalog:
         pages = meta.get("pages")
         return {"pages": pages if isinstance(pages, int) and pages > 0 else None,
                 "title": str(meta["title"]).strip() or None if meta.get("title") else None,
-                "author": str(meta["author"]).strip() or None if meta.get("author") else None}
+                "author": str(meta["author"]).strip() or None if meta.get("author") else None,
+                "heading": str(meta["heading"]).strip() or None if meta.get("heading") else None}
 
     def _thumb_href(self, hash_: str, has_source: bool) -> Optional[str]:
         """Page 1 small, rendered by the reader from the source PDF (240 px,

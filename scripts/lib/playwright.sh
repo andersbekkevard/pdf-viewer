@@ -3,6 +3,11 @@
 # checks. Runs under macOS system bash 3.2 (no bash 4 features).
 
 resolve_playwright() {
+    if [[ -n "${NODE_PATH:-}" ]] && node -e "require.resolve('playwright')" >/dev/null 2>&1; then
+        PW_NODE_PATH="$NODE_PATH"
+        return 0
+    fi
+
     PW_NODE_PATH="$HOME/.npm/_npx/705bc6b22212b352/node_modules"
     if NODE_PATH="$PW_NODE_PATH" node -e "require.resolve('playwright')" >/dev/null 2>&1; then
         return 0

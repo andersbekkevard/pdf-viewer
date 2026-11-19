@@ -37,10 +37,11 @@ interface without launching FastAPI or a browser.
 ├── <hash>/              one dir per unique document
 │   ├── _source/         the PDF: a download (remote) or a snapshot (local file)
 │   ├── entry.json       name and source of the entry
-│   ├── meta.json        title, author, page count, file size (written from PDFium)
+│   ├── meta.json        title, author, page count, file size, printed title (from PDFium)
 │   └── reader/          derived reader artifacts, safe to delete (docs/reader.md)
 │       ├── shell.html   page frames, text lines, links, outline (once all text exists)
 │       ├── text/<k>.json   text and link markup of pages 32k+1…32k+32
+│       ├── icon-v<N>.png   tab icon cut from the first figure (or icon-v<N>.none)
 │       └── px/<width>/<page>.{jpg,png}   rasters by device width, size-limited
 └── ...
 ```
@@ -116,11 +117,19 @@ Resolution order:
 ## meta.json
 
 `<hash>/meta.json` holds `title`, `author`, `pages`, `file_size` and the
-other document-information fields PDFium reports, written by the reader the
-first time an entry opens (`Reader._store_meta`). The library, quick open
-and the sidebar header read it; the PDF is never opened to list the library.
-Entries converted earlier may carry extra keys (`provenance`, pdfinfo
-fields), which are ignored.
+other document-information fields PDFium reports, and `heading`: the title
+printed on the first page (its largest text, clearly larger than the body;
+null when there is none). The reader writes it the first time an entry opens
+(`Reader.meta`), and adds `heading` to a meta.json written before it existed.
+The library, quick open and the sidebar header read it; the PDF is never
+opened to list the library. Entries converted earlier may carry extra keys
+(`provenance`, pdfinfo fields), which are ignored.
+
+A document's title (tab title, finder rows, the reader address) is, in
+order: a name chosen with `:rename`, a usable metadata `title`, the
+`heading`, the entry name (`CacheCatalog.display_title`). A name counts as
+chosen when it is neither the source URL's file stem nor that of the stored
+PDF: arXiv serves `/pdf/2610.20563` as `2610.20563v1.pdf`.
 
 ## Opening a document that is not stored yet
 
@@ -256,7 +265,34 @@ only when no other registered source refers to it. Old state rows remain availab
 to late writers, but are never used for an unrelated path. A moved/renamed file with
 unchanged bytes shares its hash. Deleted originals leave the last valid snapshot
 readable. Invalid, truncated or changing saves return 409 without replacing it.
-Snapshots cost one additional copy of local PDF bytes. Stability uses size, inode,
-mtime and ctime, followed by a 600 ms quiet window, EOF and PDFium parse checks in
-a worker; it cannot predict a writer that pauses longer than the quiet window.
+Snapshot creation uses copy-on-write when supported. The reader compares size,
+inode, mtime and ctime across snapshot creation and PDFium validation. A freshly
+saved PDF opens as soon as the snapshot passes the EOF and PDFium checks.
 EOF is required within the final 2 KB; unusually padded PDFs may need resaving.
+
+## Remote revisions
+
+Every open through a remote URL checks the server for the current revision,
+including browser-session fetches for signed-in hosts. ETag and Last-Modified
+response headers are stored in `_source/validators-direct.json` or
+`validators-browser.json`. The next request sends If-None-Match and/or
+If-Modified-Since. A 304 Not Modified response reuses the source without
+reading or comparing a PDF body, retaining its modification time and renders.
+Validators are scoped to the exact URL (including query), the direct/browser
+fetch context and the stored source's modification time and size. Missing,
+corrupt or mismatched records and sources cause an unconditional download.
+A server without validators also needs a full download. A 200 replaces the
+validator record, including clearing validators omitted in that response.
+
+Failed fetches leave the stored PDF intact and follow the normal native/sign-in
+fallback rather than claiming freshness. Identical downloaded bytes keep their
+modification time and derived caches. Changed bytes replace the source atomically,
+retaining the entry identity, stored filename and reading state. Shells, text,
+metadata, OCR and rasters use the new source revision; raster URLs include the
+revision so an old browser image cache cannot mask a change. Already-open tabs
+do not poll remote servers; reopen the PDF URL. Even a conditional request adds
+a server round trip; this does not promise cached opens have zero added latency.
+
+After editing `extension/background.js`, reload the unpacked PDF Viewer extension
+in Chrome to activate conditional requests for browser-session fetches. An older
+running worker still downloads the full body, preserving freshness.

@@ -83,6 +83,17 @@ class JobTest(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_source_revision_uses_a_new_raster_and_job(self):
+        first, old_key = self.reader.raster_job(HASH, self.pdf, 1, 300, "jpg")
+        old_path, _ = self.reader.raster_path(HASH, self.pdf, 1, 300, "jpg")
+        self.pdf.write_bytes(TWO_PAGES + b" revised")
+        second, new_key = self.reader.raster_job(HASH, self.pdf, 1, 300, "jpg")
+        new_path, _ = self.reader.raster_path(HASH, self.pdf, 1, 300, "jpg")
+        self.assertNotEqual(old_key, new_key)
+        self.assertNotEqual(old_path, new_path)
+        self.assertIsNot(first, second)
+        self.assertEqual(len(self.tasks), 2)
+
     def test_requests_share_one_render(self):
         a, key_a = self.reader.raster_job(HASH, self.pdf, 1, 300, "jpg")
         b, key_b = self.reader.raster_job(HASH, self.pdf, 1, 300, "jpg")

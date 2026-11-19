@@ -307,7 +307,7 @@ export function createSidebar(core) {
                 img.decoding = 'async';
                 img.alt = 'Page ' + pageNum;
                 img.addEventListener('load', function () { inner.classList.add('has-img'); });
-                img.src = thumbBase + pageNum + thumbSuffix;
+                core.daemon.setImage(img, thumbBase + pageNum + thumbSuffix);
                 inner.appendChild(img);
             }
             var card = el('button', {
@@ -364,6 +364,11 @@ export function createSidebar(core) {
 
     function mountPinsPanel() {
         var host = document.getElementById('pdf2html-pins'), selected = 0;
+        function pinImage(src) {
+            var img = el('img', { loading: 'lazy', alt: '' });
+            core.daemon.setImage(img, src);
+            return img;
+        }
         function render() {
             var pins = core.pins.list(); host.replaceChildren();
             selected = Math.max(0, Math.min(selected, pins.length - 1));
@@ -372,7 +377,7 @@ export function createSidebar(core) {
                 var hash = entryHash(), src = '/r/' + hash + '/p/' + p.page + '/240.png';
                 var jump = el('button', { class: 'pdf2html-pin-jump', title: 'Pin ' + p.number + ' · ' + p.title,
                     onClick: function () { core.pins.jump(p.number); } }, [
-                    el('img', { src: src, loading: 'lazy', alt: '' }),
+                    pinImage(src),
                     el('span', { class: 'pdf2html-pin-copy' }, [
                         el('strong', {}, p.number + ' · ' + p.title),
                         el('span', {}, (p.section ? p.section + ' · ' : '') + 'p. ' + p.page),

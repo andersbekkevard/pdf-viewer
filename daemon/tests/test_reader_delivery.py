@@ -222,13 +222,15 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.01)
         self.assertTrue(await asyncio.wait_for(main._relays[self.hash], 5))
         self.assertEqual(len(self.signals("navigate")), 1)
-        # A later plain click on the same link finds the stored source.
-        with patch.object(sources, "download", side_effect=AssertionError("no download")):
-            again = await asyncio.to_thread(
-                main._view_url, SOURCE, base_url=BASE)
-        self.assertEqual(again.headers["location"], f"/r/{self.hash}/")
-        self.assertEqual(main._relays, {})
 
+        # A later URL open fetches again even though the relay stored a copy.
+        def refresh(url, target):
+            return sources.save(PDF + b" refreshed", url, "", target)
+        with patch.object(main, "_is_gated_host", return_value=False), patch.object(sources, "download", side_effect=refresh) as download:
+            again = await asyncio.to_thread(main._view_url, SOURCE, base_url=BASE)
+        download.assert_called_once()
+        self.assertEqual(again.headers["location"], f"/r/{self.hash}/")
+        self.assertEqual(main.catalog.cached_source(self.hash).read_bytes(), PDF + b" refreshed")
 
     async def test_signal_queued_from_worker_thread_wakes_pollers(self):
         waiter = asyncio.create_task(main.signal_navigate_wait(timeout=5.0, since=0))
@@ -294,8 +296,8 @@ class EngineAndSaveTests(unittest.TestCase):
             self.assertFalse(target.exists())
             self.assertEqual(sources.save(PDF, SOURCE, "", target), "notes.pdf")
             self.assertEqual(sources.save(PDF, SOURCE, "attachment; filename*=UTF-8''HW%202.pdf", target),
-                             "HW 2.pdf")
-            self.assertEqual(sorted(p.name for p in target.iterdir()), ["HW 2.pdf", "notes.pdf"])
+                             "notes.pdf")
+            self.assertEqual(sorted(p.name for p in target.iterdir()), ["notes.pdf"])
 
     def test_failed_download_leaves_no_entry_directory(self):
         # The sign-in page that starts a relay must not litter the cache.

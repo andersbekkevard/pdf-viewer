@@ -1,0 +1,1 @@
+include pdfium_doc.py pdfium_text_bindings.pxd

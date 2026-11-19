@@ -1,11 +1,14 @@
 """Fetching a remote PDF into an entry's `_source/` directory.
 
-The reader opens a URL by downloading its bytes once. This is a plain HTTP
+The reader opens a URL by fetching its current bytes on each open. This is a plain HTTP
 GET with no cookies: a host that wants a sign-in answers with an HTML page,
 which fails the PDF check here and leaves the caller to fall back.
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import filecmp
 import email.message
 import os
 import pathlib
@@ -43,6 +46,22 @@ def filename_for(url: str, content_disposition: str = "") -> str:
     return (stem[:196] or "document") + extension
 
 
+def _publish(tmp: pathlib.Path, target_dir: pathlib.Path, name: str) -> str:
+    """Replace the stored revision atomically; identical bytes keep derived caches.
+
+    Keep the existing filename so a changed Content-Disposition cannot leave
+    two PDFs behind and make the catalog choose the older one.
+    """
+    existing = sorted(target_dir.glob("*.pdf"))
+    target = existing[0] if existing else target_dir / name
+    if target.exists() and filecmp.cmp(tmp, target, shallow=False):
+        tmp.unlink()
+    else:
+        tmp.replace(target)
+        (target_dir.parent / "meta.json").unlink(missing_ok=True)
+    return target.name
+
+
 def save(body: bytes, url: str, content_disposition: str, target_dir: pathlib.Path) -> str:
     """Store PDF bytes fetched elsewhere (the browser, through the extension)
     into target_dir and return the filename, with the same checks as a
@@ -56,11 +75,44 @@ def save(body: bytes, url: str, content_disposition: str, target_dir: pathlib.Pa
     tmp = target_dir / f".save.{os.getpid()}.tmp"
     try:
         tmp.write_bytes(body)
-        tmp.replace(target_dir / name)
+        name = _publish(tmp, target_dir, name)
     finally:
         if tmp.exists():
             tmp.unlink()
     return name
+
+
+def conditional_headers(target_dir: pathlib.Path, url: str, scope: str = "direct") -> dict:
+    """Validators apply only to this exact URL, fetch context and stored revision."""
+    try:
+        record = json.loads((target_dir / f"validators-{scope}.json").read_text())
+        pdf = target_dir / record["filename"]
+        if pdf.parent != target_dir or pdf.suffix.lower() != ".pdf":
+            return {}
+        stat = pdf.stat()
+        if record["url"] != hashlib.sha256(url.encode()).hexdigest() or record["stamp"] != [stat.st_mtime_ns, stat.st_size]:
+            return {}
+        return {key: value for key, value in record["headers"].items()
+                if key in ("If-None-Match", "If-Modified-Since") and isinstance(value, str)
+                and value and len(value) < 8192 and "\r" not in value and "\n" not in value}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {}
+
+
+def remember_validators(target_dir: pathlib.Path, url: str, filename: str,
+                        etag: str = "", modified: str = "", scope: str = "direct") -> None:
+    path = target_dir / f"validators-{scope}.json"
+    if not etag and not modified:
+        path.unlink(missing_ok=True)
+        return
+    stat = (target_dir / filename).stat()
+    record = {"url": hashlib.sha256(url.encode()).hexdigest(), "filename": filename,
+              "stamp": [stat.st_mtime_ns, stat.st_size],
+              "headers": {"If-None-Match": etag, "If-Modified-Since": modified}}
+    path = target_dir / f"validators-{scope}.json"
+    tmp = path.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(record))
+    tmp.replace(path)
 
 
 def download(url: str, target_dir: pathlib.Path) -> str:
@@ -68,7 +120,8 @@ def download(url: str, target_dir: pathlib.Path) -> str:
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise SourceError("not an http(s) URL")
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/pdf,*/*"})
+    validators = conditional_headers(target_dir, url)
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/pdf,*/*", "Cache-Control": "no-cache", **validators})
     # A failed download (the common sign-in page) leaves no empty entry
     # directory behind: those are created only for a PDF, and removed again
     # if the download fails after all.
@@ -76,7 +129,14 @@ def download(url: str, target_dir: pathlib.Path) -> str:
     tmp = target_dir / f".download.{os.getpid()}.tmp"
     stored = False
     try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT_SEC) as response:
+        try:
+            response = urllib.request.urlopen(request, timeout=TIMEOUT_SEC)
+        except urllib.error.HTTPError as error:
+            if error.code == 304 and validators and conditional_headers(target_dir, url) == validators:
+                error.close()
+                return sorted(target_dir.glob("*.pdf"))[0].name
+            raise
+        with response:
             head = response.read(5)
             if head[:4] != b"%PDF":
                 raise SourceError("response is not a PDF (a sign-in page?)")
@@ -93,7 +153,9 @@ def download(url: str, target_dir: pathlib.Path) -> str:
                         raise SourceError("source larger than 512 MB")
                     out.write(chunk)
             name = filename_for(url, response.headers.get("Content-Disposition", ""))
-        tmp.replace(target_dir / name)
+        name = _publish(tmp, target_dir, name)
+        remember_validators(target_dir, url, name, response.headers.get("ETag", ""),
+                            response.headers.get("Last-Modified", ""))
         stored = True
         return name
     except (urllib.error.URLError, OSError, ValueError) as error:
@@ -142,7 +204,7 @@ class Upload:
             self.abort()
             raise SourceError("bytes are not a PDF (a sign-in page?)")
         name = filename_for(url, content_disposition)
-        self._tmp.replace(self.target_dir / name)
+        name = _publish(self._tmp, self.target_dir, name)
         return name
 
     def abort(self) -> None:

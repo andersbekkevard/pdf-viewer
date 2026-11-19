@@ -112,11 +112,13 @@ function copyVimium(src, dst) {
 }
 
 function copyExtension(dir, port) {
+  // extension/assets is a symlink to the repo's assets/: copy what it names.
   fs.cpSync(path.join(REPO, 'extension'), dir, {
     recursive: true,
+    dereference: true,
     filter: (src) => !src.includes(`${path.sep}_metadata`),
   });
-  for (const [file, count] of [['background.js', 2], ['rules.json', 2]]) {
+  for (const [file, count] of [['background.js', 2], ['bridge.js', 1], ['page.js', 1]]) {
     const target = path.join(dir, file);
     const text = fs.readFileSync(target, 'utf8');
     const replaced = (text.match(/(127\.0\.0\.1|localhost):7435/g) || []).length;
@@ -434,7 +436,14 @@ async function runEngine(ctx, spec) {
   const errorsAtStart = ctx.pageErrors.length;
 
   async function load() {
-    await page.goto(viewer + spec.path, { waitUntil: 'load', timeout: 60000 });
+    // An in-place page stops its own load (the PDF's download): wait for the
+    // reader, not for the load event.
+    await page.goto(spec.url || viewer + spec.path, { waitUntil: 'commit', timeout: 60000 }).catch((error) => {
+      if (!/ERR_ABORTED|interrupted/i.test(error.message)) throw error;
+    });
+    if (spec.url) {
+      check('the reader keeps the original file address', page.url().split('#')[0] === spec.url, page.url());
+    }
     await page.waitForSelector('#pdf2html-pageno-current', { state: 'attached', timeout: 30000 });
     await page.waitForFunction(() => document.getElementById('page-container')
       && document.getElementById('page-container').style.getPropertyValue('--pdf2html-zoom'),
@@ -1107,11 +1116,25 @@ async function main() {
       if (!m) throw new Error(`/read did not redirect to a reader shell: ${resp.status} ${loc}`);
       engines.push({
         label: 'reader',
-        path: `/r/${m[1]}/`,
+        // `_pdfvw=local`: the daemon's own page, which the extension would
+        // otherwise move to the file's address (the next engine).
+        path: `/r/${m[1]}/?_pdfvw=local`,
         hash: m[1],
         internalLink: '#pf1 a.l[data-reader-dest]',
         externalLink: '#pf1 a.l[href^="https://example.com"]',
       });
+      if (!process.env.PDFV_NO_INPLACE) {
+        // The same document read in place, at its file address
+        // (docs/in-place.md), where the `#page=` rule is what Vimium matches.
+        engines.push({
+          label: 'in place',
+          path: require('url').pathToFileURL(readerPdf).href,
+          url: require('url').pathToFileURL(readerPdf).href,
+          hash: m[1],
+          internalLink: '#pf1 a.l[data-reader-dest]',
+          externalLink: '#pf1 a.l[href^="https://example.com"]',
+        });
+      }
     }
     const profile = path.join(tmp, 'profile');
     const context = await chromium.launchPersistentContext(profile, {
@@ -1132,15 +1155,28 @@ async function main() {
 
     // ------------------------------------------------------ Vimium setup
     section = 'setup';
+    if (engines.some((spec) => spec.url?.startsWith('file:'))) {
+      const allowed = (worker) => worker?.evaluate(() => chrome.extension.isAllowedFileSchemeAccess());
+      check('both extensions have access to file URLs in the scratch profile',
+        !!(await allowed(vimiumWorker)) && !!(await allowed(extWorker)));
+    }
     const pattern = `https?://localhost:${port}/*`;
-    const rule = { pattern, passKeys: DOC_PASS_KEYS };
+    // docs/keybindings.md, "Vimium setup": the second rule, for documents read
+    // at their own address, which carries a `#page=<n>` fragment.
+    const inPlacePattern = '*#page=*';
+    const rules = [{ pattern, passKeys: DOC_PASS_KEYS }, { pattern: inPlacePattern, passKeys: DOC_PASS_KEYS }];
     const stored = await vimiumWorker.evaluate(async (r) => {
-      await chrome.storage.sync.set({ settingsVersion: chrome.runtime.getManifest().version, exclusionRules: [r] });
+      await chrome.storage.sync.set({ settingsVersion: chrome.runtime.getManifest().version, exclusionRules: r });
       return (await chrome.storage.sync.get('exclusionRules')).exclusionRules;
-    }, rule);
-    check('Vimium exclusion rule stored in chrome.storage.sync',
-      Array.isArray(stored) && stored.length === 1 && stored[0].pattern === pattern && stored[0].passKeys === DOC_PASS_KEYS,
+    }, rules);
+    check('Vimium exclusion rules stored in chrome.storage.sync',
+      Array.isArray(stored) && stored.length === 2 && stored[0].pattern === pattern && stored[0].passKeys === DOC_PASS_KEYS
+        && stored[1].pattern === inPlacePattern,
       JSON.stringify(stored));
+    check('the in-place rule matches a PDF address with a page fragment and not one without',
+      vimiumPatternMatches(inPlacePattern, 'https://arxiv.org/pdf/2401.00001#page=3')
+        && vimiumPatternMatches(inPlacePattern, 'file:///Users/a/Notes%20x.pdf#page=1')
+        && !vimiumPatternMatches(inPlacePattern, 'https://arxiv.org/pdf/2401.00001'));
     const effective = vimiumPassKeyString(DOC_PASS_KEYS);
     note(`Vimium's effective pass keys for "${DOC_PASS_KEYS}": "${effective}" (whitespace removed, distinct characters, sorted)`);
     const docPattern = 'localhost:7435';
@@ -1151,7 +1187,7 @@ async function main() {
     // Vimium's own first-run tab, if any, is noise.
     for (const p of context.pages()) if (/^chrome-extension:|vimium/.test(p.url())) await p.close().catch(() => {});
 
-    await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: viewer });
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
     const page = await context.newPage();
     const pageErrors = [];
     const extensionLogs = [];

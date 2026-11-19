@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /*
  * verify-extension.cjs — end-to-end check that every PDF the browser opens
- * lands in the reader: the unpacked extension, a scratch reader-mode daemon
- * and a local web origin, driven through headless Chromium for Testing.
+ * is read in the reader at its own address (docs/in-place.md): the unpacked
+ * extension, a scratch daemon and a local web origin, driven through headless
+ * Chromium for Testing.
  *
  * Self-contained: a temp copy of extension/ points at the scratch daemon
  * (port 7450), which uses a temp cache and state db; the origin listens on
@@ -10,11 +11,15 @@
  * 127.0.0.1. Nothing touches ~/.cache/pdf_viewer or the daemons on 7435–7437.
  *
  * Usage: scripts/verify-extension.sh
+ *   PDFV_VERIFY_SHOT=<png>   screenshot of the first in-place page
  *   PDFV_CHROMIUM=<binary>   browser to drive
  *   PDFV_VERIFY_PORT=<port>  scratch daemon port (origin: port + 1000)
  *   PDFV_VERIFY_RTT_MS, PDFV_VERIFY_MBPS   origin network shape (60, 100)
  *   PDFV_VERIFY_TARGET_MS    bound on a known-host gated open (1000)
  *   PDFV_VERIFY_DEBUG=1      print the service worker's console
+ *   --cold-reader <dir>   measure unseen text PDFs, each through first page and full text
+ *   --startup              measure first paint instead of running regressions
+ *   PDFV_STARTUP_LOAD      number of background CPU burners (default 0)
  *   PDFV_VERIFY_KEEP=1       keep the scratch directory
  */
 'use strict';
@@ -138,11 +143,13 @@ function portFree(port, host) {
 }
 
 function copyExtension(dir) {
+  // extension/assets is a symlink to the repo's assets/: copy what it names.
   fs.cpSync(path.join(REPO, 'extension'), dir, {
     recursive: true,
+    dereference: true,
     filter: (src) => !src.includes(`${path.sep}_metadata`),
   });
-  for (const [file, count] of [['background.js', 2], ['rules.json', 2]]) {
+  for (const [file, count] of [['background.js', 2], ['bridge.js', 1], ['page.js', 1]]) {
     const target = path.join(dir, file);
     const text = fs.readFileSync(target, 'utf8');
     const patched = text.replace(/(127\.0\.0\.1|localhost):7435/g, `$1:${DAEMON_PORT}`);
@@ -176,7 +183,8 @@ function sendPaced(res, body, mbps = MBPS) {
 // host redirects to a sign-in page, as an SSO host does), a gated URL that
 // answers HTML even when signed in, an ordinary HTML page on the gated host,
 // and the login and logout that set and clear the cookie.
-function startOrigin(log) {
+const flaky = { down: false };
+function startOrigin(log, port = ORIGIN_PORT) {
   const server = http.createServer((req, res) => {
     const signedIn = /(?:^|;\s*)session=ok(?:;|$)/.test(req.headers.cookie || '');
     const url = new URL(req.url, ORIGIN);
@@ -185,17 +193,29 @@ function startOrigin(log) {
       res.end();
       return;
     }
-    log.push({ t: Date.now(), path: url.pathname, signedIn, mode: req.headers['sec-fetch-mode'] || '' });
+    log.push({ t: Date.now(), path: url.pathname, signedIn, conditional: req.headers['if-none-match'] || '', mode: req.headers['sec-fetch-mode'] || '' });
     setTimeout(() => {
+      if (url.pathname === '/gated/doc.pdf' && signedIn && req.headers['if-none-match'] === '"gated-v1"') {
+        res.writeHead(304, { ETag: '"gated-v1"' });
+        res.end();
+        return;
+      }
       if (url.pathname === '/open/paper/2401.00001v2') {
         // A PDF whose URL does not say so (arXiv-style): only the type does.
         res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': PDF.length });
         sendPaced(res, PDF);
+      } else if (/^\/startup\/public-\d+\.pdf$/.test(url.pathname)) {
+        const body = Number(url.pathname.match(/(\d+)\.pdf$/)[1]) % 2 === 0 ? PDF : GATED_PDF;
+        res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': body.length });
+        sendPaced(res, body);
       } else if (url.pathname === '/open/download/7') {
         res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': PDF.length,
           'Content-Disposition': 'attachment; filename="export.pdf"' });
         sendPaced(res, PDF);
-      } else if (url.pathname === '/open/doc.pdf') {
+      } else if (url.pathname === '/open/flaky.pdf' && flaky.down) {
+        // A host that has gone away: the connection drops.
+        req.socket.destroy();
+      } else if (url.pathname === '/open/doc.pdf' || url.pathname === '/open/flaky.pdf') {
         res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': PDF.length });
         sendPaced(res, PDF);
       } else if (url.pathname === '/gated/html.pdf' && signedIn) {
@@ -209,6 +229,7 @@ function startOrigin(log) {
           'Content-Type': 'application/pdf',
           'Content-Length': GATED_PDF.length,
           'Content-Disposition': 'inline; filename="Gated Notes.pdf"',
+          'ETag': '"gated-v1"',
         });
         // slow.pdf takes about 3 s, longer than the daemon holds a navigation.
         sendPaced(res, GATED_PDF, url.pathname === '/gated/slow.pdf' ? 5 : MBPS);
@@ -235,7 +256,7 @@ function startOrigin(log) {
   });
   return new Promise((resolve, reject) => {
     server.once('error', reject);
-    server.listen(ORIGIN_PORT, '::1', () => resolve(server));
+    server.listen(port, '::1', () => resolve(server));
   });
 }
 
@@ -292,19 +313,29 @@ function dynamicRules(worker) {
 }
 
 // Commits of the main frame, so a check can tell a direct reader open from a
-// detour through the native viewer.
+// detour through the native viewer. The page script's own `#page=<n>`
+// fragment (history.replaceState) is the same document, not another commit.
 function trackCommits(page) {
   const commits = [];
   commits.times = [];
   page.on('framenavigated', (frame) => {
-    if (frame === page.mainFrame()) { commits.push(frame.url()); commits.times.push(Date.now()); }
+    if (frame !== page.mainFrame()) return;
+    const url = frame.url(), last = commits[commits.length - 1];
+    if (last && last.split('#')[0] === url.split('#')[0]) return;
+    commits.push(url); commits.times.push(Date.now());
   });
   return commits;
 }
 
-const READER_RE = new RegExp(`^${VIEWER.replace(/[.]/g, '\\.')}/r/([a-f0-9]{16})/`);
-const isReader = (url) => READER_RE.test(url);
-const hashOf = (url) => (url.match(READER_RE) || [])[1];
+const isNative = (url) => url.includes('_pdfvw=passthrough');
+
+// The hash of the reader built in this page, or null: the shell's <meta>.
+function readerHash(page) {
+  return page.evaluate(() => {
+    const meta = document.querySelector('meta[name="pdf2html-hash"]');
+    return meta && document.querySelector('.pf') ? meta.content : null;
+  }).catch(() => null);
+}
 
 async function gotoLoose(page, url) {
   // A navigation the extension redirects, or that a navigate signal replaces
@@ -314,28 +345,17 @@ async function gotoLoose(page, url) {
   } catch (error) {
     // A dead daemon's refused connection is what the daemon-down checks
     // provoke; the extension puts the tab back afterwards.
-    if (!/ERR_ABORTED|ERR_CONNECTION_REFUSED|interrupted|frame was detached/i.test(error.message)) throw error;
+    if (!/ERR_ABORTED|ERR_CONNECTION_REFUSED|ERR_EMPTY_RESPONSE|interrupted|frame was detached/i.test(error.message)) throw error;
   }
 }
 
-async function readerReady(page) {
+async function readerReady(page, timeoutMs = 15000, stepMs = 200) {
   return waitFor(() => page.evaluate(() => {
     const pages = document.querySelectorAll('.pf');
     const img = document.querySelector('.pf img.bi');
-    return pages.length > 0 && img && img.complete && img.naturalWidth > 0;
-  }).catch(() => false), 15000, 200);
-}
-
-// Epoch ms at which the reader's first page raster finished loading, from
-// the page's own resource timing (independent of the harness's polling).
-async function firstRasterAt(page) {
-  return page.evaluate(() => {
-    const img = document.querySelector('.pf img.bi');
-    if (!img || !img.complete || !img.naturalWidth) return null;
-    const entry = performance.getEntriesByType('resource')
-      .find((e) => /\/p\/1\/\d+\.(png|jpg)$/.test(e.name));
-    return entry ? performance.timeOrigin + entry.responseEnd : null;
-  }).catch(() => null);
+    // > 1: a page without its raster shows the reader's 1 px placeholder.
+    return pages.length > 0 && img && img.complete && img.naturalWidth > 1;
+  }).catch(() => false), timeoutMs, stepMs);
 }
 
 function entryDirs(cache) {
@@ -350,6 +370,174 @@ function originHits(log, pathname, since) {
 function describe(log, since) {
   return JSON.stringify(log.filter((r) => r.t >= since)
     .map((r) => `${r.t - since} ${r.path} ${r.mode || 'daemon'}${r.signedIn ? ' signed-in' : ''}`));
+}
+
+// Measure navigation to a decoded, visible raster across two animation frames.
+async function firstPaint(page, url) {
+  const start = performance.now();
+  await gotoLoose(page, url);
+  await page.waitForFunction(() => {
+    const image = document.querySelector('#pf1 img.bi');
+    if (!image?.complete || image.naturalWidth < 2) return false;
+    const rect = image.getBoundingClientRect();
+    return rect.width > 0 && rect.bottom > 0 && rect.top < innerHeight;
+  }, null, { timeout: 15000 }).catch(async (error) => {
+    const state = await page.evaluate(() => ({
+      contentType: document.contentType, pages: document.querySelectorAll('.pf').length,
+      opening: !!document.getElementById('pdfv-opening'),
+    })).catch(() => null);
+    throw new Error(`${url} → ${page.url()} ${JSON.stringify(state)}: ${error.message}`);
+  });
+  const documentMs = await page.evaluate(async () => {
+    const image = document.querySelector('#pf1 img.bi');
+    const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+    const deadline = performance.now() + 15000;
+    // The initial raster may be replaced by a sharper one during decode.
+    while (performance.now() < deadline) {
+      const src = image.currentSrc;
+      if (image.complete && image.naturalWidth > 1) {
+        try {
+          await image.decode();
+          await frame();
+          await frame();
+          if (src === image.currentSrc && image.complete && image.naturalWidth > 1) {
+            return Math.round(performance.now());
+          }
+        } catch (_) { /* superseded raster, wait for its replacement */ }
+      }
+      await frame();
+    }
+    throw new Error('first visible raster did not settle');
+  });
+  if (page.url().split('#')[0] !== url) throw new Error(`wrong address: ${page.url()}`);
+  return { elapsed: Math.round(performance.now() - start), document: documentMs };
+}
+
+async function measureStartup(context, tmp, publicOrigin) {
+  const page = await context.newPage();
+  const burners = [];
+  const load = Number(process.env.PDFV_STARTUP_LOAD || 0);
+  const samples = [];
+  try {
+    for (let i = 0; i < load; i++) burners.push(spawn('node', ['-e', 'for (;;) {}'], { stdio: 'ignore' }));
+    await page.goto(`${ORIGIN}/login`);
+    await firstPaint(page, `${ORIGIN}/gated/warmup.pdf`);
+    await page.goto('about:blank');
+    for (let i = 0; i < 8; i++) {
+      const local = path.join(tmp, `Local ${i}.pdf`);
+      // Vary content so the daemon never shares a cached local entry across repetitions.
+      const body = Buffer.concat([Buffer.from(i % 4 < 2 ? PDF : GATED_PDF), Buffer.from(`\n% trial ${i}\n`)]);
+      fs.writeFileSync(local, body);
+      fs.utimesSync(local, 1000, 1000);
+      const file = require('url').pathToFileURL(local).href;
+      const recent = i % 2 === 0;
+      if (recent) fs.utimesSync(local, new Date(), new Date());
+      for (const [scenario, url] of [
+        [recent ? 'local-recent' : 'local-existing', file],
+        ['public', `${publicOrigin}/startup/public-${i}.pdf`],
+        ['gated', `${ORIGIN}/gated/trial-${i}.pdf`],
+      ]) {
+        const sample = { scenario, ...await firstPaint(page, url) };
+        samples.push(sample);
+        await page.goto('about:blank');
+      }
+    }
+    const summary = {};
+    for (const scenario of ['all', ...new Set(samples.map(s => s.scenario))]) {
+      const sorted = samples.filter(s => scenario === 'all' || s.scenario === scenario)
+        .map(s => s.elapsed).sort((a, b) => a - b);
+      summary[scenario] = { n: sorted.length, p50: sorted[Math.ceil(sorted.length * 0.5) - 1],
+        p90: sorted[Math.ceil(sorted.length * 0.9) - 1] };
+    }
+    console.log(JSON.stringify({ load, summary, samples }));
+  } finally {
+    for (const burner of burners) burner.kill();
+    await page.close();
+  }
+}
+
+// Install the probe before the viewer starts. Marks use the document's
+// clock so Playwright round trips and CPU contention in the driver do not
+// inflate the first-paint measurement.
+function markColdReaderMilestones() {
+  let first = false, sharp = false, text = false;
+  document.addEventListener('load', (event) => {
+    const image = event.target;
+    if (!image?.matches?.('#pf1 img.bi') || image.naturalWidth < 2 || sharp) return;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const rect = image.getBoundingClientRect();
+      if (!image.complete || image.naturalWidth < 2 || rect.width <= 0 || rect.bottom <= 0 || rect.top >= innerHeight) return;
+      if (!first) performance.mark('pdfv-bench-first');
+      first = true;
+      if (!sharp && image.naturalWidth >= Math.round(rect.width * devicePixelRatio) - 1) {
+        sharp = true;
+        performance.mark('pdfv-bench-sharp');
+      }
+    }));
+  }, true);
+  const observer = new MutationObserver(() => {
+    if (text || document.documentElement?.dataset.readerText !== 'complete'
+        || document.querySelector('[data-reader-pending]')) return;
+    const pages = document.querySelectorAll('.pf');
+    if (!pages[pages.length - 1]?.querySelector('.t')) return;
+    text = true;
+    performance.mark('pdfv-bench-text');
+    observer.disconnect();
+  });
+  observer.observe(document, { attributes: true, subtree: true, attributeFilter: ['data-reader-text'] });
+}
+
+async function measureColdReader(context, tmp, directory) {
+  const files = fs.readdirSync(directory).filter(name => name.endsWith('.pdf')).sort();
+  if (!files.length) throw new Error('provide text PDFs for --cold-reader');
+  const docs = files.map(name => ({ name, bytes: fs.readFileSync(path.join(directory, name)) }));
+  await context.addInitScript(markColdReaderMilestones);
+  const page = await context.newPage();
+  const load = Number(process.env.PDFV_STARTUP_LOAD || 0);
+  const repeats = Number(process.env.PDFV_COLD_REPEATS || 4);
+  const burners = [];
+  const samples = [];
+  try {
+    for (let i = 0; i < load; i++) burners.push(spawn('node', ['-e', 'for (;;) {}'], { stdio: 'ignore' }));
+    for (let trial = -1; trial < repeats; trial++) {
+      for (const doc of trial < 0 ? docs.slice(0, 1) : docs) {
+        const local = path.join(tmp, `${trial}-${doc.name}`);
+        fs.writeFileSync(local, Buffer.concat([doc.bytes, Buffer.from(`\n% cold trial ${trial}\n`)]));
+        fs.utimesSync(local, 1000, 1000);
+        const url = require('url').pathToFileURL(local).href;
+        await gotoLoose(page, url);
+        const marks = await page.waitForFunction(() => {
+          const when = metric => performance.getEntriesByName('pdfv-bench-' + metric)[0]?.startTime;
+          const first = when('first'), sharp = when('sharp'), text = when('text');
+          return first && sharp && text ? { first: Math.round(first), sharp: Math.round(sharp),
+            text: Math.round(Math.max(text, sharp)) } : null;
+        }, null, { timeout: 120000 });
+        const timing = await marks.jsonValue();
+        await marks.dispose();
+        if (page.url().split('#')[0] !== url) throw new Error(`wrong address: ${page.url()}`);
+        if (trial >= 0) {
+          const sample = { fixture: doc.name, trial, ...timing };
+          samples.push(sample);
+          console.log(JSON.stringify(sample));
+        }
+        await page.goto('about:blank');
+      }
+    }
+    const summary = {};
+    for (const fixture of ['all', ...files]) {
+      const matching = samples.filter(s => fixture === 'all' || s.fixture === fixture);
+      summary[fixture] = {};
+      for (const metric of ['first', 'sharp', 'text']) {
+        const sorted = matching.map(s => s[metric]).sort((a, b) => a - b);
+        summary[fixture][metric] = { n: sorted.length, p50: sorted[Math.ceil(sorted.length * 0.5) - 1],
+          p90: sorted[Math.ceil(sorted.length * 0.9) - 1] };
+      }
+    }
+    console.log(JSON.stringify({ load, summary }));
+  } finally {
+    for (const burner of burners) burner.kill();
+    await page.close();
+  }
 }
 
 async function main() {
@@ -392,36 +580,118 @@ async function main() {
     const { context } = launched;
     let worker = launched.worker;
     try {
-      const fileRuleReady = await waitFor(async () => (await dynamicRules(worker))
-        .some((r) => r.condition.regexFilter && r.condition.regexFilter.startsWith('^file://')), 10000);
-      check('extension installs the generic file:// rule in reader mode', Boolean(fileRuleReady));
+      const cold = process.argv.indexOf('--cold-reader');
+      if (cold !== -1) {
+        await measureColdReader(context, tmp, process.argv[cold + 1]);
+        return;
+      }
+      if (process.argv.includes('--startup')) {
+        const publicOriginPort = ORIGIN_PORT + 1;
+        const publicOrigin = await startOrigin(originLog, publicOriginPort);
+        cleanup.push(() => new Promise((resolve) => publicOrigin.close(resolve)));
+        await measureStartup(context, tmp, `http://[::1]:${publicOriginPort}`);
+        return;
+      }
+      const noRedirects = (await dynamicRules(worker)).every((r) => r.action.type !== 'redirect')
+        && JSON.parse(fs.readFileSync(path.join(extensionDir, 'rules.json'), 'utf8'))
+          .every((r) => r.action.type !== 'redirect');
+      check('the extension redirects nothing: its rules only rewrite headers or allow', noRedirects);
 
       // ------------------------------------------------------------- open PDF
       const page = await context.newPage();
+      async function checkDownload(expected, label) {
+        const pending = page.waitForEvent('download', { timeout: 10000 });
+        await page.keyboard.press(':');
+        await page.locator('#pdf2html-palette-input').fill('download');
+        await page.keyboard.press('Enter');
+        const downloaded = await pending;
+        const file = await downloaded.path();
+        check(label, downloaded.suggestedFilename().endsWith('.pdf') && file && fs.readFileSync(file).equals(expected),
+          `filename ${downloaded.suggestedFilename()}; failure ${await downloaded.failure()}`);
+      }
+
       const errors = [];
       page.on('console', (msg) => { if (msg.type() === 'error') errors.push(msg.text()); });
       page.on('pageerror', (error) => errors.push(String(error)));
       page.on('response', (resp) => { if (resp.status() >= 400) errors.push(`${resp.status()} ${resp.url()}`); });
       let commits = trackCommits(page);
       let started = Date.now();
+      const localRequests = [];
+      page.on('request', (req) => {
+        if (req.frame() === page.mainFrame() && /^http:\/\/(localhost|127\.0\.0\.1)[:/]/.test(req.url())) localRequests.push(req.url());
+      });
       await gotoLoose(page, `${ORIGIN}/open/doc.pdf`);
-      await waitFor(() => isReader(page.url()), 10000);
-      const openHash = hashOf(page.url());
+      const openHash = await waitFor(() => readerHash(page), 10000);
       const openReady = openHash ? await readerReady(page) : false;
-      await sleep(500);
-      check('open PDF lands in the reader with a ready raster and no console errors',
-        Boolean(openHash && openReady) && errors.length === 0
-          && !commits.some((u) => u.includes('_pdfvw=passthrough')),
-        `url ${page.url()}; errors ${JSON.stringify(errors)}`);
+      await sleep(900);
+      check('open PDF is read in place with a ready raster and no console errors',
+        Boolean(openHash && openReady) && errors.length === 0 && commits.length === 1 && !commits.some(isNative),
+        `url ${page.url()}; commits ${JSON.stringify(commits)}; errors ${JSON.stringify(errors)}`);
+      check('the address bar keeps the PDF\'s own URL, with the page fragment',
+        page.url() === `${ORIGIN}/open/doc.pdf#page=1`, page.url());
+      if (process.env.PDFV_VERIFY_SHOT) await page.screenshot({ path: process.env.PDFV_VERIFY_SHOT });
+      const shape = await page.evaluate(() => ({
+        mode: document.compatMode,
+        title: document.title,
+        font: getComputedStyle(document.querySelector('#pdf2html-pageno') || document.body).fontFamily,
+        fonts: document.fonts.size,
+        textLayer: document.querySelectorAll('.pf .t, .pf [data-reader-line], .pf .pc > :not(img)').length,
+      }));
+      check('the page is a standards-mode document with the reader\'s stylesheet, fonts and text',
+        shape.mode === 'CSS1Compat' && /FK Grotesk/.test(shape.font) && shape.fonts > 0 && shape.textLayer > 0,
+        JSON.stringify(shape));
+      check('the page itself asks the daemon for nothing: every request goes through the extension',
+        localRequests.length === 0, JSON.stringify(localRequests.slice(0, 5)));
       check('open PDF is downloaded by the daemon, not through the browser session',
-        originHits(originLog, '/open/doc.pdf', started).every((r) => r.mode === ''),
+        originHits(originLog, '/open/doc.pdf', started).every((r) => r.mode === '' || r.mode === 'navigate'),
         describe(originLog, started));
+
+      // Another site cannot use the bridge: it has no token for its tab.
+      {
+        const bridge = `chrome-extension://${new URL(worker.url()).host}/bridge.html`;
+        const other = await context.newPage();
+        await other.goto(`${ORIGIN}/gated/notes.html`);
+        const refused = await other.evaluate((src) => new Promise((resolve) => {
+          const frame = document.createElement('iframe');
+          frame.src = src;
+          frame.onload = () => {
+            const channel = new MessageChannel();
+            channel.port1.onmessage = (e) => resolve(e.data && e.data.ready ? 'accepted' : 'refused');
+            frame.contentWindow.postMessage({ pdfv: 'connect', token: 'f'.repeat(48) }, '*', [channel.port2]);
+            setTimeout(() => resolve('silent'), 2500);
+          };
+          frame.onerror = () => resolve('blocked');
+          document.body.appendChild(frame);
+        }), bridge);
+        check('the bridge refuses a page that did not register through the extension', refused !== 'accepted', refused);
+        await other.close();
+      }
+
+      // The daemon's own address of a document moves to the document's address.
+      await gotoLoose(page, `${VIEWER}/r/${openHash}/`);
+      const movedHome = await waitFor(() => page.url().startsWith(`${ORIGIN}/open/doc.pdf#page=`), 8000, 50);
+      check('a document opened at the daemon\'s address moves to its own address',
+        Boolean(movedHome) && Boolean(await waitFor(() => readerHash(page), 8000)), page.url());
+
+      // A cached document whose host cannot be reached: the stored copy.
+      await gotoLoose(page, `${ORIGIN}/open/flaky.pdf`);
+      const flakyHash = await waitFor(() => readerHash(page), 10000);
+      flaky.down = true;
+      await gotoLoose(page, `${ORIGIN}/open/flaky.pdf`);
+      const stored = await waitFor(() => page.url().startsWith(`${VIEWER}/r/${flakyHash}/`) && page.url().includes('_pdfvw=local'), 10000, 50);
+      check('a cached document whose host is unreachable opens from the stored copy',
+        Boolean(flakyHash && stored) && await readerReady(page), page.url());
+      await gotoLoose(page, `${VIEWER}/r/${flakyHash}/`);
+      const back = await waitFor(() => page.url().includes('_pdfvw=local') && page.url().startsWith(VIEWER), 10000, 50);
+      check('and from the daemon\'s address it tries its own, then returns to the stored copy',
+        Boolean(back) && await readerReady(page), page.url());
+      flaky.down = false;
 
       commits = trackCommits(page);
       await gotoLoose(page, `${ORIGIN}/open/paper/2401.00001v2`);
-      await waitFor(() => isReader(page.url()), 10000);
-      check('a PDF with no .pdf in its URL (content type only) lands in the reader',
-        isReader(page.url()) && await readerReady(page),
+      const paperHash = await waitFor(() => readerHash(page), 10000);
+      check('a PDF with no .pdf in its URL (content type only) is read in place',
+        Boolean(paperHash) && await readerReady(page) && page.url().startsWith(`${ORIGIN}/open/paper/2401.00001v2`),
         `url ${page.url()}; commits ${JSON.stringify(commits)}`);
       commits = trackCommits(page);
       // Playwright rejects the navigation when it turns into a download.
@@ -440,17 +710,20 @@ async function main() {
         commits = trackCommits(page);
         started = Date.now();
         await gotoLoose(page, `${ORIGIN}${pathname}`);
-        await waitFor(() => isReader(page.url()), RELAY_BOUND_MS, 20);
-        const hash = hashOf(page.url());
-        const ready = hash ? await readerReady(page) : false;
-        const rasterAt = ready ? await firstRasterAt(page) : null;
+        const hash = await waitFor(() => readerHash(page), RELAY_BOUND_MS, 20);
+        const ready = hash ? await readerReady(page, 15000, 20) : false;
+        // The harness's own poll, 20 ms apart: rasters arrive as blob: URLs,
+        // which have no resource timing entry.
+        const rasterAt = ready ? Date.now() : null;
         await sleep(300);
-        const hits = originHits(originLog, pathname, started);
+        // The tab's own request for the URL is not a fetch of the PDF: the
+        // page script stops it once the headers are in.
+        const hits = originHits(originLog, pathname, started).filter((r) => r.mode !== 'navigate');
         return {
           hash,
           ready,
           ms: rasterAt ? Math.round(rasterAt - started) : null,
-          native: commits.some((u) => u.startsWith(ORIGIN)) || hits.some((r) => r.mode === 'navigate'),
+          native: commits.some(isNative),
           hits,
           commits: [...commits],
           detail: `first raster ${rasterAt ? Math.round(rasterAt - started) : '?'} ms after navigation start; `
@@ -468,7 +741,7 @@ async function main() {
       // ----------------------------------------------- gated, host not yet known
       const first = await gatedOpen('/gated/first.pdf');
       timings.gatedNewHost = first.ms;
-      check('gated first open on a new host goes straight to the reader, never the browser viewer',
+      check('gated first open on a new host is read in place, never the browser viewer',
         Boolean(first.hash && first.ready) && !first.native && first.commits.length === 1
           && sourceOf(first.hash).includes('Gated Notes.pdf') && errors.length === 0,
         first.detail);
@@ -487,11 +760,13 @@ async function main() {
           && known.hits.every((r) => r.signedIn) && known.hits.length === 1,
         known.detail);
 
+      await checkDownload(GATED_PDF, ':download saves the exact signed-in PDF bytes');
+
       // ------------------------------------------------------------- reopen
       const reopen = await gatedOpen('/gated/doc.pdf');
       timings.gatedReopen = reopen.ms;
-      check('gated reopen is served from the stored source without touching the host',
-        reopen.hash === known.hash && reopen.ready && !reopen.native && reopen.hits.length === 0,
+      check('gated reopen conditionally revalidates through the browser session (304)',
+        reopen.hash === known.hash && reopen.ready && !reopen.native && reopen.hits.length >= 1 && reopen.hits.every((r) => r.signedIn) && reopen.hits.some((r) => r.conditional === '"gated-v1"' && r.mode === 'cors'),
         reopen.detail);
 
       // ------------------------------------------------ suspended worker
@@ -521,10 +796,22 @@ async function main() {
       // ------------------------------------------------- slow: holding page
       const slow = await gatedOpen('/gated/slow.pdf');
       timings.gatedSlow = slow.ms;
-      check('a transfer longer than the hold shows the holding page, then the reader in the same tab',
-        Boolean(slow.hash && slow.ready) && !slow.native && slow.commits.length === 2
-          && /\/view-raw\?/.test(slow.commits[0]) && isReader(slow.commits[1]),
+      check('a transfer longer than the hold still ends in the reader, in the same document',
+        Boolean(slow.hash && slow.ready) && !slow.native && slow.commits.length === 1,
         slow.detail);
+      // Ten pages: the address follows the page being read.
+      await page.evaluate(() => { document.getElementById('pf4').scrollIntoView({ behavior: 'instant', block: 'start' }); });
+      const followed = await waitFor(() => /#page=4$/.test(page.url()), 5000, 50);
+      check('the address\'s page fragment follows the page being read', Boolean(followed), page.url());
+      commits = trackCommits(page);
+      await gotoLoose(page, `${ORIGIN}/gated/slow.pdf#page=7`);
+      await page.reload().catch(() => {});
+      await waitFor(() => readerHash(page), 10000);
+      const landedOn = await waitFor(() => page.evaluate(() => {
+        const root = document.getElementById('page-container'), pf = document.getElementById('pf7');
+        return root && pf && Math.abs(pf.getBoundingClientRect().top - root.getBoundingClientRect().top) < 80;
+      }).catch(() => false), 8000, 100);
+      check('an address with #page=7 opens on that page', Boolean(landedOn), page.url());
 
       if (BIG_PDF) {
         const big = await gatedOpen('/gated/big.pdf');
@@ -546,7 +833,7 @@ async function main() {
         const text = await page.evaluate(() => document.body.innerText).catch(() => '');
         check('a gated URL that answers HTML ends on the site\'s own page, nothing stored',
           Boolean(landed) && /not available/.test(text) && entryDirs(daemon.cache).length === before
-            && commits.length === 1 && !commits.some(isReader),
+            && commits.length === 1 && !(await readerHash(page)),
           `url ${page.url()}; commits ${JSON.stringify(commits)}; origin ${describe(originLog, started)}`);
       }
 
@@ -578,6 +865,17 @@ async function main() {
           `url ${page.url()}; commits ${JSON.stringify(commits)}; origin ${describe(originLog, started)}`);
       }
 
+      // A cached rewrite must not override the passthrough allow rule.
+      await waitFor(async () => (await dynamicRules(worker))
+        .some(r => (r.condition.regexFilter || '').includes('open/doc')), 10000);
+      // API requests are not main_frame: use a navigation to exercise DNR.
+      let bypassType = '';
+      page.once('response', r => { bypassType = r.headers()['content-type'] || ''; });
+      await gotoLoose(page, `${ORIGIN}/open/doc.pdf?_pdfvw=passthrough`);
+      await sleep(1000);
+      check('cached passthrough preserves PDF content type',
+        bypassType.includes('application/pdf'), bypassType);
+
       // --------------------------------------------------------- disabled entry
       const disabled = await fetch(`${DAEMON}/entry/${openHash}/disabled`, {
         method: 'PUT',
@@ -592,7 +890,7 @@ async function main() {
       await sleep(3000);
       check('disabled entry stays in the native viewer',
         disabled.ok && Boolean(allowRule) && page.url().startsWith(`${ORIGIN}/open/doc.pdf`)
-          && !commits.some(isReader),
+          && !(await readerHash(page)),
         `allow rule ${Boolean(allowRule)}; url ${page.url()}`);
       await fetch(`${DAEMON}/entry/${openHash}/disabled`, {
         method: 'PUT',
@@ -611,27 +909,53 @@ async function main() {
         fs.copyFileSync(path.join(REPO, 'test/fixtures/basic_text.pdf'), local);
         const fileUrl = require('url').pathToFileURL(local).href;
         await gotoLoose(page, fileUrl);
-        await waitFor(() => isReader(page.url()), 10000);
-        const fileReady = isReader(page.url()) ? await readerReady(page) : false;
-        check('file:// PDF opens the reader', Boolean(fileReady), `${fileUrl} → ${page.url()}`);
+        let fileHash = await waitFor(() => readerHash(page), 10000);
+        const fileReady = fileHash ? await readerReady(page) : false;
+        check('file:// PDF is read in place at its file address',
+          Boolean(fileReady) && page.url() === `${fileUrl}#page=1`, `${fileUrl} → ${page.url()}`);
 
-        // The per-entry allow rule (p4) of a disabled local file must beat
-        // the generic file rule (p1).
-        const fileHash = hashOf(page.url());
+        await checkDownload(PDF, ':download saves the exact local PDF bytes');
+
+        const localRequests = [];
+        const trackLocal = (request) => {
+          if (request.url().includes('/local-file/')) localRequests.push(request.url());
+        };
+        context.on('request', trackLocal);
+        const beforeStat = fs.statSync(local);
+        const replacement = local + '.replacement';
+        fs.writeFileSync(replacement, GATED_PDF);
+        fs.utimesSync(replacement, beforeStat.atime, beforeStat.mtime);
+        fs.renameSync(replacement, local);
+        const changedHash = await waitFor(async () => {
+          const current = await readerHash(page);
+          return current && current !== fileHash ? current : null;
+        }, 10000, 100);
+        check('an open file:// reader shows new pages after atomic replacement preserving modification time',
+          Boolean(changedHash) && await readerReady(page) && page.url().startsWith(fileUrl) && await page.locator('.pf').count() === 10,
+          `old ${fileHash}; new ${changedHash}; checks ${JSON.stringify(localRequests)}`);
+        context.off('request', trackLocal);
+        await gotoLoose(page, fileUrl);
+        const refreshedHash = await waitFor(async () => {
+          const current = await readerHash(page);
+          return current && current !== fileHash ? current : null;
+        }, 10000, 100);
+        check('reopening file:// uses the changed local revision', Boolean(refreshedHash) && await readerReady(page),
+          `old ${fileHash}; new ${refreshedHash}`);
+        fileHash = refreshedHash || fileHash;
+
+        // No rule can apply to a local file: the page script asks the daemon
+        // and hands a disabled one to the browser's viewer.
         const off = fileHash && await fetch(`${DAEMON}/entry/${fileHash}/disabled`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ disabled: true }),
         });
-        const fileAllow = await waitFor(async () => (await dynamicRules(worker))
-          .some((r) => r.action.type === 'allow' && r.priority === 4
-            && (r.condition.urlFilter || '').startsWith('|file://')), 10000);
-        commits = trackCommits(page);
         await gotoLoose(page, fileUrl);
-        await sleep(2000);
-        check('disabled local file stays in the native viewer despite the generic rule',
-          Boolean(off && off.ok && fileAllow) && page.url() === fileUrl && !commits.some(isReader),
-          `allow rule ${Boolean(fileAllow)}; url ${page.url()}`);
+        const nativeFile = await waitFor(() => isNative(page.url()), 8000, 50);
+        await sleep(500);
+        check('disabled local file ends in the native viewer',
+          Boolean(off && off.ok && nativeFile) && page.url().startsWith(fileUrl) && !(await readerHash(page)),
+          `url ${page.url()}`);
       }
 
       // ----------------------------------------------------------- daemon down
@@ -662,8 +986,8 @@ async function main() {
         }, 15000, 200);
         commits = trackCommits(page);
         await gotoLoose(page, `${ORIGIN}/gated/doc.pdf`);
-        await waitFor(() => isReader(page.url()), 10000);
-        check('daemon back: redirects resume', Boolean(recovered) && isReader(page.url()),
+        const resumed = await waitFor(() => readerHash(page), 10000);
+        check('daemon back: PDFs are read in place again', Boolean(recovered && resumed),
           `url ${page.url()}; commits ${JSON.stringify(commits)}`);
       }
     } finally {

@@ -42,6 +42,7 @@ export function createCommandSurface(core) {
             [[['⌘', 'P']], 'Open a document; Enter alone goes back to the previous one'],
             [[['⌘', 'K']], 'Search sections, documents and commands together'],
             [[['⌘', ',']], 'Settings'],
+            [[['⌘', 'S'], ['Ctrl', 'S']], 'Save the original PDF file'],
             [[['/'], ['s']], 'Find in visible pages (Enter jumps, n / N cycle)'],
             [[['Ctrl', 'f']], 'Finger visible URL / DOI / ISBN / ID tokens; hint copies'],
             [[['?']], 'Toggle this cheatsheet'],
@@ -286,7 +287,7 @@ export function createCommandSurface(core) {
         { name: 'set', aliases: [], usage: 'set', help: 'Open settings',
           desc: 'open settings',
           handler: function () { settings.toggle(); } },
-        { name: 'path', aliases: [], usage: 'path', help: "Copy this PDF's source path / URL",
+        { name: 'path', aliases: ['link'], usage: 'path / link', help: "Copy this PDF's source path / URL",
           desc: function () {
               var ref = library.currentSourceRef();
               return ref ? middleEllipsis(ref, 60) : 'copy source path / URL';
@@ -298,12 +299,25 @@ export function createCommandSurface(core) {
                   notify(ok ? 'Copied ' + middleEllipsis(ref, 48) : 'Could not copy to the clipboard', { error: !ok });
               });
           } },
+        { name: 'download', aliases: [], usage: 'download', help: 'Download the original PDF file',
+          desc: 'save the original PDF, including its images and text',
+          handler: function () {
+              var hash = core.entryHash && core.entryHash();
+              if (!hash) { notify('No PDF recorded for this document', { error: true }); return; }
+              var href = '/download?hash=' + encodeURIComponent(hash);
+              var link = document.createElement('a');
+              link.href = core.daemon ? core.daemon.url(href) : href;
+              link.download = '';
+              document.body.appendChild(link);
+              link.click();
+              link.remove();
+          } },
         { name: 'print', aliases: [], usage: 'print', help: "Open the PDF in the browser's viewer to print it",
           desc: "open the PDF in the browser's viewer to print",
           handler: function () {
               var hash = core.entryHash && core.entryHash();
               if (!hash) { notify('No PDF recorded for this document', { error: true }); return; }
-              window.open('/native?hash=' + encodeURIComponent(hash), '_blank');
+              window.open(core.daemon.url('/native?hash=' + encodeURIComponent(hash)), '_blank');
           } },
         { name: 'disable', aliases: ['native'], usage: 'disable', help: 'Open the native PDF and stop redirecting this file',
           desc: 'open native PDF and disable viewer for this file',
@@ -642,6 +656,17 @@ export function createCommandSurface(core) {
         }, true);
     }
 
+    // Save the source PDF rather than Chrome's HTML/text reader surface.
+    // Chords work from text fields too, like quick open and settings.
+    function registerSaveHandler() {
+        document.addEventListener('keydown', function (e) {
+            if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+            if (String(e.key || '').toLowerCase() !== 's' && e.code !== 'KeyS') return;
+            e.preventDefault(); e.stopPropagation();
+            if (!e.repeat) findCommand('download').handler();
+        }, true);
+    }
+
     function registerFingerShortcutHandler() {
         window.addEventListener('keydown', function (e) {
             if (!e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
@@ -669,7 +694,7 @@ export function createCommandSurface(core) {
     // open-file dialog has no use here.
     // ------------------------------------------------------------------------
     var quickOpen = createQuickOpen({
-        document: document, window: window, location: location, navigation: navigation,
+        document: document, window: window, location: location, navigation: navigation, daemon: core.daemon,
         documentModel: core.documentModel, library: library, notify: notify, pins: core.pins,
         saveSelection: saveSelection, restoreSelection: restoreSelection,
         commands: function () { return COMMANDS; },
@@ -779,6 +804,7 @@ export function createCommandSurface(core) {
             registerFingerShortcutHandler();
             registerQuickOpenHandler();
             registerSettingsHandler();
+            registerSaveHandler();
         },
         closeFinderOrPalette: closeFinderOrPalette,
         closeHelp: closeHelp,

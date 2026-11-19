@@ -52,7 +52,8 @@ export function createReaderText(core) {
             }
             waiters.push({ from: from, to: to, ranges: wanted, resolve: resolve });
             settleWaiters();
-            pump();
+            if (started) pump();
+            else start();
         });
     }
     function failedPages(from, to) {
@@ -173,6 +174,40 @@ export function createReaderText(core) {
         settleWaiters();
     }
 
+    function startAfterRaster() {
+        // On long documents several text batches keep the worker pool busy
+        // and can deliver many DOM nodes before the first raster paints.
+        // A short first-paint head start lets the existing renderer finish
+        // without the book's text competing for CPU. Text requests made by
+        // a user action still start immediately through whenLoaded().
+        function sharpOnScreen(img) {
+            if (!img?.complete || img.naturalWidth < 2) return false;
+            var box = img.getBoundingClientRect();
+            return box.width && box.bottom > 0 && box.top < window.innerHeight
+                && img.naturalWidth >= Math.round(box.width * window.devicePixelRatio) - 1;
+        }
+        if (documentModel.visiblePages().some(function (page) {
+            return sharpOnScreen(page.querySelector('img.bi'));
+        })) {
+            start();
+            return;
+        }
+        var timer = window.setTimeout(finish, 250);
+        document.addEventListener('load', imageLoaded, true);
+        function finish() {
+            window.clearTimeout(timer);
+            document.removeEventListener('load', imageLoaded, true);
+            start();
+        }
+        function imageLoaded(event) {
+            var img = event.target;
+            if (img.matches?.('.pf img.bi') && sharpOnScreen(img)) {
+                document.removeEventListener('load', imageLoaded, true);
+                window.requestAnimationFrame(finish);
+            }
+        }
+    }
+
     function start() {
         if (started) return;
         started = true;
@@ -197,9 +232,8 @@ export function createReaderText(core) {
         });
         if (!ranges.size) { checkFinished(); return; }
         document.addEventListener('pdf2html-page-change', pump);
-        // The daemon runs page renders before text ranges, so text loading
-        // can start at once without delaying the first rasters.
-        start();
+        if (ranges.size > SLOTS && !document.hidden) startAfterRaster();
+        else start();
     }
 
     return { mount: mount, whenLoaded: whenLoaded };

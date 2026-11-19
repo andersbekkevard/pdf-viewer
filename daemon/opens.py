@@ -176,7 +176,8 @@ class OpenMiddleware:
 
     async def __call__(self, scope, receive, send):
         path = scope.get('path', '')
-        shell = re.fullmatch(r'/r/([a-f0-9]{6,64})/', path)
+        # `/r/<hash>/` or `/r/<hash>/<slug>` (reader.reader_path); not its other routes.
+        shell = re.fullmatch(r'/r/([a-f0-9]{6,64})/(?:(?!ocr$|icon$)[a-z0-9-]+)?', path)
         cached = re.fullmatch(r'/([a-f0-9]{6,64})/[^/]+\.html', path)
         initial = path in ('/', '/read', '/read-raw', '/view', '/view-raw', '/view-file-raw')
         if scope['type'] != 'http' or scope.get('method') != 'GET' or not (initial or shell or cached):

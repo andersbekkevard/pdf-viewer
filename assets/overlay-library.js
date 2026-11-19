@@ -4,6 +4,7 @@ export function createLibrary(core) {
     var location = core.location;
     var fetch = core.fetch;
     var history = core.history;
+    var daemon = core.daemon;
     var entryHash = core.entryHash;
     var notify = core.notify || function () {};
     var completionLimit = 30;
@@ -84,7 +85,7 @@ export function createLibrary(core) {
             if (!sub && name.indexOf(n) !== -1) sub = entries[i];
         }
         var pick = exact || sub || complete(needle).slice(-1)[0];
-        if (pick && pick.href) location.href = pick.href;
+        if (pick && pick.href) daemon.open(pick.href);
     }
     function currentName() {
         var hash = entryHash();
@@ -128,10 +129,10 @@ export function createLibrary(core) {
             if (!target) return;
             // The extension may navigate the tab itself; fall back if it hasn't.
             if (info.extension_navigation_queued) {
-                setTimeout(function () { if (location.href !== target) location.replace(target); }, 3000);
+                setTimeout(function () { if (location.href !== target) daemon.leave(target); }, 3000);
                 return;
             }
-            location.replace(target);
+            daemon.leave(target);
         });
     }
     function renameCurrent(newName) {
@@ -142,7 +143,8 @@ export function createLibrary(core) {
             notify(info.renamed === false ? 'Name unchanged' : 'Renamed to ' + (info.new_name || name));
             document.title = info.new_name || name;
             refresh();
-            if (info.href) try { history.replaceState(null, '', info.href); } catch (_) {}
+            // The titled address is the daemon's; a PDF's own address stays.
+            if (info.href && !daemon.embedded) try { history.replaceState(null, '', info.href); } catch (_) {}
         });
     }
     function deleteCurrent() {
@@ -151,9 +153,9 @@ export function createLibrary(core) {
             .then(function (r) { return r.ok ? r.json() : null; })
             .then(function (info) {
                 var src = info && info.source_ref;
-                if (!src) { location.replace('about:blank'); return; }
+                if (!src) { daemon.leave('about:blank'); return; }
                 if (src.charAt(0) === '/') src = 'file://' + encodeURI(src);
-                location.replace(src);
+                daemon.leave(src);
             }).catch(function (e) {
                 console.warn('[delete] failed:', e);
                 notify('Could not delete: the daemon did not answer', { error: true });

@@ -1,4 +1,4 @@
-import './overlay-timing.js';
+import { mountTiming } from './overlay-timing.js';
 // ============================================================================
 // pdf_viewer overlay — runtime layer on top of the reader shell
 // (daemon/reader.py).
@@ -13,6 +13,7 @@ import './overlay-timing.js';
 // priority, the Tab guard, count-prefixed page and chapter motions).
 // ============================================================================
 
+import { daemon } from './overlay-daemon.js';
 import { el, isInputTarget } from './overlay-dom.js';
 import { createLiveReload } from './overlay-livereload.js';
 import { createPreferences } from './overlay-prefs.js';
@@ -37,10 +38,20 @@ import { createPageCounter } from './overlay-pageno.js';
 import { createCommandSurface } from './overlay-commands.js';
 import { createToast } from './overlay-toast.js';
 
+export let mountOverlay;
+
 (function () {
     'use strict';
 
-    document.addEventListener('DOMContentLoaded', init);
+    // A module tag on the daemon's own page mounts the parsed document. The
+    // old content script connected its transport before importing this module.
+    // The current script loads the module in parallel and mounts it explicitly.
+    if (daemon.embedded || document.getElementById('pdf2html-overlay-js')) {
+        if (document.readyState === 'loading' && !daemon.embedded) document.addEventListener('DOMContentLoaded', init);
+        else init();
+    }
+
+    mountOverlay = init;
 
     // The cache-entry hash: the shell's <meta> tag, else the /r/<hash>/ path.
     function entryHash() {
@@ -51,24 +62,27 @@ import { createToast } from './overlay-toast.js';
     }
 
     function init() {
-        var base = { document: document, window: window, requestAnimationFrame: requestAnimationFrame };
+        mountTiming();
+        var base = { document: document, window: window, requestAnimationFrame: requestAnimationFrame, daemon: daemon };
         function withBase(extra) { return Object.assign({}, base, extra); }
 
-        var prefs = createPreferences(localStorage);
-        var documentState = createDocumentState({ fetch: fetch.bind(window), storage: localStorage,
+        var prefs = createPreferences(daemon.storage);
+        var documentState = createDocumentState({ fetch: daemon.fetch, storage: daemon.storage,
             entryHash: entryHash, window: window });
         var documentModel = createDocumentModel(base);
-        var zoom = createZoom(withBase({ storage: localStorage, documentState: documentState, entryHash: entryHash,
+        var zoom = createZoom(withBase({ storage: daemon.storage, documentState: documentState, entryHash: entryHash,
             documentModel: documentModel }));
+        // daemon.location/history: at a PDF's own address the fragment is the
+        // extension's (`#page=<n>`), and the page asked for comes from there.
         var navigation = createNavigation(withBase({
-            location: location, history: history, documentState: documentState, entryHash: entryHash,
+            location: daemon.location, history: daemon.history, documentState: documentState, entryHash: entryHash,
             documentModel: documentModel,
         }));
         var scrollOff = createScrollOff(withBase({ performance: performance, prefs: prefs, documentModel: documentModel }));
         var toast = createToast(base);
         // The library is built below; the quote reference reads it late.
         var library = null;
-        var readerText = createReaderText(withBase({ fetch: fetch.bind(window), documentModel: documentModel,
+        var readerText = createReaderText(withBase({ fetch: daemon.fetch, documentModel: documentModel,
             navigation: navigation }));
         var text = createTextInteraction(withBase({
             navigator: navigator, navigation: navigation, documentModel: documentModel, scrollOff: scrollOff,
@@ -94,21 +108,21 @@ import { createToast } from './overlay-toast.js';
                 });
             },
         });
-        library = createLibrary({ document: document, location: location, history: history,
-            fetch: fetch.bind(window), entryHash: entryHash, notify: toast.show });
+        library = createLibrary({ document: document, location: location, history: history, daemon: daemon,
+            fetch: daemon.fetch, entryHash: entryHash, notify: toast.show });
         var settings = createSettings({ document: document, prefs: prefs, zoom: zoom });
         var focus = createFocusRouting(base);
         var pins = createPins(withBase({ documentState: documentState, documentModel: documentModel,
             navigation: navigation, notify: toast.show }));
         var commands = null;
         var sidebar = createSidebar(withBase({
-            fetch: fetch.bind(window), prefs: prefs, focus: focus, navigation: navigation, pins: pins, documentState: documentState,
+            fetch: daemon.fetch, prefs: prefs, focus: focus, navigation: navigation, pins: pins, documentState: documentState,
             documentModel: documentModel, entryHash: entryHash, openSettings: settings.toggle,
             toggleCheatsheet: function () { commands.toggleCheatsheet(); },
         }));
         var pageCounter = createPageCounter({ document: document, prefs: prefs, navigation: navigation,
             documentModel: documentModel, isInputTarget: isInputTarget });
-        commands = createCommandSurface({ document: document, window: window, location: location,
+        commands = createCommandSurface({ document: document, window: window, location: location, daemon: daemon,
             prefs: prefs, zoom: zoom, navigation: navigation, text: text, library: library,
             pins: pins, showPins: function () { sidebar.showPins(); },
             finger: finger, settings: settings, isInputTarget: isInputTarget, notify: toast.show,
@@ -132,7 +146,7 @@ import { createToast } from './overlay-toast.js';
         createLinks(withBase({ documentModel: documentModel, navigation: navigation })).mount();
         documentModel.mountRasterLifecycle();
         readerText.mount();
-        createOcr(withBase({ fetch: fetch.bind(window), documentModel: documentModel, textFit: textFit,
+        createOcr(withBase({ fetch: daemon.fetch, documentModel: documentModel, textFit: textFit,
             entryHash: entryHash })).mount();
         scrollOff.mount();
         search.mount();
@@ -140,7 +154,7 @@ import { createToast } from './overlay-toast.js';
         sidebar.mount();
         pageCounter.mount();
         navigation.init();
-        createLiveReload({ window: window, prefs: prefs, fetch: fetch.bind(window),
+        createLiveReload({ window: window, daemon: daemon, prefs: prefs, fetch: daemon.fetch,
             documentState: documentState, entryHash: entryHash });
         focus.mount();
         commands.init();
@@ -194,15 +208,12 @@ import { createToast } from './overlay-toast.js';
         }, true);
     }
 
-    // The daemon repeats the first-raster arithmetic from this cookie and
-    // starts rendering (and preloading) that page image with the shell, before
-    // any script has run (daemon/main.py, _first_raster).
+    // The page width the next open of a document should render for.
     function rememberViewport(documentModel) {
         try {
             var root = documentModel.container();
             if (!root || !root.clientWidth) return;
-            document.cookie = 'pdfv_vp=' + root.clientWidth + 'x' + (window.devicePixelRatio || 1)
-                + '; path=/; max-age=31536000; samesite=lax';
+            daemon.viewport(root.clientWidth, window.devicePixelRatio || 1);
         } catch (e) {}
     }
 
@@ -291,8 +302,9 @@ import { createToast } from './overlay-toast.js';
     //   e / q / E : +1 / -1 / -1 page (10e = +10 pages, 10q = -10 pages)
     //   c / C     : ±1 chapter (3c = +3 chapters, 3C = -3 chapters)
     // Bare keys = ±1. Digits buffer until a motion fires, 1.5 s elapses, or
-    // any other key cancels. Requires Vimium passthrough for `e q E c C 0-9`
-    // on localhost:7435, else Vimium swallows the digits or letters. With an
+    // any other key cancels. On localhost:7435 this needs the Vimium
+    // exclusion rule for `e q E c C 0-9`; at a PDF's own address the extension
+    // hands these keys to the page before Vimium sees them. With an
     // active browser selection, e/q/E extend its focus end pagewise instead
     // of moving the viewport, and bare `c` selects the whole chapter.
     // ------------------------------------------------------------------------

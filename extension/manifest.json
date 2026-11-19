@@ -2,7 +2,7 @@
     "manifest_version": 3,
     "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmKgR19tqy6M9/ImOoWC7TP5CIbMFiMh5Sis//lUwBACoMkzFhyZnM34TJd9Lb+hNZswonqtE6ENleBajr0gio+8pP2ORmc6gNIexrTEaFy5ujbe/SO1b2fcy59SSPVwufrH84c5tiUWium3CoomZCVQJtSO13fpTNz0CXfatTlBYOXOMF1T8TuXq2eiYDG+yzfKf91QdCzgpRwyD4zs5SGm3lc1svl7/UImiIvareHUbn0dJhj8vJaWZvBjrTRuxr17ND1EJq7cf2yakbebOl6royI4iWpJ2zf367l2g/czSezlxlXFgPcq+GW3BwBG4KR4Kzg6pvoeZVkF2TQeG5QIDAQAB",
     "name": "Anders PDF Viewer",
-    "version": "0.5.0",
+    "version": "0.5.1",
     "description": "Read PDFs in the pdf_viewer reader at their own address: web PDFs by response type, local files, and cached documents.",
     "permissions": [
         "declarativeNetRequestWithHostAccess",

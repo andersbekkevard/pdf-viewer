@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 
-async function main() {
+async function main(embedded = false) {
     const src = fs.readFileSync(path.resolve(__dirname, '../../assets/overlay-document.js'), 'utf8');
     const { createDocumentModel } = await import('data:text/javascript;base64,' + Buffer.from(src).toString('base64'));
 
@@ -37,7 +37,8 @@ async function main() {
     const all = () => images.filter((i) => i.pending);
     const pending = () => all().filter((i) => !isPreview(i));
     const previews = () => all().filter(isPreview);
-    const urls = () => pending().map((i) => i.src);
+    const source = (src) => src && src.replace(/^blob:/, "");
+    const urls = () => pending().map((i) => source(i.src));
 
     function el(attrs) {
         return {
@@ -77,7 +78,16 @@ async function main() {
             observe() {}
         },
     };
-    const model = createDocumentModel({ document, window, requestAnimationFrame() {} });
+    const released = [];
+    let delayTransport = false;
+    const delayed = [];
+    const daemon = embedded ? {
+        embedded: true,
+        image: (url) => delayTransport ? new Promise(resolve => delayed.push({ url, resolve })) : Promise.resolve('blob:' + url),
+        release: (src) => { assert(src.startsWith('blob:')); released.push(src); },
+    } : undefined;
+    window.AbortController = AbortController;
+    const model = createDocumentModel({ document, window, daemon, requestAnimationFrame() {} });
     model.mountRasterLifecycle();
     assert.equal(observers.length, 3, 'visible, near and keep observers');
     const [visibleObs, nearObs, keepObs] = observers;
@@ -102,35 +112,36 @@ async function main() {
     await view(9, 11);
     assert.deepEqual(urls().slice(0, 2).sort(), ['/r/h/p/10/1200.jpg', '/r/h/p/11/1200.jpg'], 'pages on screen go first');
     assert.equal(pending().length, 3, 'at most three requests at once');
-    assert.deepEqual(previews().map((i) => i.src).sort(), ['/r/h/p/10/600.jpg', '/r/h/p/11/600.jpg'],
+    assert.deepEqual(previews().map((i) => source(i.src)).sort(), ['/r/h/p/10/600.jpg', '/r/h/p/11/600.jpg'],
         'empty pages on screen also get a half-width preview');
     assert.equal(state(9), 'loading');
     assert(isPlaceholder(frames[9].img), 'nothing is shown before it has decoded');
-    previews().find((i) => i.src === '/r/h/p/10/600.jpg').finish();
+    previews().find((i) => source(i.src) === '/r/h/p/10/600.jpg').finish();
     await flush();
-    assert.equal(frames[9].img.getAttribute('src'), '/r/h/p/10/600.jpg', 'the preview fills the empty page');
+    assert.equal(source(frames[9].img.getAttribute('src')), '/r/h/p/10/600.jpg', 'the preview fills the empty page');
     assert.equal(state(9), 'loading', 'a preview is not ready');
     pending().forEach((i) => i.finish());
     await flush();
     assert.equal(previews().length, 0, 'the sharp raster cancels a preview still on its way');
     await flush();
-    assert.equal(frames[9].img.getAttribute('src'), '/r/h/p/10/1200.jpg');
+    assert.equal(source(frames[9].img.getAttribute('src')), '/r/h/p/10/1200.jpg');
     assert.equal(state(9), 'ready');
     assert.equal(urls().length, 1, 'the fourth near page follows when a slot frees');
     pending().forEach((i) => i.finish());
     await flush();
 
-    assert.equal(frames[9].img.getAttribute('src'), '/r/h/p/10/1200.jpg');
-    // Zoom burst: the shown raster stays, no request until the zoom has settled,
-    // and only the final width is ever requested.
+    assert.equal(source(frames[9].img.getAttribute('src')), '/r/h/p/10/1200.jpg');
+    // An isolated step starts immediately. Repeats cancel that leading width
+    // and debounce the remaining burst; the old raster stays visible.
     const before = images.length;
     for (const z of ['1.1', '1.2', '1.3']) {
         zoom = z;
         listeners['pdf2html-viewport-change']();
         await advance(60);
     }
-    assert.equal(images.length, before, 'no request during the burst, and no preview over a scaled raster');
-    assert.equal(frames[9].img.getAttribute('src'), '/r/h/p/10/1200.jpg', 'old raster kept, scaled');
+    assert.equal(images.length, before + 3, 'only the leading step requests during the burst');
+    assert(images.slice(before).every((i) => !('src' in i.attrs)), 'repeats abort the leading width');
+    assert.equal(source(frames[9].img.getAttribute('src')), '/r/h/p/10/1200.jpg', 'old raster kept, scaled');
     assert.equal(state(9), 'loading');
     await advance(130);
     assert.deepEqual(urls().slice(0, 2).sort(), ['/r/h/p/10/1560.jpg', '/r/h/p/11/1560.jpg']);
@@ -146,12 +157,12 @@ async function main() {
     await flush();
     pending().forEach((i) => i.finish());
     await flush();
-    assert.equal(frames[9].img.getAttribute('src'), '/r/h/p/10/1680.jpg');
+    assert.equal(source(frames[9].img.getAttribute('src')), '/r/h/p/10/1680.jpg');
 
     // Far jump: everything near the old place is released, the target goes first.
     await view(29, 30);
     assert.equal(urls()[0], '/r/h/p/30/1680.jpg');
-    assert.deepEqual(previews().map((i) => i.src), ['/r/h/p/30/840.jpg']);
+    assert.deepEqual(previews().map((i) => source(i.src)), ['/r/h/p/30/840.jpg']);
     assert(isPlaceholder(frames[9].img), 'rasters far from the viewport are released to the placeholder');
     assert.equal(state(9), 'unloaded');
     // A late completion of a cancelled request cannot revive a released page.
@@ -160,7 +171,7 @@ async function main() {
     assert(isPlaceholder(frames[9].img));
 
     // A failed raster shows as an error and is retried when the page comes back.
-    pending().find((i) => i.src === '/r/h/p/30/1680.jpg').finish(false);
+    pending().find((i) => source(i.src) === '/r/h/p/30/1680.jpg').finish(false);
     await flush();
     assert.equal(state(29), 'error');
     assert(!urls().includes('/r/h/p/30/1680.jpg'), 'no retry loop');
@@ -168,6 +179,19 @@ async function main() {
     await view(29, 30);
     assert(urls().includes('/r/h/p/30/1680.jpg'), 're-entry retries');
 
-    console.log('PASS: on-screen first, request cap, decode before swap, zoom debounce and cancellation, release, retry');
+    if (embedded) {
+        assert(released.includes('blob:/r/h/p/10/1680.jpg'), 'released page revokes its blob');
+        assert(released.includes('blob:/r/h/p/30/1680.jpg'), 'failed decode revokes its blob');
+        delayTransport = true;
+        await view(15, 16);
+        assert(delayed.length > 0, 'transport response held until after cancellation');
+        delayTransport = false;
+        await view(35, 36);
+        for (const job of delayed) job.resolve('blob:' + job.url);
+        await flush();
+        assert(delayed.every(job => released.includes('blob:' + job.url)), 'late cancelled transport responses are revoked');
+        assert(isPlaceholder(frames[15].img), 'late blob cannot revive a released page');
+    }
+    console.log((embedded ? 'blob transport: ' : '') + 'PASS: on-screen first, request cap, decode before swap, zoom debounce and cancellation, release, retry');
 }
-main().catch((e) => { console.error(e); process.exitCode = 1; });
+main().then(() => main(true)).catch((e) => { console.error(e); process.exitCode = 1; });

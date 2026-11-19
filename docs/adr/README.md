@@ -70,3 +70,4 @@ it's probably two decisions in one file.
 | 0013 | [Patch pdf2htmlEX for text-layer fidelity](0013-patched-pdf2htmlex-text-fidelity.md) | Superseded by 0015 |
 | 0014 | [Reader: PDFium rasters under a transparent text layer](0014-reader-pdfium-rasters-transparent-text.md) | Accepted; the only engine since 0015 |
 | 0015 | [Retire pdf2htmlEX; the reader is the only engine](0015-retire-pdf2htmlex.md) | Accepted |
+| 0016 | [Read a PDF at its own address](0016-read-pdfs-in-place.md) | Accepted |

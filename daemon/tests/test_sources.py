@@ -17,12 +17,20 @@ from sources import SourceError, download, filename_for  # noqa: E402
 PDF_BYTES = b"%PDF-1.4\n%fake test document\n%%EOF\n"
 
 
-def make_handler(routes):
+def make_handler(routes, requests=None):
     """A handler serving `routes`: path -> (status, headers, body). Unknown paths get 404."""
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             status, headers, body = routes.get(self.path, (404, {}, b"not found"))
+            if requests is not None:
+                requests.append(dict(self.headers))
+            tag = headers.get("ETag")
+            modified = headers.get("Last-Modified")
+            if status == 200 and ((tag and self.headers.get("If-None-Match") == tag)
+                    or (not self.headers.get("If-None-Match") and modified
+                        and self.headers.get("If-Modified-Since") == modified)):
+                status, body = 304, b""
             self.send_response(status)
             for name, value in headers.items():
                 self.send_header(name, value)
@@ -97,7 +105,8 @@ class DownloadTest(unittest.TestCase):
         self.temp.cleanup()
 
     def start_server(self, routes):
-        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), make_handler(routes))
+        self.requests = []
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), make_handler(routes, self.requests))
         # A short poll interval keeps shutdown() from waiting out the 0.5 s default.
         self.thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
         self.thread.start()
@@ -112,6 +121,59 @@ class DownloadTest(unittest.TestCase):
         self.assertEqual(name, "Report 2026.pdf")
         self.assertEqual((self.target / name).read_bytes(), PDF_BYTES)
         self.assertEqual(sorted(path.name for path in self.target.iterdir()), ["Report 2026.pdf"])
+
+    def test_reopen_fetches_changed_bytes_and_keeps_identical_revision(self):
+        name = download(self.url("/report.pdf"), self.target)
+        path = self.target / name
+        stamp = path.stat().st_mtime_ns
+        download(self.url("/report.pdf"), self.target)
+        self.assertEqual(path.stat().st_mtime_ns, stamp)
+        self.routes["/report.pdf"] = (200, {"Content-Disposition": 'inline; filename="changed.pdf"'}, PDF_BYTES + b"new")
+        self.assertEqual(download(self.url("/report.pdf"), self.target), name)
+        self.assertEqual(path.read_bytes(), PDF_BYTES + b"new")
+        self.routes["/report.pdf"] = (200, {}, b"<html>sign in</html>")
+        with self.assertRaises(SourceError):
+            download(self.url("/report.pdf"), self.target)
+        self.assertEqual(path.read_bytes(), PDF_BYTES + b"new")
+
+    def test_conditional_etag_reuses_304_and_fetches_a_changed_revision(self):
+        path = "/report.pdf"
+        self.routes[path] = (200, {"ETag": '"v1"', "Last-Modified": "Wed, 21 Oct 2015 07:28:00 GMT"}, PDF_BYTES)
+        name = download(self.url(path), self.target)
+        pdf = self.target / name
+        stamp = pdf.stat().st_mtime_ns
+        self.assertEqual(download(self.url(path), self.target), name)
+        self.assertEqual(self.requests[-1]["If-None-Match"], '"v1"')
+        self.assertIn("If-Modified-Since", self.requests[-1])
+        self.assertEqual(pdf.stat().st_mtime_ns, stamp)
+        self.routes[path] = (200, {"ETag": '"v2"'}, PDF_BYTES + b"changed")
+        download(self.url(path), self.target)
+        self.assertEqual(pdf.read_bytes(), PDF_BYTES + b"changed")
+        download(self.url(path), self.target)
+        self.assertEqual(self.requests[-1]["If-None-Match"], '"v2"')
+
+    def test_last_modified_fallback_and_missing_source(self):
+        path = "/report.pdf"
+        self.routes[path] = (200, {"Last-Modified": "Wed, 21 Oct 2015 07:28:00 GMT"}, PDF_BYTES)
+        name = download(self.url(path), self.target)
+        stamp = (self.target / name).stat().st_mtime_ns
+        download(self.url(path), self.target)
+        self.assertNotIn("If-None-Match", self.requests[-1])
+        self.assertIn("If-Modified-Since", self.requests[-1])
+        self.assertEqual((self.target / name).stat().st_mtime_ns, stamp)
+        (self.target / name).unlink()
+        download(self.url(path), self.target)
+        self.assertNotIn("If-Modified-Since", self.requests[-1])
+        self.assertEqual((self.target / name).read_bytes(), PDF_BYTES)
+
+    def test_validators_are_scoped_to_exact_url_and_fetch_context(self):
+        self.routes["/report.pdf"] = (200, {"ETag": '"v1"'}, PDF_BYTES)
+        name = download(self.url("/report.pdf"), self.target)
+        self.assertEqual(sources.conditional_headers(self.target, self.url("/report.pdf"), "browser"), {})
+        self.routes["/report.pdf?new-signature"] = (200, {}, PDF_BYTES)
+        download(self.url("/report.pdf?new-signature"), self.target)
+        self.assertNotIn("If-None-Match", self.requests[-1])
+        self.assertEqual(sources.conditional_headers(self.target, self.url("/report.pdf?new-signature")), {})
 
     def test_html_body_raises_and_leaves_no_file_behind(self):
         with self.assertRaises(SourceError):

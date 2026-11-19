@@ -120,7 +120,8 @@ Vimium's `f` hints reach them. No overlay key leads here; use the address bar.
 | `:clear <a-z>`               | Delete a saved mark                                                              |
 | `:open <doc>` / `:o`         | Switch to another cached doc; completes against `/library` (visits-sorted)       |
 | `:rename <name>` / `:rn`     | Rename this PDF (the name `:open` and quick open show and match). Tab fills current |
-| `:path`                      | Copy this PDF's source path / URL (from `mappings.tsv`) to clipboard             |
+| `:path` / `:link`            | Copy this PDF's recorded source URL or local path to clipboard                   |
+| `:download` | Save the original PDF file, including local and signed-in PDFs |
 | `:print`                     | Open the source PDF in a new tab, in the browser's own viewer, to print it (`⌘P` is quick open) |
 | `:disable` / `:native`       | Open this PDF in the native browser PDF viewer and disable custom-viewer redirects for this entry |
 | `:cursorpin`                 | Toggle cursor pin-to-center                                                             |
@@ -186,16 +187,30 @@ That's the escape hatch.
 
 ## Vimium setup
 
-In Vimium's options, add an exclusion rule with the pattern
-`https?://localhost:7435/*` and the keys
-`? s / n N h l e q E c C 0 1 2 3 4 5 6 7 8 9`. Without this, Vimium
-swallows them before the overlay's handlers see them — in particular,
-Vimium's own count buffer eats the digits in `10e` / `10q`.
+For local PDFs, open Chrome’s extensions page and enable **Allow access to
+file URLs** in **Details** for both **Vimium** and **Anders PDF Viewer**. Chrome
+grants this permission per extension. The reader can otherwise mount at
+`file://` while Vimium’s keyboard handlers are absent. Reopen the PDF after
+changing permissions.
+
+In Vimium's options, add two exclusion rules, both with the keys
+`? s / n N h l e q E c C 0 1 2 3 4 5 6 7 8 9`:
+
+| Pattern | For |
+|---|---|
+| `*#page=*` | a PDF read at its own address, which carries a `#page=<n>` fragment (`docs/in-place.md`) |
+| `https?://localhost:7435/*` | the daemon's own pages |
+
+Without them, Vimium swallows these keys before the overlay's handlers see
+them — in particular, Vimium's own count buffer eats the digits in `10e` /
+`10q`. The first rule also matches any other page whose address contains
+`#page=`; there Vimium leaves the same keys to the page.
 
 Two details that `scripts/verify-vimium.sh` checks with the real extension:
 
-- The pattern needs the scheme and the trailing `/*`. Vimium matches the
-  whole URL, so a bare `localhost:7435` matches nothing.
+- The localhost pattern needs the scheme and the trailing `/*`. Vimium
+  matches the whole URL, so a bare `localhost:7435` matches nothing; for the
+  same reason the fragment pattern needs both `*`.
 - Do not list `<c-f>`. Vimium reads the keys as single characters, so
   `<c-f>` passes `<`, `c`, `-`, `f` and `>` through, and plain `f` stops
   opening link hints. Vimium does not bind Ctrl-f, so the overlay's finger
@@ -226,3 +241,10 @@ Below the second level starts collapsed, the current entry's ancestors open
 automatically, and disclosure choices are remembered per document in state.db.
 The counter shows the top-level chapter; hover reveals the deeper section.
 Clicking the counter opens Pages.
+
+## Downloading the PDF
+
+`:download` saves the original PDF bytes backing the current reader, with a
+`.pdf` filename. It works for local files, public URLs and signed-in PDFs
+already fetched by the viewer. It does not save the HTML/text surface that
+Chrome sees at the PDF's address. It adds no direct keybinding.

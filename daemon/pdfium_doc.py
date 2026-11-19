@@ -24,6 +24,11 @@ import os
 import statistics
 import unicodedata
 
+import cython
+if cython.compiled:
+    from cython.cimports.libc.stdint import uintptr_t
+    from cython.cimports.pdfium_text_bindings import ScanAPI, ScanRect, build_source_sha, scan_api
+
 import pypdfium2 as pdfium
 import pypdfium2.raw as raw
 
@@ -110,15 +115,16 @@ def _page_affine(key: tuple[str, int, int], index: int, page: pdfium.PdfPage | N
     return affine
 
 
-def page_sizes(path: str) -> list[tuple[float, float]]:
+def page_sizes(path: str, start: int = 0, stop: int | None = None) -> list[tuple[float, float]]:
     pdf = open_document(path)
-    return [pdf.get_page_size(i) for i in range(len(pdf))]
+    return [pdf.get_page_size(i) for i in range(start, len(pdf) if stop is None else stop)]
 
 
 def metadata(path: str) -> dict:
     """Document information in meta.json's keys (see scripts/extract-meta.py):
-    title, author, subject, keywords, producer, creator and pages. Empty
-    fields are left out."""
+    title, author, subject, keywords, producer, creator and pages, and the
+    title printed on the first page (`heading`, None when there is none).
+    Empty fields are left out."""
     pdf = open_document(path)
     out: dict = {}
     try:
@@ -131,7 +137,222 @@ def metadata(path: str) -> dict:
         if value:
             out[key] = value
     out["pages"] = len(pdf)
+    out["heading"] = heading(path)
     return out
+
+
+# ----------------------------------------------------------------------------
+# What a document is called and what it looks like (tab title and icon)
+# ----------------------------------------------------------------------------
+
+# A first-page heading that is a section, a caption or a running head, not the
+# work's title.
+_NOT_A_TITLE = re.compile(r"^(\d+(\.\d+)*\.?\s|\([a-z]\)\s|(abstract|contents|introduction|preface)$)", re.I)
+_SMALL_WORDS = {"a", "an", "and", "as", "at", "but", "by", "for", "from", "in", "into", "of", "on",
+                "or", "the", "to", "via", "vs", "with"}
+
+
+def _sized_lines(page: pdfium.PdfPage) -> list[tuple[float, float, str]]:
+    """Upright text lines of a page as (font size, top in page px, text).
+    The size is the font size times the text matrix's scale, so a title set
+    with a scaled matrix counts at the size it is drawn."""
+    height = page.get_height()
+    textpage = page.get_textpage()
+    try:
+        handle = textpage.raw
+        matrix = raw.FS_MATRIX()
+        left, right, bottom, top = (ctypes.c_double() for _ in range(4))
+        out: list[tuple[float, float, str]] = []
+        chars: list[str] = []
+        sizes: list[float] = []
+        tops: list[float] = []
+
+        def flush() -> None:
+            text = re.sub(r"\s+", " ", "".join(chars)).strip()
+            if text and sizes:
+                out.append((statistics.median(sizes), min(tops) if tops else 0.0, text))
+            chars.clear(), sizes.clear(), tops.clear()
+
+        for i in range(raw.FPDFText_CountChars(handle)):
+            code = raw.FPDFText_GetUnicode(handle, i)
+            if code in (0x0A, 0x0D):
+                flush()
+                continue
+            if code in (0xFFFE, 0x02):
+                code = 0x2D
+            if code < 0x20 or code == 0xFFFF or 0xD800 <= code <= 0xDFFF:
+                continue
+            ch = chr(code)
+            chars.append(ch)
+            if ch.isspace():
+                continue
+            scale = 1.0
+            if raw.FPDFText_GetMatrix(handle, i, matrix):
+                if abs(matrix.b) > 1e-3 or abs(matrix.c) > 1e-3:
+                    continue  # rotated: arXiv's margin stamp, axis labels
+                scale = math.sqrt(abs(matrix.a * matrix.d))
+            sizes.append(round(raw.FPDFText_GetFontSize(handle, i) * scale, 1))
+            if raw.FPDFText_GetCharBox(handle, i, left, right, bottom, top):
+                tops.append(height - top.value)
+        flush()
+        return out
+    finally:
+        textpage.close()
+
+
+def _title_case(text: str) -> str:
+    """An all-capitals title in title case ("Fork-and-Flush", "X-Ray")."""
+    parts = re.split(r"([\s\-\u2010-\u2014/]+)", text.lower())
+    return "".join(part if not part or (i and part in _SMALL_WORDS) or not part[0].isalnum()
+                   else part[:1].upper() + part[1:] for i, part in enumerate(parts))
+
+
+def heading(path: str) -> str | None:
+    """The title printed on the first page: the largest text in its top 60 %,
+    clearly larger than the body, possibly over several lines. None when the
+    page has no such heading (a homework sheet set in one size)."""
+    pdf = open_document(path)
+    if len(pdf) == 0:
+        return None
+    page = pdf[0]
+    try:
+        limit = page.get_height() * 0.6
+        lines = [line for line in _sized_lines(page) if re.search(r"[^\W\d_]{2}", line[2])]
+    finally:
+        page.close()
+    if not lines:
+        return None
+    body = statistics.median(size for size, _, _ in lines)
+    top = [line for line in lines if line[1] <= limit]
+    if not top:
+        return None
+    biggest = max(size for size, _, _ in top)
+    if biggest < body * 1.15:
+        return None
+    block = sorted((line for line in top if line[0] >= biggest * 0.95), key=lambda line: line[1])
+    parts = [block[0]]
+    for line in block[1:]:
+        if line[1] - parts[-1][1] > biggest * 2.2:
+            break
+        parts.append(line)
+    text = ""
+    for _, _, part in parts:
+        text = text[:-1] + part if text.endswith("-") else (text + " " + part if text else part)
+    text = text.strip(" :")
+    if not 3 <= len(text) <= 240 or _NOT_A_TITLE.match(text):
+        return None
+    letters = [ch for ch in text if ch.isalpha()]
+    if len(letters) > 8 and sum(ch.isupper() for ch in letters) > 0.7 * len(letters):
+        text = _title_case(text)
+    return text
+
+
+# Figure candidates: what a figure is drawn with. Form XObjects are how
+# \includegraphics places a PDF figure.
+_FIGURE_OBJECTS = (raw.FPDF_PAGEOBJ_IMAGE, raw.FPDF_PAGEOBJ_PATH, raw.FPDF_PAGEOBJ_SHADING, raw.FPDF_PAGEOBJ_FORM)
+FIGURE_PAGES = 4
+
+
+def _figure_box(page: pdfium.PdfPage) -> tuple[float, float, float, float] | None:
+    """The largest figure on a page, in page px, or None.
+
+    Top-level graphics objects are merged when they touch (within 6 px);
+    rules and single boxes are not figures, and neither is a region dense
+    with text (a shaded text box, a slide's title bar)."""
+    width, height = page.get_size()
+    affine = _device_affine(page, width, height)
+    boxes = []
+    for obj in page.get_objects(max_depth=0):
+        if obj.type not in _FIGURE_OBJECTS:
+            continue
+        try:
+            x, y, w, h = _box(affine, *obj.get_bounds())
+        except Exception:
+            continue
+        x0, y0, x1, y1 = max(0.0, x), max(0.0, y), min(width, x + w), min(height, y + h)
+        if x1 - x0 < 3 or y1 - y0 < 3:
+            continue  # rules, hairlines
+        if (x1 - x0) * (y1 - y0) > 0.5 * width * height:
+            continue  # backgrounds, a page wrapped in one form
+        boxes.append([x0, y0, x1, y1, 1, obj.type in (raw.FPDF_PAGEOBJ_IMAGE, raw.FPDF_PAGEOBJ_FORM)])
+    pad = 6.0
+    merged = True
+    while merged:
+        merged = False
+        out: list[list] = []
+        for b in boxes:
+            for o in out:
+                if b[0] <= o[2] + pad and o[0] <= b[2] + pad and b[1] <= o[3] + pad and o[1] <= b[3] + pad:
+                    o[0], o[1], o[2], o[3] = min(o[0], b[0]), min(o[1], b[1]), max(o[2], b[2]), max(o[3], b[3])
+                    o[4] += b[4]
+                    o[5] = o[5] or b[5]
+                    merged = True
+                    break
+            else:
+                out.append(b)
+        boxes = out
+    candidates = [b for b in boxes
+                  if b[2] - b[0] > 0.2 * width and b[3] - b[1] > 0.08 * height
+                  and (b[2] - b[0]) * (b[3] - b[1]) > 0.04 * width * height and (b[5] or b[4] >= 4)]
+    if not candidates:
+        return None
+    textpage = page.get_textpage()
+    try:
+        chars = []
+        rect = raw.FS_RECTF()
+        for i in range(raw.FPDFText_CountChars(textpage.raw)):
+            if raw.FPDFText_GetLooseCharBox(textpage.raw, i, rect):
+                x, y, _, _ = _box(affine, rect.left, rect.bottom, rect.right, rect.top)
+                chars.append((x, y))
+    finally:
+        textpage.close()
+    best = None
+    for b in candidates:
+        area = (b[2] - b[0]) * (b[3] - b[1])
+        inside = sum(1 for x, y in chars if b[0] <= x <= b[2] and b[1] <= y <= b[3])
+        # Body text is about one character per 60 px²; a plot's labels are
+        # sparser than one per 120 px².
+        if inside * 120 > area:
+            continue
+        if best is None or area > (best[2] - best[0]) * (best[3] - best[1]):
+            best = b
+    return tuple(best[:4]) if best else None
+
+
+def figure_icon(path: str, size: int = 64) -> bytes | None:
+    """A square PNG cut from the document's first figure (within the first
+    FIGURE_PAGES pages), for the tab icon; None when there is no figure.
+    The square is the centre of the figure at its shorter side, so a wide
+    plot shows its middle panel rather than shrinking to a strip."""
+    pdf = open_document(path)
+    for index in range(min(FIGURE_PAGES, len(pdf))):
+        page = pdf[index]
+        try:
+            box = _figure_box(page)
+            if box is None:
+                continue
+            x0, y0, x1, y1 = box
+            side = min(x1 - x0, y1 - y0)
+            cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+            scale = size * 2 / side
+            bitmap = page.render(scale=scale, may_draw_forms=False)
+            try:
+                image = bitmap.to_pil().convert("RGB")
+            finally:
+                bitmap.close()
+            crop = image.crop((round((cx - side / 2) * scale), round((cy - side / 2) * scale),
+                               round((cx + side / 2) * scale), round((cy + side / 2) * scale)))
+            crop = crop.resize((size, size), resample=3)  # bicubic
+            # Figures are mostly white; at 16 px their colour is what tells
+            # one tab from the next.
+            from PIL import ImageEnhance
+            crop = ImageEnhance.Color(crop).enhance(1.5)
+            buffer = io.BytesIO()
+            crop.save(buffer, format="PNG", optimize=True)
+            return buffer.getvalue()
+        finally:
+            page.close()
+    return None
 
 
 def outline(path: str) -> list[dict]:
@@ -195,6 +416,8 @@ def _device_affine(page: pdfium.PdfPage, width: float, height: float):
 
 
 def _is_rtl(text: str) -> bool:
+    if text.isascii():
+        return False
     strong = [unicodedata.bidirectional(ch) for ch in text]
     rtl = sum(1 for c in strong if c in ("R", "AL"))
     ltr = sum(1 for c in strong if c == "L")
@@ -240,12 +463,37 @@ def _from_local(direction: int, x: float, y: float) -> tuple[float, float]:
     return y, -x
 
 
+def _straight_ascii_line(boxed: list[tuple], text: str) -> dict | None:
+    """The common case where the general line builder makes no split.
+
+    Equal vertical edges imply equal medians and centres. Monotonic x edges
+    imply a +x direction and no backward jump. Reject any wide gap, then the
+    general builder would make one segment whose width ends at the last box.
+    """
+    _, x, top, right, bottom, _ = boxed[0]
+    h = bottom - top
+    if h <= 0.5:
+        h = 0.5
+    max_gap = SEGMENT_GAP_EM * h
+    last_left, last_right = x, right
+    for _, left, y0, right, y1, _ in boxed:
+        if y0 != top or y1 != bottom or left < last_left or right < last_right or left - last_right > max_gap:
+            return None
+        last_left, last_right = left, right
+    return {"x": x, "y": top, "h": h, "dir": 0, "i": boxed[len(boxed) // 2][5],
+            "segs": [{"t": " ".join(text.split()), "w": last_right - x, "gap": 0.0, "sp": False}]}
+
+
 def _build_line(chars: list[tuple]) -> list[dict]:
     """One PDFium line → one or more positioned lines of segments."""
     boxed = [c for c in chars if c[1] is not None]
     if not boxed:
         return []
     text_all = "".join(c[0] for c in chars)
+    if text_all.isascii():
+        straight = _straight_ascii_line(boxed, text_all)
+        if straight is not None:
+            return [straight]
     rtl = _is_rtl(text_all)
     direction = 0 if rtl else _direction(boxed)
 
@@ -401,6 +649,11 @@ def page_text(path: str, index: int) -> list[dict]:
         page.close()
 
 
+@cython.locals(i=cython.int, count=cython.int, code=cython.uint, low=cython.uint,
+               a=cython.double, b=cython.double, c=cython.double,
+               d=cython.double, e=cython.double, f=cython.double,
+               left=cython.double, top=cython.double, right=cython.double, bottom=cython.double,
+               x0=cython.double, x1=cython.double, y0=cython.double, y1=cython.double)
 def _page_lines(page: pdfium.PdfPage, affine: tuple) -> list[dict]:
     a, b, c, d, e, f = affine
     textpage = page.get_textpage()
@@ -409,11 +662,20 @@ def _page_lines(page: pdfium.PdfPage, affine: tuple) -> list[dict]:
         get_unicode = raw.FPDFText_GetUnicode
         get_box = raw.FPDFText_GetLooseCharBox
         count = raw.FPDFText_CountChars(handle)
-        rect = raw.FS_RECTF()
+        if cython.compiled:
+            # Bind the existing wheel's function pointers once per page.
+            # PDFium and the grouping logic are the same as on the Python path.
+            native_rect = cython.declare(ScanRect)
+            api = cython.declare(ScanAPI, scan_api(ctypes.cast(get_unicode, ctypes.c_void_p).value,
+                                                  ctypes.cast(get_box, ctypes.c_void_p).value))
+            address = cython.declare(uintptr_t, ctypes.cast(handle, ctypes.c_void_p).value)
+            native_handle = cython.declare(cython.p_void, cython.cast(cython.p_void, address))
+        else:
+            rect = raw.FS_RECTF()
         lines: list[dict] = []
         chars: list[tuple] = []
         for i in range(count):
-            code = get_unicode(handle, i)
+            code = api.unicode_at(native_handle, i) if cython.compiled else get_unicode(handle, i)
             if code == 0x0A or code == 0x0D:
                 if chars:
                     lines.extend(_build_line(chars))
@@ -425,7 +687,7 @@ def _page_lines(page: pdfium.PdfPage, affine: tuple) -> list[dict]:
                 # PDFium hands out UTF-16 units: a character outside the
                 # BMP (mathematical italics, script letters) is a
                 # surrogate pair whose box is on the first unit.
-                low = get_unicode(handle, i + 1)
+                low = api.unicode_at(native_handle, i + 1) if cython.compiled else get_unicode(handle, i + 1)
                 if 0xDC00 <= low <= 0xDFFF:
                     code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)
             if code < 0x20 or code == 0xFFFF or 0xD800 <= code <= 0xDFFF:
@@ -436,10 +698,15 @@ def _page_lines(page: pdfium.PdfPage, affine: tuple) -> list[dict]:
             if ch.isspace():
                 chars.append((" ", None))
                 continue
-            if not get_box(handle, i, rect):
-                left = right = top = bottom = 0.0
-            else:
+            if cython.compiled:
+                if api.loose_box(native_handle, i, cython.address(native_rect)):
+                    left, bottom, right, top = native_rect.left, native_rect.bottom, native_rect.right, native_rect.top
+                else:
+                    left = right = top = bottom = 0.0
+            elif get_box(handle, i, rect):
                 left, bottom, right, top = rect.left, rect.bottom, rect.right, rect.top
+            else:
+                left = right = top = bottom = 0.0
             if right <= left or top <= bottom:
                 # No usable box: keep the character in the text flow.
                 if chars and chars[-1][1] is not None:
@@ -774,13 +1041,14 @@ def render_raster(path: str, index: int, width_px: int, fmt: str = "png") -> byt
             pdf.init_forms()
         except Exception:
             pass
-        bitmap = page.render(scale=scale, may_draw_forms=True)
+        # RGBX can be handed directly to Pillow's JPEG encoder. The default
+        # BGR bitmap needs a complete color-order and packing copy first.
+        rgbx = fmt == "jpg"
+        bitmap = page.render(scale=scale, may_draw_forms=True, prefer_bgrx=rgbx, rev_byteorder=rgbx)
         try:
             image = bitmap.to_pil()
             buffer = io.BytesIO()
             if fmt == "jpg":
-                if image.mode != "RGB":   # PDFium's BGR comes out as RGB; no copy then
-                    image = image.convert("RGB")
                 image.save(buffer, format="JPEG", quality=JPEG_QUALITY, subsampling=0)
             else:
                 image.save(buffer, format="PNG", compress_level=1)
@@ -793,3 +1061,26 @@ def render_raster(path: str, index: int, width_px: int, fmt: str = "png") -> byt
 
 def render_png(path: str, index: int, width_px: int) -> bytes:
     return render_raster(path, index, width_px, "png")
+
+
+# Only the hot text loop uses the optional compiled form of this module.
+# Reject a binary left over from an earlier checkout or editable install.
+NATIVE_TEXT = False
+if cython.compiled:
+    SOURCE_SHA = build_source_sha.decode("ascii")
+elif os.environ.get("PDF_VIEWER_PYTHON_TEXT") != "1":
+    import hashlib
+    from pathlib import Path
+
+    try:
+        from _pdfv_pdfium_native import SOURCE_SHA, _page_lines as _native_page_lines
+
+        definition = Path(__file__)
+        bindings = definition.with_name("pdfium_text_bindings.pxd")
+        stamp = hashlib.sha256(definition.read_bytes() + bindings.read_bytes()).hexdigest()
+    except (ImportError, OSError):
+        pass
+    else:
+        if SOURCE_SHA == stamp:
+            _page_lines = _native_page_lines
+            NATIVE_TEXT = True

@@ -11,8 +11,8 @@ This README is the orientation doc. For deeper references:
 [`docs/cache.md`](docs/cache.md) (cache design),
 [`docs/keybindings.md`](docs/keybindings.md) (full key + palette
 registry), [`docs/adr/`](docs/adr/) (architectural decisions),
-[`docs/ai-production.md`](docs/ai-production.md) (agent workflow +
-Beads), [`docs/verification.md`](docs/verification.md) (verification
+[`docs/ai-production.md`](docs/ai-production.md) (agent
+workflow), [`docs/verification.md`](docs/verification.md) (verification
 loops), [`CLAUDE.md`](CLAUDE.md) (constraints for agents).
 
 ## Quick start
@@ -60,10 +60,12 @@ palette, quick open, outline tracker, marks, pins, position restore, …).
 2. **Local daemon, documents never leave the machine.** A FastAPI daemon on
    `127.0.0.1:7435` serves everything. All PDFium calls run in worker
    processes, so a PDF that crashes PDFium cannot take the daemon down.
-3. **The extension makes it frictionless.** The MV3 extension redirects PDF
-   navigations (`*.pdf` URLs, `application/pdf` responses, `file://` PDFs)
-   to the daemon. A PDF behind a sign-in is fetched by the extension inside
-   the browser session and handed to the daemon.
+3. **The extension makes it frictionless.** The MV3 extension builds the
+   reader in the tab at the PDF's own address (`application/pdf` responses,
+   `file://` PDFs), so the address bar keeps the real URL
+   ([`docs/in-place.md`](docs/in-place.md), ADR 0016). A PDF behind a
+   sign-in is fetched by the extension inside the browser session and handed
+   to the daemon.
 4. **Overlay is the product.** `assets/overlay*.js` and `assets/overlay.css`
    are what the user actually experiences. Served live from the repo —
    edits reload on ⌘⇧R.
@@ -76,7 +78,8 @@ palette, quick open, outline tracker, marks, pins, position restore, …).
 
 What works end-to-end today:
 
-- **Opening** — any PDF the extension redirects opens in the reader:
+- **Opening** — any PDF the browser opens is read in the reader, at its own
+  address:
   public URLs (signed Blackboard/S3/CloudFront URLs included; the query
   string is stripped from the cache key so signed links hit the same entry
   across sessions), sign-in-gated URLs (Cloudflare Access, campus SSO;
@@ -97,13 +100,13 @@ What works end-to-end today:
   into `~/Library/LaunchAgents/` by `scripts/setup.sh` (see
   [Externalities](#externalities) §2). `KeepAlive=true`, respawns within a
   second if killed; brought up on login.
-- **Chrome MV3 extension** (`extension/`) — static
-  `declarativeNetRequest` rules redirect PDF main-frame navigations to the
-  daemon. Loop-prevention via a `_pdfvw=passthrough` marker that the daemon
-  appends when it sends a tab back to the original URL. The toolbar action
-  toggles the current PDF between the custom viewer and the native browser
-  PDF viewer; disabled entries install higher-priority allow rules instead
-  of redirect rules.
+- **Chrome MV3 extension** (`extension/`) — `declarativeNetRequest` rules
+  rewrite a PDF response's headers so Chrome builds a plain page instead of
+  its viewer; `page.js` puts the reader there and `bridge.html` carries its
+  requests to the daemon ([`docs/in-place.md`](docs/in-place.md)). An address
+  with the `_pdfvw=passthrough` marker is left to the browser's viewer. The
+  toolbar action toggles the current PDF between the reader and the native
+  viewer; disabled entries install higher-priority allow rules.
 - **Visit and open tracking** (`daemon/visits.py`, `daemon/opens.py`) —
   powers `/stats`, `/stats/recent`, and the frecency order of the home
   page, quick open (`⌘P`, `⌘K`) and `:open`
@@ -166,7 +169,7 @@ pdf_viewer/
 ├── launchd/                     # LaunchAgent plist
 ├── docs/
 │   ├── adr/                     # immutable architectural decisions
-│   ├── ai-production.md         # agent workflow + Beads task protocol
+│   ├── ai-production.md         # agent workflow
 │   ├── cache.md                 # cache design: layout, hash keys, URL norm
 │   ├── keybindings.md           # full key + palette registry
 │   ├── non-goals.md             # explicit scope boundaries
@@ -219,12 +222,12 @@ shells) is rebuilt on the next open; what is not rebuilt is the stored
 copy of a downloaded PDF, the library's names, and the reading state in
 `state.db`.
 
-### 5. Vimium exclusion rule
+### 5. Vimium on local files and the web
 
-In Vimium's options, add an exclusion rule with the pattern `https?://localhost:7435/*` and the
-keys `? s / n N h l e q E c C 0 1 2 3 4 5 6 7 8 9`, otherwise Vimium swallows them before the
-overlay's handlers see them. Do not add `<c-f>`: it disables `f` link hints
-([`docs/keybindings.md`](docs/keybindings.md), "Vimium setup").
+In Chrome’s extensions page, enable **Allow access to file URLs** separately
+for **Vimium** and **Anders PDF Viewer**. Local PDFs stay at their `file://`
+address. Follow [Vimium setup](docs/keybindings.md#vimium-setup) to configure
+the overlay’s pass-through keys.
 
 ### Network
 
@@ -248,12 +251,12 @@ Port `7435`, bound to `127.0.0.1`.
 | `⌘P`     | Quick open: documents (`⌘P` `Enter` = previous document) |
 | `⌘K`     | Quick open: sections, documents and commands |
 | `⌘,`     | Settings                                     |
-| `?`      | Cheatsheet (needs Vimium `?` disabled on `localhost:7435`) |
+| `?`      | Cheatsheet (needs the Vimium exclusion rules) |
 | `Esc`    | Close the topmost overlay, then the sidebar, then clear selection |
 
 Palette: `:42`, `:p 42`, `:chapter <name>`, `:next` / `:prev`,
 `:mark <a-z>`, `:jump <a-z>`, `:clear <a-z>`, `:open <doc>` / `:o`,
-`:rename <name>`, `:path`, `:print`, `:disable`, `:delete confirm`,
+`:rename <name>`, `:path` / `:link`, `:print`, `:disable`, `:delete confirm`,
 `:pin`, `:scrolloff 25` / `:so 25`, `:case`, `:zoom N | auto`,
 `:yank <ref|page|chapter|document>` / `:y`, `:finger` / `:f`,
 `:counter` / `:num`, `:set`, `:help` / `:h`.
@@ -298,9 +301,9 @@ cached shells are rebuilt, and restart the daemon
 - [`docs/cache.md`](docs/cache.md) — cache layout, hash keys, URL
   normalization, failure modes
 - [`docs/ai-production.md`](docs/ai-production.md) — documentation
-  ownership and Beads workflow for agent-driven work
+  ownership and the workflow for agent-driven work
 - [`docs/verification.md`](docs/verification.md) — browser, daemon, and
-  manual verification loops for closing beads
+  manual verification loops
 - [`docs/pins.md`](docs/pins.md) — pins
 - [`docs/keybindings.md`](docs/keybindings.md) — full key + palette
   registry including Vimium conflicts

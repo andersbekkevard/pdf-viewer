@@ -28,6 +28,9 @@ def corpus_dir(arg):
 
 
 def playwright_node_path() -> str | None:
+    for item in os.environ.get("NODE_PATH", "").split(os.pathsep):
+        if item and (pathlib.Path(item) / "playwright").is_dir():
+            return item
     default = pathlib.Path.home() / ".npm/_npx/705bc6b22212b352/node_modules"
     if (default / "playwright").is_dir():
         return str(default)

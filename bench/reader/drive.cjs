@@ -31,7 +31,7 @@ async function main() {
     const spec = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
     const out = { pages: [], consoleErrors: [], pageErrors: [], failedRequests: [], abortedRequests: 0 };
     const origin = new URL(spec.readUrl).origin;
-    const browser = await chromium.launch();
+    const browser = await chromium.launch({ executablePath: process.env.PDFV_CHROMIUM });
     try {
         const context = await browser.newContext({
             viewport: spec.viewport, deviceScaleFactor: spec.dpr, serviceWorkers: 'block',

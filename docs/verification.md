@@ -1,7 +1,7 @@
 # Verification
 
 Use the existing automated checks and a narrow real-surface verification loop before
-closing a bead. Tests live in `daemon/tests/` and `scripts/tests/`; they use temporary data.
+calling work done. Tests live in `daemon/tests/` and `scripts/tests/`; they use temporary data.
 
 ```bash
 uv run --directory daemon python -m unittest discover -s tests
@@ -22,12 +22,10 @@ the task calls for it.
 Before implementation:
 
 ```bash
-br show <id>
-br sync --status
 curl -fsS http://localhost:7435/healthz
 ```
 
-If the daemon is down and the bead needs it:
+If the daemon is down and the work needs it:
 
 ```bash
 uv run --directory daemon main.py
@@ -40,21 +38,15 @@ launchctl kickstart -k gui/$UID/com.anders.pdf_viewer
 tail -f ~/.cache/pdf_viewer/daemon.log   # daemon; conversions log to ~/.cache/pdf_viewer/log
 ```
 
-Before closing a bead:
+Before calling work done, run `git diff --check` and report what was checked and the
+result.
 
-```bash
-git diff --check
-br comments add <id> "Verification: <what was checked and result>"
-br close <id> --reason "Completed"
-br sync --flush-only
-```
+If verification is blocked, leave the item in `TODO.md` and say what the
+blocker is, what was attempted, and the exact missing artifact or user action.
 
-If verification is blocked, do not close the bead. Add a comment explaining the
-blocker, what was attempted, and the exact missing artifact or user action.
+## Overlay smoke test (standard check for overlay changes)
 
-## Overlay smoke test (standard pre-close check for overlay beads)
-
-`scripts/smoke-viewer.sh` is the fast, self-contained pre-close check
+`scripts/smoke-viewer.sh` is the fast, self-contained check
 for overlay changes. It generates one synthetic page with reportlab
 through `uv`, boots a scratch reader daemon on a free loopback port with its own
 temporary cache and state database, and uses cached Playwright/Chromium headlessly.
@@ -140,9 +132,9 @@ Use the smallest proof that exercises the changed behavior:
 - **Native browser find**: use a large PDF, open native Cmd-F, search
   for text outside the initially visible pages, press Enter through matches, and
   confirm the active highlight is visible on the expected page. Check normal
-  reload and hard reload if the bead mentions stale assets.
+  reload and hard reload if stale assets are suspected.
 - **Selection behavior**: use a real PDF page, perform the exact drag
-  or visual-mode action from the bead, and verify both visible selection and
+  or visual-mode action in question, and verify both visible selection and
   copied clipboard/plain-text output when relevant.
 - **Daemon/cache behavior**: verify with `curl`, `rg ~/.cache/pdf_viewer`, and
   the daemon logs. A browser check is still needed if the route changes user
@@ -166,9 +158,8 @@ Use the smallest proof that exercises the changed behavior:
   port. A change may not lower find
   recall, copy similarity or highlight IoU, or add a failure class.
 - **Memory/performance work**: define the measurement first, run it before and
-  after on the same document, and record the numbers in the bead comment.
-- **Docs-only work**: verify links, command accuracy, `git diff --check`, and
-  `br sync --status`.
+  after on the same document, and report the numbers.
+- **Docs-only work**: verify links, command accuracy, and `git diff --check`.
 
 ### Scorecard isolation caveat
 
@@ -196,11 +187,11 @@ finding. Keep the original failures visible rather than relaxing the scorecard. 
 
 ## Close-out standard
 
-A bead is done only when all three are true:
+Work is done only when all three are true:
 
 1. The behavior is implemented or the research question is answered.
 2. The owning docs are updated or explicitly not affected.
-3. The bead has a verification comment with the command/browser flow and result.
+3. The command or browser flow and its result are reported, and the item is gone from `TODO.md`.
 
 ## Raster lifecycle regression
 

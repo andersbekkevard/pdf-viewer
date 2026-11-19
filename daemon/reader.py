@@ -30,13 +30,16 @@ import json
 import multiprocessing
 import os
 import pathlib
+import re
 import threading
+import unicodedata
+import zlib
 
 import ocr
 import pdfium_doc
 
 # Bump when the shell markup changes, so cached shells are rebuilt.
-SHELL_VERSION = 7
+SHELL_VERSION = 9
 REPRESENTATION = "raster-v1"
 MIN_RASTER_WIDTH = 64
 MAX_RASTER_WIDTH = 6000
@@ -70,6 +73,51 @@ font-family:sans-serif;font-kerning:none;font-variant-ligatures:none;cursor:text
 #page-container.pdf2html-link-pass .pc>a.l{pointer-events:none}
 @media print{#sidebar{display:none}#page-container{position:static;overflow:visible}.pf{margin:0;box-shadow:none;page-break-after:always}}
 """
+
+# Path segments after `/r/<hash>/` that are routes, never a document's slug.
+_RESERVED_SLUGS = {"ocr", "icon", "text", "p"}
+SLUG_MAX_LEN = 72
+# Tab icon: a figure cut from the document (pdfium_doc.figure_icon), else a
+# monogram. Bump when either changes, so cached icons are rebuilt.
+ICON_VERSION = 1
+ICON_SIZE = 64
+
+
+def slug(title: str) -> str:
+    """The readable part of a reader address: the title in lower-case ASCII
+    words joined by hyphens, cut at a word boundary. Empty when the title has
+    no letters or digits."""
+    spaced = re.sub(r"[^\w]+", " ", unicodedata.normalize("NFKD", title or ""))
+    ascii_ = spaced.encode("ascii", "ignore").decode("ascii")
+    words = re.findall(r"[a-z0-9]+", ascii_.lower())
+    out = ""
+    for word in words:
+        candidate = f"{out}-{word}" if out else word
+        if len(candidate) > SLUG_MAX_LEN:
+            break
+        out = candidate
+    if not out and words:
+        out = words[0][:SLUG_MAX_LEN]
+    return out + "-pdf" if out in _RESERVED_SLUGS else out
+
+
+def reader_path(hash_: str, title: str) -> str:
+    """Where a tab shows the reader: `/r/<hash>/<slug>`, or `/r/<hash>/`
+    for a title without a slug. Both serve the same shell."""
+    return f"/r/{hash_}/{slug(title)}"
+
+
+def monogram_svg(title: str, key: str) -> str:
+    """The tab icon of a document without a figure: the title's first letter
+    or digit on a colour chosen by the entry hash, so neighbouring tabs
+    differ even when their titles begin alike."""
+    letter = next((ch for ch in unicodedata.normalize("NFKD", title or "") if ch.isalnum()), "?").upper()
+    hue = zlib.crc32(key.encode("utf-8")) % 360
+    return ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+            f'<rect width="32" height="32" rx="6" fill="hsl({hue},55%,42%)"/>'
+            '<text x="16" y="23" text-anchor="middle" font-family="-apple-system,Helvetica,Arial,sans-serif" '
+            f'font-size="20" font-weight="700" fill="#fff">{html.escape(letter)}</text></svg>')
+
 
 _ROTATIONS = {1: "rotate(90deg)", 2: "rotate(180deg)", 3: "rotate(-90deg)"}
 
@@ -164,10 +212,10 @@ class PageBody(str):
 
 
 def range_bodies(path: str, start: int, stop: int) -> list[str]:
-    sizes = pdfium_doc.page_sizes(path)
+    sizes = pdfium_doc.page_sizes(path, start, stop)
     out = []
-    for index, (lines, links) in enumerate(pdfium_doc.pages_layer(path, start, stop), start):
-        w, h = sizes[index]
+    layers = pdfium_doc.pages_layer(path, start, stop)
+    for index, ((w, h), (lines, links)) in enumerate(zip(sizes, layers, strict=True), start):
         scanned = (ocr.may_need_ocr(lines, w, h) and
                    ocr.needs_ocr(lines, w, h, pdfium_doc.page_image_coverage(path, index)))
         out.append(PageBody(page_body(lines, links), scanned))
@@ -182,6 +230,13 @@ def build_shell(hash_: str, title: str, sizes: list[tuple[float, float]],
                         links[i] if links and i < len(links) else [])
               for i in range(len(sizes))]
     return shell_html(hash_, title, sizes, outline, bodies)
+
+
+def _canonical_script(path: str) -> str:
+    return ("(function(){try{var p=" + json.dumps(path) + ",q=location.search"
+            ".replace(/([?&])_open=[^&]*(&|$)/,'$1').replace(/[?&]$/,'');"
+            "if(location.pathname!==p||q!==location.search)"
+            "history.replaceState(history.state,'',p+q+location.hash)}catch(e){}})()")
 
 
 def shell_html(hash_: str, title: str, sizes: list[tuple[float, float]],
@@ -200,8 +255,11 @@ def shell_html(hash_: str, title: str, sizes: list[tuple[float, float]],
         '<head><meta charset="utf-8">'
         f"<title>{html.escape(title)}</title>"
         f'<meta id="pdf2html-hash" name="pdf2html-hash" content="{html.escape(hash_, quote=True)}">'
+        # The address bar shows the title (`/r/<hash>/<slug>`); the open
+        # attempt's `_open` id has done its work once the shell is served.
+        f"<script>{_canonical_script(reader_path(hash_, title))}</script>"
         f"<style>{BASE_CSS}</style>"
-        '<link id="pdf2html-favicon" rel="icon" type="image/svg+xml" href="/_assets/favicon.svg">'
+        f'<link id="pdf2html-favicon" rel="icon" href="/r/{html.escape(hash_, quote=True)}/icon?v={ICON_VERSION}">'
         '<link id="pdf2html-overlay-css" rel="stylesheet" href="/_assets/overlay.css">'
         '<script id="pdf2html-overlay-js" type="module" src="/_assets/overlay.js"></script>'
         "</head><body>"
@@ -364,9 +422,20 @@ class Reader:
     def entry_dir(self, hash_: str) -> pathlib.Path:
         return self.root / hash_ / "reader"
 
-    def sizes(self, pdf: pathlib.Path) -> list[tuple[float, float]]:
+    @staticmethod
+    def _sizes_key(pdf: pathlib.Path) -> tuple[str, int, int]:
         stat = pdf.stat()
-        key = (str(pdf), stat.st_mtime_ns, stat.st_size)
+        return str(pdf), stat.st_mtime_ns, stat.st_size
+
+    def validate_local(self, snapshot: pathlib.Path) -> list[tuple[float, float]]:
+        return self._run(pdfium_doc.page_sizes, str(snapshot))
+
+    def remember_sizes(self, pdf: pathlib.Path, sizes: list[tuple[float, float]]) -> None:
+        """Reuse page sizes read during validation of the immutable snapshot."""
+        self._sizes[self._sizes_key(pdf)] = sizes
+
+    def sizes(self, pdf: pathlib.Path) -> list[tuple[float, float]]:
+        key = self._sizes_key(pdf)
         cached = self._sizes.get(key)
         if cached is None:
             cached = self._run(pdfium_doc.page_sizes, str(pdf))
@@ -459,13 +528,14 @@ class Reader:
         return json.dumps([SHELL_VERSION, pdfium_doc.TEXT_LAYER_VERSION, str(pdf), stat.st_mtime_ns, stat.st_size, title])
 
     def shell(self, hash_: str, pdf: pathlib.Path, title: str,
-              near_pages: tuple[int, ...] = ()) -> pathlib.Path | str:
+              near_pages: tuple[int, ...] = (), *, defer_text: bool = False) -> pathlib.Path | str:
         """The reader shell for an entry.
 
         The complete shell (a file) when every text range is cached. Before
         that, the markup itself: every page frame, text for the first range,
         for the ranges of `near_pages` (1-based, such as the saved position)
         and for any range already cached, and a pending marker on the rest.
+        HTTP opens use defer_text so uncached extraction cannot delay paint.
         """
         path = self.shell_path(hash_)
         stamp_path = path.with_suffix(".stamp")
@@ -479,16 +549,14 @@ class Reader:
             text_stamp = self._text_stamp(pdf)
             cached = {k: self._cached_range(hash_, k, text_stamp) for k in range(ranges)}
             wanted = {0} | {(page - 1) // TEXT_RANGE_PAGES for page in near_pages if 1 <= page <= count}
+            if defer_text:
+                wanted = set()  # Fetch uncached text after the raster can paint.
             # The outline and metadata first: they are quick, and the pool
             # runs tasks in the order they were submitted.
             outline_task = self._submit(pdfium_doc.outline, str(pdf))
-            meta_task = None if (self.root / hash_ / "meta.json").exists() else \
-                self._submit(pdfium_doc.metadata, str(pdf))
             started = {k: self._extract_start(pdf, k, count, urgent=True)
                        for k in sorted(wanted) if k < ranges and cached[k] is None}
             outline = outline_task.result()
-            if meta_task is not None:
-                self._store_meta(hash_, pdf, meta_task)
             degraded = False
             for k, tasks in started.items():
                 bodies, complete = self._extract_finish(pdf, tasks)
@@ -502,6 +570,8 @@ class Reader:
                 size = min(count, (k + 1) * TEXT_RANGE_PAGES) - k * TEXT_RANGE_PAGES
                 page_bodies.extend(part if part is not None and len(part) == size else [None] * size)
             document = shell_html(hash_, title, sizes, outline, page_bodies)
+            stat = pdf.stat()
+            document = document.replace(f"/r/{hash_}/p/", f"/r/{hash_}/rev/{stat.st_mtime_ns}-{stat.st_size}/p/")
             # Only complete text is written: a page that lost its text to a
             # crashed worker is retried on the next open.
             if degraded or any(body is None for body in page_bodies):
@@ -542,19 +612,65 @@ class Reader:
         if all(self._cached_range(hash_, k, text_stamp) is not None for k in range(ranges)):
             self.shell(hash_, pdf, title)
 
-    def _store_meta(self, hash_: str, pdf: pathlib.Path, task) -> None:
-        """The sidebar header and the library read `<hash>/meta.json`: the
-        document information PDFium reports, stored the first time an entry
-        opens (an entry converted by the retired engine keeps its own)."""
+    def meta(self, hash_: str, pdf: pathlib.Path) -> dict:
+        """`<hash>/meta.json`, which the sidebar header, the library and the
+        tab title read: the document information PDFium reports and the
+        first page's printed title (`heading`, null when there is none).
+        Written the first time an entry opens; an entry from before
+        `heading` existed (or converted by the retired engine) keeps its
+        fields and gains that one. Never raises: a PDF PDFium cannot read
+        yields what is already stored."""
         path = self.root / hash_ / "meta.json"
         try:
-            meta = task.result()
-            meta["file_size"] = pdf.stat().st_size
-            tmp = path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            tmp.replace(path)
-        except Exception:
-            pass  # the header falls back to the document title
+            meta = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            meta = None
+        if isinstance(meta, dict) and "heading" in meta:
+            return meta
+        with self._key_lock("meta:" + hash_):
+            try:
+                if meta is None:
+                    meta = self._submit(pdfium_doc.metadata, str(pdf)).result()
+                    meta["file_size"] = pdf.stat().st_size
+                elif isinstance(meta, dict):
+                    meta["heading"] = self._submit(pdfium_doc.heading, str(pdf)).result()
+                else:
+                    return {}
+                if not (self.root / hash_).is_dir():
+                    return meta  # deleted meanwhile: do not bring it back
+                tmp = path.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                tmp.replace(path)
+            except Exception:
+                pass  # the title falls back to the entry name
+            return meta if isinstance(meta, dict) else {}
+
+    def icon(self, hash_: str, pdf: pathlib.Path) -> bytes | None:
+        """The tab icon cut from the document's first figure (PNG), or None
+        when it has none. Cached under `<hash>/reader/`; rendered at
+        background priority so it never delays a page."""
+        directory = self.entry_dir(hash_)
+        png = directory / f"icon-v{ICON_VERSION}.png"
+        none = directory / f"icon-v{ICON_VERSION}.none"
+        stat = pdf.stat()
+        stamp = f"{stat.st_mtime_ns}:{stat.st_size}"
+        with self._key_lock("icon:" + hash_):
+            for candidate in (png, none):
+                try:
+                    if candidate.with_suffix(candidate.suffix + ".stamp").read_text(encoding="utf-8") == stamp:
+                        return candidate.read_bytes() if candidate is png else None
+                except OSError:
+                    pass
+            data = self._submit(pdfium_doc.figure_icon, str(pdf), ICON_SIZE, urgent=False).result()
+            if not (self.root / hash_).is_dir():
+                return data
+            directory.mkdir(parents=True, exist_ok=True)
+            target, other = (png, none) if data else (none, png)
+            target.write_bytes(data or b"")
+            target.with_suffix(target.suffix + ".stamp").write_text(stamp, encoding="utf-8")
+            for stale in (other, other.with_suffix(other.suffix + ".stamp")):
+                stale.unlink(missing_ok=True)
+            return data
 
     def ocr_store(self, hash_: str, pdf: pathlib.Path | None = None) -> ocr.OcrStore:
         stamp = None
@@ -677,7 +793,9 @@ class Reader:
             raise ValueError(fmt)
         page_width, page_height = sizes[page - 1]
         width = raster_width(page_width, width, page_height)
-        return self.entry_dir(hash_) / "px" / str(width) / f"{page}.{fmt}", width
+        stat = pdf.stat()
+        revision = f"{stat.st_mtime_ns}-{stat.st_size}"
+        return self.entry_dir(hash_) / "px" / revision / str(width) / f"{page}.{fmt}", width
 
     def raster_job(self, hash_: str, pdf: pathlib.Path, page: int, width: int,
                    fmt: str = "png", priority: float = 0) -> tuple[concurrent.futures.Future, str | None]:
@@ -698,7 +816,7 @@ class Reader:
             done: concurrent.futures.Future = concurrent.futures.Future()
             done.set_result(path)
             return done, None
-        key = f"{hash_}:{fmt}:{width}:{page}"
+        key = f"{hash_}:{path}:{fmt}:{width}:{page}"
         with self._raster_lock:
             job = self._raster_jobs.get(key)
             if job is None:
@@ -788,7 +906,7 @@ class Reader:
         """Drop least-recently-used rasters until the cache fits its budget."""
         files = []
         total = 0
-        for path in self.root.glob("*/reader/px/*/*"):
+        for path in self.root.glob("*/reader/px/**/*"):
             if path.suffix not in (".png", ".jpg"):
                 continue
             try:

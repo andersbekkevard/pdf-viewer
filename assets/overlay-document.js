@@ -7,6 +7,7 @@ export function createDocumentModel(core) {
     var document = core.document;
     var window = core.window;
     var requestAnimationFrame = core.requestAnimationFrame;
+    var daemon = core.daemon;
 
     function html() { return document.documentElement; }
     function container() { return document.getElementById('page-container'); }
@@ -225,9 +226,10 @@ export function createDocumentModel(core) {
     // A new raster is fetched and decoded off-screen and only then swapped in,
     // so the page never goes blank or shows a half-decoded image; until then
     // the old raster stays, scaled by the browser (zoom, resize). After a zoom
-    // the sharp request waits until the zoom has been still for ZOOM_SETTLE_MS,
+    // the first sharp request starts immediately; repeated steps wait ZOOM_SETTLE_MS,
     // and requests for a width or page no longer wanted are cancelled at once:
     // the daemon drops a queued render whose request went away.
+    // IntersectionObserver percentages use root width, including vertical margins.
     var NEAR_MARGIN = '100% 0px', KEEP_MARGIN = '300% 0px';
     // A page without a raster shows this transparent pixel, never no source.
     // Chromium gives an image that gets its source while its page is still
@@ -237,7 +239,7 @@ export function createDocumentModel(core) {
     // released page; scripts/verify-overlay.cjs "on-screen pages paint").
     // Going from one image to another never takes that path.
     var PLACEHOLDER = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
-    var MAX_REQUESTS = 3, ZOOM_SETTLE_MS = 120;
+    var MAX_REQUESTS = 3, ZOOM_SETTLE_MS = 120, ZOOM_BURST_MS = 180;
     // A page on screen with nothing to show (a far jump, a scrollbar drag)
     // first gets a raster at 1/PREVIEW_DIVISOR of its width, which renders and
     // decodes several times faster; the sharp one replaces it. 0 disables.
@@ -248,6 +250,7 @@ export function createDocumentModel(core) {
         var inflight = 0;
         var holdUntil = 0, holdTimer = null, pumpQueued = false;
         var scale = currentScale();
+        var lastScaleAt = -Infinity;
 
         function currentScale() {
             var zoom = parseFloat(root.style.getPropertyValue('--pdf2html-zoom')) || 1;
@@ -265,61 +268,83 @@ export function createDocumentModel(core) {
             else if (entry.failed === want(entry)) setState(entry, 'error');
             else setState(entry, entry.near ? 'loading' : entry.shown ? 'ready' : 'unloaded');
         }
+        // At a PDF's own address (overlay-daemon.js) a raster arrives through
+        // the extension as a blob: URL: `job.src` and `entry.src` are what the
+        // image elements show, `job.url` and `entry.shown` stay the daemon
+        // address. On the daemon's origin the two are the same string.
+        function drop(job) {
+            // Dropping the source aborts the request; its decode() rejects.
+            if (job.abort) job.abort.abort();
+            job.image.removeAttribute('src');
+            if (job.src && job.src !== job.url) daemon.release(job.src);
+        }
         function cancel(entry) {
             cancelPreview(entry);
             var job = entry.job;
             if (!job) return;
             entry.job = null;
             inflight -= 1;
-            // Dropping the source aborts the request; its decode() rejects.
-            job.image.removeAttribute('src');
+            drop(job);
         }
         function cancelPreview(entry) {
             var job = entry.preview;
             if (!job) return;
             entry.preview = null;
-            job.image.removeAttribute('src');
+            drop(job);
+        }
+        function show(entry, job) {
+            var previous = entry.src;
+            entry.img.setAttribute('src', job.src);
+            entry.src = job.src;
+            entry.shown = job.url;
+            if (previous && previous !== entry.src && previous.indexOf('blob:') === 0) daemon.release(previous);
         }
         function release(entry) {
             cancel(entry);
             entry.failed = null;
             if (entry.img.getAttribute('src') !== PLACEHOLDER) entry.img.setAttribute('src', PLACEHOLDER);
+            if (entry.src && entry.src.indexOf('blob:') === 0) daemon.release(entry.src);
+            entry.src = null;
             entry.shown = null;
             updateState(entry);
         }
         function start(entry, url, preview) {
             var image = new window.Image();
-            var job = { url: url, image: image };
+            var job = { url: url, image: image, src: null, abort: null };
             if (preview) entry.preview = job;
             else { entry.job = job; inflight += 1; }
-            image.src = url;
+            function current() { return (preview ? entry.preview : entry.job) === job; }
             function finish(ok) {
                 if (preview) {
                     if (entry.preview !== job) return;
                     entry.preview = null;
                     // Only into an empty page: never over a sharp or scaled raster.
-                    if (ok && !entry.shown) {
-                        entry.img.setAttribute('src', url);
-                        entry.shown = url;
-                    }
+                    if (ok && !entry.shown) show(entry, job);
+                    else if (job.src && job.src !== job.url) daemon.release(job.src);
                     return;
                 }
                 if (entry.job !== job) return;   // cancelled or superseded
                 entry.job = null;
                 inflight -= 1;
                 cancelPreview(entry);
-                if (ok) {
-                    entry.img.setAttribute('src', url);
-                    entry.shown = url;
-                } else {
-                    entry.failed = url;
-                }
+                if (ok) show(entry, job);
+                else { entry.failed = url; drop(job); }
                 updateState(entry);
                 schedule();
             }
-            (image.decode ? image.decode() : new Promise(function (ok, fail) {
-                image.onload = ok; image.onerror = fail;
-            })).then(function () { finish(true); }, function () { finish(!!(image.complete && image.naturalWidth)); });
+            function load(src) {
+                job.src = src;
+                image.src = src;
+                (image.decode ? image.decode() : new Promise(function (ok, fail) {
+                    image.onload = ok; image.onerror = fail;
+                })).then(function () { finish(true); }, function () { finish(!!(image.complete && image.naturalWidth)); });
+            }
+            if (!daemon || !daemon.embedded) { load(url); return; }
+            job.abort = new window.AbortController();
+            daemon.image(url, job.abort.signal).then(function (src) {
+                if (current()) load(src);
+                else daemon.release(src);
+            }, function () { finish(false); });
         }
         function visible(entry) { return entry.visible; }
         // Requests in the order they should go out: pages on screen first, then
@@ -372,12 +397,16 @@ export function createDocumentModel(core) {
         }
         // The page's width on screen changed (zoom, window, display): the shown
         // rasters stay, scaled, and requests for the old width are dropped now;
-        // new ones go out once the change has settled.
+        // an isolated step starts now, repeated steps wait until settled.
         function rescale() {
             var next = currentScale();
             if (next === scale) { schedule(); return; }
             scale = next;
-            holdUntil = Date.now() + ZOOM_SETTLE_MS;
+            var now = Date.now();
+            // Give an isolated key press a sharp raster immediately. Repeated
+            // keys cancel that width and coalesce the rest of the burst.
+            holdUntil = now - lastScaleAt < ZOOM_BURST_MS ? now + ZOOM_SETTLE_MS : 0;
+            lastScaleAt = now;
             entries.forEach(function (entry) {
                 if (entry.job && entry.job.url !== want(entry)) cancel(entry);
                 updateState(entry);
@@ -391,7 +420,7 @@ export function createDocumentModel(core) {
             var entry = {
                 page: pf, img: img, base: img.getAttribute('data-reader-raster'),
                 cssWidth: parseFloat(pf.style.width) || 0,
-                near: false, kept: false, visible: false, shown: null, failed: null, job: null, preview: null,
+                near: false, kept: false, visible: false, shown: null, src: null, failed: null, job: null, preview: null,
             };
             if (!entry.cssWidth) return;
             // The daemon may have put the first page's raster straight into the
@@ -399,7 +428,7 @@ export function createDocumentModel(core) {
             // module runs: keep it. A wrong guess of the width is shown scaled
             // until the sharp raster replaces it, as after a zoom.
             var given = img.getAttribute('src');
-            if (given && given.indexOf(entry.base) === 0) entry.shown = given;
+            if (given && given.indexOf(entry.base) === 0) { entry.shown = given; entry.src = given; }
             else img.setAttribute('src', PLACEHOLDER);
             entries.set(pf, entry);
             order.push(entry);

@@ -12,6 +12,9 @@ the retirement of that engine. The reader is the only way a document is shown.
 |---|---|
 | `GET /read?path=<file>` | Registers the local PDF under its content hash and redirects to `/r/<hash>/`. The file is read in place. |
 | `GET /read?url=<url>`, `GET /read-raw?<url>` | Downloads the PDF once into `<hash>/_source/`, registers it and redirects. |
+| `GET /r/<hash>/<slug>` | The same shell at its titled address. The shell replaces `/r/<hash>/` (and the `_open` query) in the address bar with `/r/<hash>/<slug>`, the document title in lower-case hyphenated words (`reader.slug`); any slug serves the shell, so an address survives a rename. |
+| `GET /r/<hash>/icon` | The tab icon: a 64 px square cut from the centre of the first figure in the first four pages (PNG, `pdfium_doc.figure_icon`, cached as `<hash>/reader/icon-v<N>.png`), else a monogram of the title's first letter on a colour taken from the hash (SVG). A figure is a cluster of touching images, forms and paths, at least 20 % of the page wide and 4 % of its area, not dense with text. |
+| `GET /download?hash=<hash>` | Downloads the PDF revision backing the reader as an attachment, using the library name with a `.pdf` extension. No refetch or conversion. |
 | `GET /r/<hash>/` | The reader shell (HTML). Served from `<hash>/reader/shell.html` once all text has been extracted; before that, built per request with text for a few pages (see [Loading](#loading)). |
 | `GET /r/<hash>/text/<k>.json` | Text range `k`: `{"first": 32k+1, "pages": [markup, …], "ocr": [page, …]}`, each page's `.t` lines and links. Cached under `<hash>/reader/text/<k>.json`. |
 | `GET /r/<hash>/p/<page>/<width>.jpg` | One page rendered `width` device pixels wide, JPEG (the overlay's rasters; see [Rasters](#rasters)). Cached under `<hash>/reader/px/<width>/`. |
@@ -116,9 +119,8 @@ Extracting the text of every page costs about 3 ms of CPU per page, seconds
 for a long book, so the first open does not wait for it:
 
 1. The first request for `/r/<hash>/` gets every page frame (sizes come from
-   PDFium in milliseconds), the outline, and text for the first range of 32
-   pages plus the range of the reading position the daemon holds for the
-   document (`state.db`). Ranges already cached are included too.
+   PDFium in milliseconds), the outline, and any text ranges already cached.
+   Uncached text never blocks this response or the first raster.
 2. `overlay-readertext.js` fetches the other ranges, four at a time: first
    any range with a page on screen (also beyond those four), then ranges a
    caller waits for, then outward from the current page, forward first. A
@@ -209,6 +211,22 @@ against them. Page ids are hexadecimal (`#pf1`, `#pfa`, …). The root carries
   `http`, `https` and `mailto`. A press that starts on text makes links ignore
   the pointer until release, so a selection can cross a link.
 
+## Cold text processing
+
+Each text worker reads geometry only for the pages in its batch. The hot
+character loop can run as a compiled version of `pdfium_doc.py` using the
+same PDFium wheel, character boxes and line-grouping code. It binds two
+existing PDFium functions once per page and avoids per-character Python
+foreign-function and numeric conversions. The JPEG encoder reads a
+same-resolution RGBX bitmap directly. PNG still takes the lossless path.
+
+`uv sync --directory daemon` builds the optional text module with the
+system C compiler. The daemon's `/healthz` reports `native_text`. When
+the module is missing or out of date, the worker uses the Python loop.
+After editing the text implementation, rebuild with
+`uv sync --directory daemon --reinstall-package daemon`. For comparison,
+`PDF_VIEWER_PYTHON_TEXT=1` selects the Python loop even with a current build.
+
 ## Rasters
 
 A page raster is one JPEG of the whole page at its exact device width. The
@@ -218,9 +236,14 @@ hold one, from three intersection observers on `#page-container`:
 | Band | Margin around the viewport | The page |
 |---|---|---|
 | visible | none | is fetched first |
-| near | one viewport above and below | is fetched at the current width |
-| kept | three viewports | keeps what it has; nothing new is fetched |
+| near | 100% of container width above and below | is fetched at the current width |
+| kept | 300% of container width above and below | keeps what it has; nothing new is fetched |
 | beyond | | holds the placeholder (released), so decoded rasters stay bounded |
+
+The vertical percentage margins are relative to the container **width**, as
+IntersectionObserver specifies. At 1300 px wide the near and kept margins
+are 1300 and 3900 px. Text stays in layout on
+every page for native find; only raster ownership changes.
 
 - **First raster.** The overlay keeps `pdfv_vp=<container width>x<pixel
   ratio>` as a cookie (`overlay.js`). From it, the saved page and the zoom,
@@ -255,13 +278,16 @@ hold one, from three intersection observers on `#page-container`:
   half-decoded while it already had a raster.
 - **Zoom.** The new zoom is in the next frame with the rasters already
   loaded, scaled by the browser. Requests for the width just left are
-  cancelled at once; new ones go out when the zoom has been still for
-  120 ms, so a burst of ⌘+ presses asks for one width only.
+  cancelled at once. An isolated step requests sharp rasters immediately.
+  A step within 180 ms of the previous step waits until the zoom has been
+  still for 120 ms. A rapid burst can request the first and final
+  widths, trading one intermediate render for faster isolated keys.
 - **Cancellation.** Dropping an `Image`'s source aborts its request. The
   daemon serves rasters from an async route that notices the disconnect,
   and a render still waiting in the worker queue for a request that went
   away is dropped (`Reader.raster_release`). A render already running
-  finishes and is cached.
+  finishes and is cached. Blob URLs supplied by the extension are revoked
+  on replacement, release, cancellation and failed decode.
 - **Format.** JPEG quality 90 without chroma subsampling: against the
   lossless PNG of the same render, 42–53 dB PSNR and under 0.1 % of pixels
   more than 16 levels apart, at a fifth of the encode time. Highlights and
@@ -276,6 +302,11 @@ hold one, from three intersection observers on `#page-container`:
 - **Disk.** The daemon counts the raster cache once and then per write, and
   evicts least-recently-used rasters to 80 % of `PDF_VIEWER_RASTER_CACHE_MB`
   as soon as a write takes it over.
+
+The [2026-11-12 performance follow-up](../bench/perf/RESULTS-2026-11-12.md)
+records generated-document zoom timings and memory experiments. Smaller raster
+bands and local blob fetching did not reliably reduce footprint and were
+reverted; the percentage margins above remain unchanged.
 
 ## Scanned pages
 
@@ -453,15 +484,29 @@ by scrolling, Enter and a repeated selection event is covered headlessly;
 the real browser Cmd-F bar and its Enter handling remain a manual check.
 
 `PDF_VIEWER_GEOMETRIC_TEXT_ORDER=1` enables an **experimental** page-local
-XY ordering pass in `pdfium_doc.reading_order`. Horizontal empty bands split
-headings/captions/footnotes from column regions; persistent x gutters split
-columns, then upright lines sort top to bottom. Overlapping/ambiguous groups
-retain stream order, rotated text follows the upright body, and a page with
-RTL text retains its original order. Segments, characters and hyphens are
-unchanged. Tables with a row represented by multiple segments stay rows.
-Both shell and text versions invalidate caches; experimental extraction has
-a distinct text version, so toggling the flag cannot reuse its text as the
-default layer. This is opt-in because the existing scorecard compares copied
-text against PDFium **stream order**, and geometric ordering has not met that
-copy-fidelity gate. Do not enable it by default on the strength of synthetic
-fixtures. See `bench/reader/README.md` for the independent order diagnostics.
+XY ordering pass in `pdfium_doc.reading_order`. It is off by default, and it
+stays off. Horizontal empty bands split headings, captions and footnotes from
+the body; persistent x gutters split columns; upright lines in a separated
+group then sort top to bottom. Overlapping groups keep stream order, rotated
+lines follow the upright body, and a page with RTL text keeps its original
+order. Segments, characters and hyphens are unchanged. A row that is one line
+with several segments stays one row.
+
+The default text layer is PDFium content order. Copied text on the scorecard
+is compared with that same order, so any reorder lowers copy similarity on
+the pages it touches even when the new order is the one a person would read.
+The XY pass did that on 30 of 63 scorecard documents and added a
+copy-mismatch on 19. Find recall and highlight IoU did not move. A follow-up
+looked for a narrower rule that would reorder only a page with two obvious
+columns and would leave every other page, and every line's own characters,
+alone. On 3033 pages from 53 of the scorecard documents that rule matches 6
+pages, and those 6 are already left-column then right-column, so it would
+change nothing. The pages the XY pass actually reordered are sparse pages,
+rotated lines and unbalanced side groups, which is where copy similarity
+fell. Details and counts are in `docs/reader-text-selection-report.md`.
+
+Do not turn the flag on for normal reading. Experimental extraction uses a
+different `TEXT_LAYER_VERSION`, so a cache built with the flag cannot be
+reused as the default layer. See `bench/reader/README.md` for the order
+diagnostics. The lane-inversion count does not judge a jump from one column
+to the next.

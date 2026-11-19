@@ -1,15 +1,15 @@
-/* FK Grotesk Neue — served from /_assets/fonts/ by the daemon (symlinked
-   cache → assets/). Paths must be absolute so this file works regardless of
-   which /<hash>/<name>.html is loading it. */
-@font-face { font-family: 'FK Grotesk Neue'; font-weight: 100; font-style: normal; src: url('/_assets/fonts/FKGroteskNeue-Thin.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'FK Grotesk Neue'; font-weight: 100; font-style: italic; src: url('/_assets/fonts/FKGroteskNeue-ThinItalic.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'FK Grotesk Neue'; font-weight: 300; font-style: normal; src: url('/_assets/fonts/FKGroteskNeue-Light.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'FK Grotesk Neue'; font-weight: 300; font-style: italic; src: url('/_assets/fonts/FKGroteskNeue-LightItalic.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'FK Grotesk Neue'; font-weight: 400; font-style: normal; src: url('/_assets/fonts/FKGroteskNeue-Regular.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'FK Grotesk Neue'; font-weight: 400; font-style: italic; src: url('/_assets/fonts/FKGroteskNeue-Italic.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'FK Grotesk Neue'; font-weight: 500; font-style: normal; src: url('/_assets/fonts/FKGroteskNeue-Medium.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'FK Grotesk Neue'; font-weight: 500; font-style: italic; src: url('/_assets/fonts/FKGroteskNeue-MediumItalic.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'FK Grotesk Neue'; font-weight: 700; font-style: normal; src: url('/_assets/fonts/FKGroteskNeue-Bold.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'FK Grotesk Neue'; font-weight: 700; font-style: italic; src: url('/_assets/fonts/FKGroteskNeue-BoldItalic.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'FK Grotesk Neue'; font-weight: 900; font-style: normal; src: url('/_assets/fonts/FKGroteskNeue-Black.otf') format('opentype'); font-display: swap; }
-@font-face { font-family: 'FK Grotesk Neue'; font-weight: 900; font-style: italic; src: url('/_assets/fonts/FKGroteskNeue-BlackItalic.otf') format('opentype'); font-display: swap; }
+/* FK Grotesk Neue. The font files sit beside this sheet and are named
+   relatively, so the same sheet works served by the daemon (/_assets/fonts/)
+   and loaded from the extension (pages at a PDF's own address). */
+@font-face { font-family: 'FK Grotesk Neue'; font-weight: 100; font-style: normal; src: url('FKGroteskNeue-Thin.otf') format('opentype'); font-display: swap; }
+@font-face { font-family: 'FK Grotesk Neue'; font-weight: 100; font-style: italic; src: url('FKGroteskNeue-ThinItalic.otf') format('opentype'); font-display: swap; }
+@font-face { font-family: 'FK Grotesk Neue'; font-weight: 300; font-style: normal; src: url('FKGroteskNeue-Light.otf') format('opentype'); font-display: swap; }
+@font-face { font-family: 'FK Grotesk Neue'; font-weight: 300; font-style: italic; src: url('FKGroteskNeue-LightItalic.otf') format('opentype'); font-display: swap; }
+@font-face { font-family: 'FK Grotesk Neue'; font-weight: 400; font-style: normal; src: url('FKGroteskNeue-Regular.otf') format('opentype'); font-display: swap; }
+@font-face { font-family: 'FK Grotesk Neue'; font-weight: 400; font-style: italic; src: url('FKGroteskNeue-Italic.otf') format('opentype'); font-display: swap; }
+@font-face { font-family: 'FK Grotesk Neue'; font-weight: 500; font-style: normal; src: url('FKGroteskNeue-Medium.otf') format('opentype'); font-display: swap; }
+@font-face { font-family: 'FK Grotesk Neue'; font-weight: 500; font-style: italic; src: url('FKGroteskNeue-MediumItalic.otf') format('opentype'); font-display: swap; }
+@font-face { font-family: 'FK Grotesk Neue'; font-weight: 700; font-style: normal; src: url('FKGroteskNeue-Bold.otf') format('opentype'); font-display: swap; }
+@font-face { font-family: 'FK Grotesk Neue'; font-weight: 700; font-style: italic; src: url('FKGroteskNeue-BoldItalic.otf') format('opentype'); font-display: swap; }
+@font-face { font-family: 'FK Grotesk Neue'; font-weight: 900; font-style: normal; src: url('FKGroteskNeue-Black.otf') format('opentype'); font-display: swap; }
+@font-face { font-family: 'FK Grotesk Neue'; font-weight: 900; font-style: italic; src: url('FKGroteskNeue-BlackItalic.otf') format('opentype'); font-display: swap; }

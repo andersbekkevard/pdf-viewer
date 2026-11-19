@@ -1,5 +1,5 @@
 /* Home page (GET /): the library. Tokens copied from overlay.css :root. */
-@import url('/_assets/fonts/fk.css');
+@import url('fonts/fk.css');
 
 :root {
     --bg: #282828;

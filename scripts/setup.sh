@@ -10,7 +10,7 @@
 # launchd jobs, no clobbered symlinks, the running daemon is left untouched
 # unless the plist content actually changed).
 #
-# The chain it wires (parent epic: pdfv-6el):
+# The chain it wires:
 #   uv → templated launchd job (:7435) → cache dir →
 #   scripts/doctor.sh (the success gate).
 #

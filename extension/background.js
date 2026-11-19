@@ -1,37 +1,36 @@
-// pdf_viewer extension — dynamic rule sync.
+// pdf_viewer extension — service worker.
 //
-// The static rules.json handles `.pdf$` URLs. This service worker handles
-// everything else: it fetches /cache-urls from the daemon and installs one
-// dynamic declarativeNetRequest rule per cached entry so that any URL whose
-// host+path matches a cached doc gets intercepted — even signed URLs like
-// Blackboard's that don't end in `.pdf`.
+// A PDF is read at its own address (docs/in-place.md). Nothing is redirected:
+// header rules make Chrome build an ordinary page where it would have started
+// its PDF viewer, and the page script (page.js) puts the reader there.
 //
-// Remote redirects target `/view-raw?<original-url>` instead of
-// `/view?url=<original-url>` because declarativeNetRequest substitutions are
-// not percent-encoded. The daemon reads the raw query string there so signed
-// URLs containing `&` stay intact.
+//   rules.json   any response typed application/pdf (or a `.pdf` URL typed
+//                octet-stream), unless it is a download: Content-Type becomes
+//                text/plain and a `Server-Timing: pdfv` entry marks it.
+//   this worker  one dynamic rule per cached URL entry, from /cache-urls: the
+//                same rewrite whatever the response's type, so a cached
+//                document opens even when its host now answers with a sign-in
+//                page; or an allow rule for an entry the user disabled.
+//   local files  no rule: page.js sees Chrome's PDF document directly.
 //
-// Ordering: disabled allow rules use priority 4, active dynamic redirects use
-// 3, the passthrough allow uses 2, and the static redirect and the generic
-// file rule use 1. Highest priority wins, so:
-//   - disabled cached URL click → dynamic allow (p4) → native viewer
-//   - cached URL click → dynamic (p3) → /view-raw opens the reader
-//   - unknown `.pdf$` URL → static (p1) → /view-raw 307s with marker
-//   - 307-target with marker → allow (p2) → native viewer
-//   - cache miss on non-.pdf URL → no rule → browser opens natively
-//   - uncached `file://….pdf` → generic (p1) →
-//     /view-file-raw opens the reader
+// Ordering: a disabled entry's allow rule has priority 4, an entry's rewrite
+// 1, the passthrough allow 2, the static rewrites 1. An allow rule that wins
+// stops the rewrites below it, so:
+//   - disabled cached URL → allow (p4) → the browser's viewer
+//   - URL carrying `_pdfvw=passthrough` → allow (p2) → the browser's viewer
+//   - any other PDF response → rewrite → the reader, at that URL
 //
 // Service workers in MV3 can be terminated, so we use chrome.alarms (survives
 // suspension) rather than setInterval.
 //
-// Sign-in-gated PDFs (daemon 0.4 protocol, see "Browser opens" below): the
-// daemon holds a `/view-raw` navigation it cannot download itself, and this
-// worker, which sees the same request through webRequest, fetches the URL
-// with the browser's session and uploads the bytes, so the tab goes from the
-// link straight to the reader. While the daemon is unreachable a session
-// allow rule switches every redirect off, so PDFs open natively instead of
-// on a connection error page.
+// Sign-in-gated PDFs (see "Browser opens" below): when the daemon cannot
+// download a URL itself, this worker fetches it with the browser's session
+// and uploads the bytes. While the daemon is unreachable a session allow rule
+// switches every rewrite off, so PDFs open in the browser's viewer.
+//
+// The daemon's own pages (`/r/<hash>/` on its origin, the library) still
+// work as before and are what a document without a usable address falls back
+// to; `/view-raw` navigations there keep their handling below.
 
 // The service worker talks to the daemon on 127.0.0.1; redirected documents
 // open on VIEWER, the origin the static rule, the open script and the
@@ -41,17 +40,20 @@ const VIEWER = 'http://localhost:7435';
 const DYNAMIC_RULE_ID_BASE = 1000;
 const SYNC_ALARM = 'pdfviewer-sync';
 
-// urlFilter reserves `*`, `^`, `|` as metacharacters. File paths and URL
-// paths may legitimately contain `|` (rare) or `^` (rarer), but not
-// universally safely — we reject rather than guess. `*` never appears in
-// valid URL/file paths we care about.
-const URLFILTER_META = /[*^|]/;
-
-// Any local PDF. `/view-file-raw` reads the raw query because the substitution
-// cannot percent-encode the capture. Per-entry file rules (p3, p4) win, so a
-// disabled entry's allow rule still keeps it native.
-const GENERIC_FILE_PRIORITY = 1;
-const GENERIC_FILE_REGEX = '^file://.*\\.[Pp][Dd][Ff](?:[?#].*)?$';
+// What a rewrite rule does to a PDF response (rules.json repeats it): a plain
+// text page that page.js recognizes, free of the response's own restrictions
+// on what the page may load.
+const REWRITE_HEADERS = [
+    { header: 'content-type', operation: 'set', value: 'text/plain; charset=utf-8' },
+    { header: 'x-content-type-options', operation: 'set', value: 'nosniff' },
+    { header: 'server-timing', operation: 'set', value: 'pdfv' },
+    { header: 'content-disposition', operation: 'remove' },
+    { header: 'content-security-policy', operation: 'remove' },
+    { header: 'content-security-policy-report-only', operation: 'remove' },
+    { header: 'cross-origin-embedder-policy', operation: 'remove' },
+    { header: 'permissions-policy', operation: 'remove' },
+    { header: 'refresh', operation: 'remove' },
+];
 
 // The URL a tab reports is the browser's normalized form of what the daemon
 // sent it to; compare both that way.
@@ -115,97 +117,45 @@ async function _runSync() {
         return;
     }
 
-    // urlFilter must be ASCII (Chromium requirement). Encoded file paths
-    // and host+path URL segments should already be ASCII, but macOS NFD
-    // vs NFC unicode forms between Python's JSON and JS can leak non-ASCII
-    // through — skip with a warning rather than failing the whole sync.
+    // A rule's filter must be ASCII (Chromium requirement). Host+path URL
+    // segments should already be, but skip with a warning rather than fail
+    // the whole sync.
     const isAscii = (s) => /^[\x00-\x7f]*$/.test(s);
 
     const addRules = [];
     let ruleIdCounter = DYNAMIC_RULE_ID_BASE;
 
-    addRules.push({
-        id: ruleIdCounter++,
-        priority: GENERIC_FILE_PRIORITY,
-        action: {
-            type: 'redirect',
-            redirect: { regexSubstitution: `${VIEWER}/view-file-raw?\\0` }
-        },
-        condition: {
-            regexFilter: GENERIC_FILE_REGEX,
-            resourceTypes: ['main_frame']
-        }
-    });
+    // Chrome reads this file from disk whenever the worker restarts, but keeps
+    // the manifest and rules.json it loaded. Until the extension is reloaded
+    // after an update from 0.4, there is no page script to build the reader:
+    // install no rewrite rules, so the old static redirects keep working.
+    const inPlace = (chrome.runtime.getManifest().content_scripts || []).length > 0;
+    if (!inPlace) entries = [];
 
     for (const entry of entries) {
-        let rule;
-        if (entry.kind === 'file') {
-            // Chromium percent-encodes file:// paths segment-by-segment
-            // (spaces → %20, non-ASCII → UTF-8 %XX). Mirror that to match
-            // the URL the browser actually navigates to.
-            const encodedPath = entry.path
-                .split('/')
-                .map(encodeURIComponent)
-                .join('/');
-            // `|` anchors to URL start; trailing `^` matches separator or
-            // end-of-URL, so `...pdf`, `...pdf?x=1`, `...pdf#frag` all match.
-            const urlFilter = `|file://${encodedPath}^`;
-
-            if (!isAscii(urlFilter) || URLFILTER_META.test(encodedPath)) {
-                console.warn(
-                    'pdf_viewer: unsafe chars in urlFilter — skipping',
-                    entry.path
-                );
-                continue;
-            }
-            rule = {
-                id: ruleIdCounter++,
-                priority: entry.disabled ? 4 : 3,
-                action: entry.disabled
-                    ? { type: 'allow' }
-                    : {
-                        type: 'redirect',
-                        redirect: {
-                            url: `${VIEWER}/view?path=${encodeURIComponent(entry.path)}`
-                        }
-                    },
-                condition: {
-                    urlFilter,
-                    resourceTypes: ['main_frame']
-                }
-            };
-        } else {
-            // URL kind. Preserve the exact navigation URL in the redirect so
-            // stale dynamic-rule cache misses still fall back with signed
-            // query strings intact.
-            const hostPath = entry.host + entry.path;
-            const regexFilter = `^https?://${escapeRegex(hostPath)}(?:[?#].*)?$`;
-            if (!isAscii(regexFilter)) {
-                console.warn(
-                    'pdf_viewer: non-ASCII in regex — skipping rule for',
-                    hostPath
-                );
-                continue;
-            }
-            rule = {
-                id: ruleIdCounter++,
-                priority: entry.disabled ? 4 : 3,
-                action: entry.disabled
-                    ? { type: 'allow' }
-                    : {
-                        type: 'redirect',
-                        redirect: {
-                            regexSubstitution: `${VIEWER}/view-raw?\\0`
-                        }
-                    },
-                condition: {
-                    regexFilter,
-                    resourceTypes: ['main_frame'],
-                    excludedRequestDomains: ['localhost', '127.0.0.1']
-                }
-            };
+        // A local file needs no rule: page.js sees it, and asks the daemon
+        // whether the entry is disabled.
+        if (entry.kind === 'file') continue;
+        // The exact navigation URL, whatever its query (signed URLs).
+        const hostPath = entry.host + entry.path;
+        const regexFilter = `^https?://${escapeRegex(hostPath)}(?:[?#].*)?$`;
+        if (!isAscii(regexFilter)) {
+            console.warn('pdf_viewer: non-ASCII in regex — skipping rule for', hostPath);
+            continue;
         }
-        addRules.push(rule);
+        addRules.push({
+            id: ruleIdCounter++,
+            priority: entry.disabled ? 4 : 1,
+            action: entry.disabled
+                ? { type: 'allow' }
+                : { type: 'modifyHeaders', responseHeaders: REWRITE_HEADERS },
+            condition: {
+                regexFilter,
+                resourceTypes: ['main_frame'],
+                requestMethods: ['get'],
+                excludedRequestDomains: ['localhost', '127.0.0.1']
+            }
+        });
     }
 
     const rulesKey = JSON.stringify(addRules);
@@ -578,6 +528,8 @@ const isPdfMagic = (b) => b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3
 // Stream a fetch response to the daemon in pieces. Throws on a non-PDF.
 async function uploadResponse(id, resp) {
     const headers = {
+        'X-Source-ETag': resp.headers.get('etag') || '',
+        'X-Source-Last-Modified': resp.headers.get('last-modified') || '',
         'X-Source-Content-Type': resp.headers.get('content-type') || '',
         'X-Source-Content-Disposition': resp.headers.get('content-disposition') || '',
     };
@@ -621,10 +573,12 @@ async function uploadResponse(id, resp) {
     }
 }
 
-async function openThroughBrowser(daemonUrl) {
-    const target = originalUrl(daemonUrl);
+// `address` is the URL a tab is opening: as page.js reports it (an in-place
+// open), or inside a `/view-raw?<url>` navigation to the daemon.
+async function openThroughBrowser(address) {
+    const target = isDaemonPage(address) ? originalUrl(address) : address;
     if (!target || !/^https?:\/\//.test(target)) return;
-    const url = stripPassthrough(target);
+    const url = stripPassthrough(target.split('#')[0]);
     let claim;
     try {
         const resp = await fetch(`${DAEMON}/extension/open`, {
@@ -644,7 +598,13 @@ async function openThroughBrowser(daemonUrl) {
     transferStarted();
     try {
         const started = Date.now();
-        const resp = await fetch(url, { credentials: 'include', cache: 'no-store' });
+        const resp = await fetch(url, { credentials: 'include', cache: 'no-store', headers: claim.headers || {} });
+        if (resp.status === 304) {
+            if (!(await putOpen(claim.id, '', { 'X-Source-Not-Modified': '1' }))) {
+                throw new Error('cached source no longer matches the conditional request');
+            }
+            return;
+        }
         const contentType = resp.headers.get('content-type') || '';
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const length = Number(resp.headers.get('content-length') || 0);
@@ -733,6 +693,158 @@ chrome.webRequest.onErrorOccurred.addListener((details) => {
     bounceFromDeadDaemon(details);
 }, DAEMON_PAGES);
 
+function isDaemonPage(url) {
+    return url.startsWith(`${VIEWER}/`) || url.startsWith(`${DAEMON}/`);
+}
+
+// -----------------------------------------------------------------------------
+// Page script and bridge (page.js, bridge.js).
+//
+// bridge.html can be framed by any site, so it serves only a page script
+// that proved itself here: page.js registers a random token for its tab over
+// extension messaging, which no web page can send, and the bridge asks
+// whether the token it was handed is that tab's. Tokens live in session
+// storage so a restarted worker still knows them.
+// -----------------------------------------------------------------------------
+
+const bridgeKey = (tabId) => `bridge:${tabId}`;
+
+// -----------------------------------------------------------------------------
+// Own address ⇄ the daemon's address.
+//
+// A tab that opens `/r/<hash>/` on the daemon (the library, an old link) is
+// sent to the document's own URL or file, where page.js builds the same
+// reader. The way back: when that address then fails (offline, a redirect to
+// a sign-in page), or a cached document's URL fails on a direct visit, the tab
+// goes to the daemon's page with `_pdfvw=local`, which page.js leaves alone.
+// -----------------------------------------------------------------------------
+
+const LOCAL = '_pdfvw=local';
+const MOVE_WATCH_MS = 30000;
+// Tab id → { hash, at }: tabs this worker just sent to a document's own address.
+const _moved = new Map();
+
+const localReader = (hash) => `${VIEWER}/r/${hash}/?${LOCAL}`;
+
+async function moveToOwnAddress(tabId, hash, page) {
+    if (_daemonDown) return false;
+    let info;
+    try {
+        const resp = await fetch(`${DAEMON}/extension/address/${hash}`, { cache: 'no-store' });
+        if (!resp.ok) return false;
+        info = await resp.json();
+    } catch (_) {
+        return false;
+    }
+    if (!info || !info.url || info.disabled) return false;
+    if (info.url.startsWith('file:') && !(await chrome.extension.isAllowedFileSchemeAccess())) return false;
+    // A document cached a moment ago (the open script) needs its rule first.
+    await syncCachedRules();
+    _moved.set(tabId, { hash, at: Date.now() });
+    await chrome.tabs.update(tabId, { url: info.url.split('#')[0] + (page ? `#page=${page}` : '') });
+    return true;
+}
+
+// The cached entry a URL belongs to, by host and path, as the dynamic rules
+// match it.
+async function cachedHashFor(url) {
+    let parsed;
+    try {
+        parsed = new URL(url);
+    } catch (_) {
+        return null;
+    }
+    try {
+        const resp = await fetch(`${DAEMON}/cache-urls`, { cache: 'no-store' });
+        if (!resp.ok) return null;
+        const entry = (await resp.json()).find((e) => e.kind === 'url' && !e.disabled
+            && e.host === parsed.host && e.path === parsed.pathname);
+        return entry ? entry.hash : null;
+    } catch (_) {
+        return null;
+    }
+}
+
+async function fallBackToDaemonPage(details, why) {
+    if (details.tabId < 0 || isDaemonPage(details.url) || details.url.includes(PASSTHROUGH)) return;
+    const moved = _moved.get(details.tabId);
+    _moved.delete(details.tabId);
+    const hash = moved && Date.now() - moved.at < MOVE_WATCH_MS ? moved.hash : await cachedHashFor(details.url);
+    if (!hash) return;
+    console.log(`pdf_viewer: ${details.url} ${why} — tab ${details.tabId} reads the stored copy`);
+    await chrome.tabs.update(details.tabId, { url: localReader(hash) }).catch(() => {});
+}
+
+const WEB_PAGES = { urls: ['http://*/*', 'https://*/*'], types: ['main_frame'] };
+
+chrome.webRequest.onErrorOccurred.addListener((details) => {
+    // Only a host that cannot be reached. Everything else is not a reason to
+    // leave the address: ERR_ABORTED is page.js stopping the PDF's download, a
+    // reload or the user moving on, and other errors come and go with those.
+    if (!/ERR_(INTERNET_DISCONNECTED|NAME_NOT_RESOLVED|CONNECTION_\w+|ADDRESS_UNREACHABLE|TIMED_OUT|EMPTY_RESPONSE|NETWORK_CHANGED|PROXY_\w+|TUNNEL_\w+)/.test(details.error)) return;
+    fallBackToDaemonPage(details, `failed (${details.error})`);
+}, WEB_PAGES);
+
+chrome.webRequest.onBeforeRedirect.addListener((details) => {
+    // Only for a tab this worker just moved: the document's address now
+    // leads elsewhere (a sign-in page), and the stored copy is what was asked for.
+    const moved = _moved.get(details.tabId);
+    if (!moved || Date.now() - moved.at > MOVE_WATCH_MS) return;
+    fallBackToDaemonPage(details, 'redirects');
+}, WEB_PAGES);
+
+chrome.webRequest.onCompleted.addListener((details) => {
+    _moved.delete(details.tabId);
+}, WEB_PAGES);
+
+async function onPageMessage(message, sender) {
+    if (!sender.tab || sender.id !== chrome.runtime.id) return undefined;
+    const tabId = sender.tab.id;
+    if (message.type === 'pdfv-bridge-token') {
+        if (sender.frameId !== 0 || typeof message.token !== 'string' || message.token.length < 32) return false;
+        await chrome.storage.session.set({ [bridgeKey(tabId)]: message.token });
+        return true;
+    }
+    if (message.type === 'pdfv-bridge-check') {
+        const stored = await chrome.storage.session.get(bridgeKey(tabId));
+        return typeof message.token === 'string' && stored[bridgeKey(tabId)] === message.token;
+    }
+    if (message.type === 'pdfv-browser-open') {
+        // Only for the URL the tab itself is on.
+        if (typeof message.url === 'string' && sameUrl((sender.tab.url || '').split('#')[0], message.url)) {
+            openThroughBrowser(message.url);
+        }
+        return true;
+    }
+    if (message.type === 'pdfv-own-address') {
+        if (sender.frameId !== 0 || !/^[a-f0-9]{6,32}$/.test(String(message.hash))) return false;
+        return moveToOwnAddress(tabId, message.hash, Number(message.page) || 0);
+    }
+    if (message.type === 'pdfv-navigate') {
+        if (sender.frameId !== 0 || typeof message.url !== 'string' || !/^(https?|file):\/\//.test(message.url)) return false;
+        if (message.newTab) {
+            await chrome.tabs.create({ url: message.url, index: sender.tab.index + 1, openerTabId: tabId });
+        } else {
+            await chrome.tabs.update(tabId, { url: message.url });
+        }
+        return true;
+    }
+    return undefined;
+}
+
+chrome.runtime.onMessage.addListener((message, sender, respond) => {
+    if (!message || typeof message.type !== 'string' || !message.type.startsWith('pdfv-')) return false;
+    onPageMessage(message, sender).then(respond, (e) => {
+        console.warn('pdf_viewer: page message failed —', e.message);
+        respond(false);
+    });
+    return true;
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+    chrome.storage.session.remove(bridgeKey(tabId)).catch(() => {});
+});
+
 async function toggleCurrentPdf(tab) {
     if (!tab || !tab.id || !tab.url) {
         console.warn('pdf_viewer: toolbar toggle missing active tab URL');
@@ -744,7 +856,7 @@ async function toggleCurrentPdf(tab) {
         const resp = await fetch(`${DAEMON}/extension/toggle`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url: tab.url }),
+            body: JSON.stringify({ url: isDaemonPage(tab.url) ? tab.url : tab.url.split('#')[0] }),
         });
         if (!resp.ok) {
             console.warn(`pdf_viewer: /extension/toggle → ${resp.status}`);
@@ -758,7 +870,15 @@ async function toggleCurrentPdf(tab) {
 
     await syncCachedRules();
     if (body && body.target_url) {
-        await chrome.tabs.update(tab.id, { url: body.target_url });
+        let target = body.target_url;
+        if (body.disabled) {
+            // A local PDF's bare address would bring the reader back.
+            if (/^file:/.test(target) && !target.includes(PASSTHROUGH)) target = withPassthrough(target);
+        } else if (!isDaemonPage(tab.url)) {
+            // Re-enabled from the browser's viewer: the reader, in place.
+            target = stripPassthrough(tab.url.split('#')[0]);
+        }
+        await chrome.tabs.update(tab.id, { url: target });
         console.log(
             `pdf_viewer: toolbar toggled ${body.hash} ` +
             `${body.disabled ? 'OFF' : 'ON'}`

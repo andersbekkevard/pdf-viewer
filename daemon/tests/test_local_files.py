@@ -123,7 +123,14 @@ class LocalFiles(unittest.TestCase):
         self.assertEqual(error.exception.status_code, 409)
         self.assertEqual(self.catalog.local_entry(self.path), old)
         self.path.write_bytes(pdf(2))
-        with patch('catalog.time.sleep', side_effect=lambda _: self.path.write_bytes(pdf(3))):
+        validate = self.reader._run
+
+        def change_during_validation(*args):
+            result = validate(*args)
+            self.path.write_bytes(pdf(3))
+            return result
+
+        with patch.object(self.reader, '_run', side_effect=change_during_validation):
             with self.assertRaises(HTTPException): self.open()
         self.assertEqual(self.catalog.local_entry(self.path), old)
         self.path.write_bytes(b'%PDF-1.7\nnot a valid PDF\n%%EOF')

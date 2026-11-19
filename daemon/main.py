@@ -7,6 +7,8 @@ Routes:
     GET    /view-raw?<remote>   same as /view?url=, but preserves raw query strings (also /read-raw)
     GET    /view-file-raw?<file-url>  same as /view?path=, from a raw file:// URL
     GET    /r/<hash>/           reader shell: PDFium rasters under transparent text
+    GET    /r/<hash>/<slug>     the same shell at its titled address (the one the tab shows)
+    GET    /r/<hash>/icon       tab icon: the first figure (PNG), else a monogram (SVG)
     GET    /r/<hash>/p/<n>/<w>.png  one page rendered at a device width
     GET    /r/<hash>/text/<k>.json  text and link markup of one range of pages
     GET    /r/<hash>/ocr?pages=1-4&wait=s  recognized text of scanned pages (ocr.py)
@@ -52,6 +54,7 @@ import json
 import os
 import pathlib
 import math
+import re
 import threading
 import time
 import urllib.parse
@@ -67,12 +70,13 @@ import sources
 import opens
 import state
 import visits
-from reader import Reader
+from reader import Reader, monogram_svg, reader_path
 from state_routes import router as state_router
 from catalog import (
     CacheCatalog,
     EntryNotFound,
     InvalidCatalogInput,
+    PASSTHROUGH_MARKER,
     strip_passthrough,
     url_hash,
     with_passthrough,
@@ -611,6 +615,7 @@ class _Open:
         self.from_browser = False
         self.upload: Optional[sources.Upload] = None
         self.upload_lock = threading.Lock()
+        self.validators: dict = {}
         self.progress_at = 0.0
 
 
@@ -740,9 +745,12 @@ def _holding_page(op: _Open, fallback: str) -> Response:
     return Response(body, media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-store"})
 
 
-def _open_through_browser(url: str, hash_: str, source_ref: str, base_url: Optional[str]):
+def _open_through_browser(url: str, hash_: str, source_ref: str, base_url: Optional[str],
+                          *, page: bool = True):
     """Reader open of a remote URL with no stored source: the daemon's own
-    download, else the extension's bytes (see the section comment)."""
+    download, else the extension's bytes (see the section comment). With
+    `page` false (an in-place open, `/extension/locate`) an open still running
+    after the hold answers `{"wait": id}` instead of the holding page."""
     fallback = with_passthrough(url)
     arrived = time.monotonic()
     with _opens_cond:
@@ -786,6 +794,8 @@ def _open_through_browser(url: str, hash_: str, source_ref: str, base_url: Optio
                              timeout=max(0.0, arrived + _OPEN_HOLD_SEC - time.monotonic()))
         if op.state == "done":
             return RedirectResponse(op.target, status_code=307)
+    if not page:
+        return JSONResponse({"wait": op.id, "native": fallback})
     return _holding_page(op, fallback)
 
 
@@ -804,7 +814,7 @@ def extension_open(body: ExtensionOpenRequest):
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise HTTPException(400, "only http(s) URLs can be opened")
     hash_ = url_hash(url)
-    if catalog.is_disabled(hash_) or catalog.source_pdf(hash_) is not None:
+    if catalog.is_disabled(hash_):
         return {"fetch": False}
     start = time.monotonic()
     with _opens_cond:
@@ -822,7 +832,8 @@ def extension_open(body: ExtensionOpenRequest):
         _opens_cond.notify_all()
         open_id = op.id
     _watch_claimed_open(op)
-    return {"fetch": True, "id": open_id}
+    op.validators = sources.conditional_headers(CACHE_DIR / hash_ / "_source", op.url, "browser")
+    return {"fetch": True, "id": open_id, "headers": op.validators}
 
 
 def _watch_claimed_open(op: _Open) -> None:
@@ -870,13 +881,7 @@ def _store_browser_open(op: _Open, disposition: str) -> str:
         with op.upload_lock:
             if op.upload is None:
                 raise sources.SourceError("empty upload")
-            existing = catalog.cached_source(op.hash)
-            if existing:
-                # Stored meanwhile (another tab, the relay): that copy wins.
-                op.upload.abort()
-                name = existing.name
-            else:
-                name = op.upload.finish(op.source_ref, disposition)
+            name = op.upload.finish(op.source_ref, disposition)
         catalog.register(op.hash, op.source_ref, pathlib.PurePath(name).stem)
     except (sources.SourceError, OSError, InvalidCatalogInput) as error:
         print(f"browser open: could not store {op.source_ref}: {error}", flush=True)
@@ -905,6 +910,12 @@ async def extension_open_put(
         with _opens_cond:
             _finish_open(op, with_passthrough(op.url))
         return {"accepted": True}
+    source_dir = CACHE_DIR / op.hash / "_source"
+    if request.headers.get("x-source-not-modified") == "1":
+        valid = bool(op.validators) and sources.conditional_headers(source_dir, op.url, "browser") == op.validators
+        with _opens_cond:
+            _finish_open(op, _reader_target(op.hash) if valid else with_passthrough(op.url))
+        return {"accepted": valid}
     body = bytearray()
     async for chunk in request.stream():
         body.extend(chunk)
@@ -923,6 +934,12 @@ async def extension_open_put(
         return {"accepted": True}
     target = await asyncio.to_thread(
         _store_browser_open, op, request.headers.get("x-source-content-disposition", ""))
+    if target.startswith("/r/"):
+        pdf = catalog.cached_source(op.hash)
+        if pdf is not None:
+            sources.remember_validators(source_dir, op.url, pdf.name,
+                request.headers.get("x-source-etag", ""),
+                request.headers.get("x-source-last-modified", ""), "browser")
     with _opens_cond:
         _finish_open(op, target)
     return {"accepted": True}
@@ -956,6 +973,7 @@ def healthz():
         )
     return {
         "status": "ok",
+        "native_text": pdfium_doc.NATIVE_TEXT,
         "file_scheme_access": _file_scheme_access,
         "file_access_hint": _FILE_ACCESS_HINT if _file_scheme_access is False else None,
         "cache_dir": str(CACHE_DIR),
@@ -1030,7 +1048,7 @@ def view(
     request: Request = None,  # type: ignore[assignment]
 ):
     """Open any PDF in the reader: a local file is read in place, a remote
-    one is downloaded once into its entry."""
+    one is refreshed into its entry on each open."""
     return _view_query(path, url, base_url=_base_url(request) if request else None)
 
 
@@ -1058,8 +1076,9 @@ def view_file_raw(request: Request):
 
 def _open_local_in_reader(pdf: pathlib.Path, hash_: str = ""):
     try:
-        hash_, stamp = catalog.open_local(pdf,
-            lambda snapshot: reader._run(pdfium_doc.page_sizes, str(snapshot)), state.inherit_local)
+        hash_, stamp, validated = catalog.open_local(pdf, reader.validate_local, state.inherit_local)
+        if validated:
+            reader.remember_sizes(*validated)
     except (OSError, ValueError, InvalidCatalogInput) as error:
         raise HTTPException(409, str(error)) from error
     except Exception as error:
@@ -1108,7 +1127,7 @@ def _view_path(path: str):
     return _open_local_in_reader(p)
 
 
-def _view_url(url: str, *, base_url: Optional[str] = None):
+def _view_url(url: str, *, base_url: Optional[str] = None, page: bool = True):
     try:
         resolved = catalog.resolve_source(url)
     except InvalidCatalogInput as error:
@@ -1118,14 +1137,7 @@ def _view_url(url: str, *, base_url: Optional[str] = None):
         # The passthrough marker makes the extension's allow rule win, so the
         # browser's own viewer opens the URL instead of looping back here.
         return RedirectResponse(with_passthrough(strip_passthrough(url)), status_code=307)
-    cached = catalog.source_pdf(resolved.hash)
-    if cached is None:
-        # The daemon's own download, else the browser's bytes through the
-        # extension, else the browser's viewer and the relay.
-        return _open_through_browser(url, resolved.hash, resolved.source_ref, base_url)
-    if resolved.hash not in catalog.mappings():
-        catalog.register(resolved.hash, resolved.source_ref, cached.stem)
-    return RedirectResponse(f"/r/{resolved.hash}/", status_code=307)
+    return _open_through_browser(url, resolved.hash, resolved.source_ref, base_url, page=page)
 
 
 # -----------------------------------------------------------------------------
@@ -1188,6 +1200,8 @@ def _prewarm_first_raster(hash_: str, pdf: pathlib.Path, viewport: Optional[str]
     if first is None:
         return None
     page, width = first
+    stat = pdf.stat()
+    revision = f"{stat.st_mtime_ns}-{stat.st_size}"
 
     def render():
         try:
@@ -1197,19 +1211,32 @@ def _prewarm_first_raster(hash_: str, pdf: pathlib.Path, viewport: Optional[str]
     threading.Thread(target=render, daemon=True).start()
     # Exactly the URL overlay-document.js asks for first (mountReaderRasters,
     # `want`), so the preloaded response is the one the page's image uses.
-    return f"/r/{hash_}/p/{page}/{width}.jpg"
+    return f"/r/{hash_}/rev/{revision}/p/{page}/{width}.jpg"
 
 
 _FIRST_IMG = '<img class="bi" alt=""'
+
+
+def _reader_title(hash_: str, pdf: pathlib.Path) -> str:
+    """The document's title in the reader (tab title, sidebar header, the
+    address's slug): a :rename name, else the PDF's metadata title, else the
+    title printed on its first page, else the entry name. Every shell
+    build passes this same title: it is part of the shell's stamp."""
+    meta = reader.meta(hash_, pdf)
+    return catalog.display_title(catalog.entry_name(hash_), catalog.source_ref(hash_) or "",
+                                 meta.get("title"), meta.get("heading"), pdf.name)
 
 
 @app.get("/r/{hash_}/")
 def reader_shell(hash_: str, background: BackgroundTasks, request: Request = None):
     pdf = _reader_source(hash_)
     saved = _saved_page(hash_)
-    preload = _prewarm_first_raster(hash_, pdf, request.cookies.get(_VIEWPORT_COOKIE)) if request else None
+    # An in-place open has no cookie on this origin: the extension sends the
+    # same value as a header.
+    viewport = (request.cookies.get(_VIEWPORT_COOKIE) or request.headers.get("x-pdfv-viewport")) if request else None
+    preload = _prewarm_first_raster(hash_, pdf, viewport) if request else None
     try:
-        shell = reader.shell(hash_, pdf, catalog.entry_name(hash_), near_pages=(saved,) if saved else ())
+        shell = reader.shell(hash_, pdf, _reader_title(hash_, pdf), near_pages=(saved,) if saved else (), defer_text=True)
     except Exception as error:
         raise HTTPException(502, f"could not read PDF: {error}") from error
     background.add_task(visits.record, hash_, "reader")
@@ -1243,7 +1270,7 @@ def reader_text(hash_: str, index: int, background: BackgroundTasks):
         raise HTTPException(404, f"no text range {index}")
     except Exception as error:
         raise HTTPException(502, f"could not read text range {index}: {error}") from error
-    background.add_task(reader.finish_shell, hash_, pdf, catalog.entry_name(hash_))
+    background.add_task(reader.finish_shell, hash_, pdf, _reader_title(hash_, pdf))
     return JSONResponse({"first": first, "pages": pages, "ocr": [first + i for i, body in enumerate(pages) if getattr(body, "scanned", False)]}, headers={"Cache-Control": "no-cache"})
 
 
@@ -1275,7 +1302,7 @@ def reader_ocr(hash_: str, pages: str = "", wait: float = 0.0):
     those pages to the front of the queue and waits for them. The first call
     for a document queues all its scanned pages in the background."""
     pdf = _reader_source(hash_)
-    name = catalog.entry_name(hash_)
+    name = _reader_title(hash_, pdf)
     try:
         count = len(reader.sizes(pdf))
         return reader.ocr_status(hash_, pdf, name, _page_ranges(pages, count), max(0.0, min(30.0, wait)))
@@ -1322,18 +1349,42 @@ async def _reader_raster(request: Request, hash_: str, page: int, width: int, fm
         reader.raster_release(key)
     # Keyed by content hash, page, width and format, so the bytes never change.
     return FileResponse(path, media_type="image/jpeg" if fmt == "jpg" else "image/png",
-                        headers={"Cache-Control": "public, max-age=31536000, immutable"})
+                        headers={"Cache-Control": "no-cache"})
 
 
+@app.get("/r/{hash_}/icon")
+def reader_icon(hash_: str):
+    """The tab icon: the document's first figure (PNG), else a monogram (SVG)."""
+    pdf = _reader_source(hash_)
+    headers = {"Cache-Control": "no-cache"}
+    try:
+        data = reader.icon(hash_, pdf)
+    except Exception:
+        data = None
+    if data:
+        return Response(data, media_type="image/png", headers=headers)
+    return Response(monogram_svg(_reader_title(hash_, pdf), hash_), media_type="image/svg+xml", headers=headers)
+
+
+@app.get("/r/{hash_}/rev/{revision}/p/{page}/{width}.png")
 @app.get("/r/{hash_}/p/{page}/{width}.png")
 async def reader_raster(request: Request, hash_: str, page: int, width: int):
     return await _reader_raster(request, hash_, page, width, "png")
 
 
+@app.get("/r/{hash_}/rev/{revision}/p/{page}/{width}.jpg")
 @app.get("/r/{hash_}/p/{page}/{width}.jpg")
 async def reader_raster_jpeg(request: Request, hash_: str, page: int, width: int):
     """The overlay's page rasters: JPEG, encoded 5x faster than PNG."""
     return await _reader_raster(request, hash_, page, width, "jpg")
+
+
+@app.get("/r/{hash_}/{slug}")
+def reader_shell_titled(hash_: str, slug: str, background: BackgroundTasks, request: Request = None):
+    """The reader at its titled address (`/r/<hash>/<slug>`, which the shell
+    puts in the address bar): the same shell, whatever the slug says, so an
+    address survives a rename."""
+    return reader_shell(hash_, background, request)
 
 
 def _require_cached_entry(hash_: str) -> str:
@@ -1392,6 +1443,18 @@ def _native_response_for_hash(hash_: str):
     path = pathlib.Path(native.value)
     return FileResponse(path, media_type="application/pdf", filename=path.name,
                         content_disposition_type="inline")
+
+
+@app.get("/download")
+def download_pdf(hash_: str = Query(..., alias="hash")):
+    """Download the PDF revision backing the reader, including cached sign-in PDFs."""
+    _require_cached_entry(hash_)
+    pdf = _reader_source(hash_)
+    # A display name may already have a PDF extension.
+    title = catalog.entry_name(hash_)
+    name = sources.filename_for(urllib.parse.quote(title, safe=""))
+    return FileResponse(pdf, media_type="application/pdf", filename=name,
+                        content_disposition_type="attachment", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/native")
@@ -1489,6 +1552,93 @@ def extension_toggle(body: ExtensionToggleRequest, request: Request):
     }
 
 
+# -----------------------------------------------------------------------------
+# In-place opens — the reader at the PDF's own address (docs/in-place.md).
+#
+# The extension leaves the tab on the URL it was going to and builds the
+# reader there. Its page script asks, through the extension, where that URL's
+# reader is: the same decisions as `/view-raw` and `/view-file-raw`, answered
+# as JSON instead of a redirect, because nothing navigates.
+# -----------------------------------------------------------------------------
+
+class ExtensionLocateRequest(BaseModel):
+    url: str
+
+
+def _local_path_of_file_url(url: str) -> pathlib.Path:
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "file" or parsed.netloc not in {"", "localhost"}:
+        raise HTTPException(400, "not a local file URL")
+    try:
+        path = urllib.parse.unquote(parsed.path, errors="strict")
+    except UnicodeDecodeError:
+        raise HTTPException(400, "file URL path is not UTF-8")
+    if not path.startswith("/") or "\x00" in path:
+        raise HTTPException(400, "file URL must name an absolute path")
+    return pathlib.Path(path)
+
+
+def _native_file_url(path: pathlib.Path) -> str:
+    """A local PDF for the browser's own viewer: the marker tells the
+    extension's page script to leave the tab alone."""
+    return f"{path.as_uri()}?{PASSTHROUGH_MARKER}"
+
+
+@app.post("/extension/locate")
+def extension_locate(body: ExtensionLocateRequest, request: Request):
+    """Where the reader of a tab's URL is. Answers one of
+    {"reader": "/r/<hash>/…", "hash": h}   build the reader from that shell
+    {"native": url}                        leave it to the browser's viewer
+    {"wait": id, "native": url}            still fetching: poll
+                                           `/extension/open/<id>`, whose
+                                           target is a reader path or `native`
+    """
+    url = body.url
+    if url.startswith("file:"):
+        path = _local_path_of_file_url(strip_passthrough(url.split("#", 1)[0]))
+        native = _native_file_url(path)
+        previous = catalog.local_entry(path)
+        if previous and catalog.is_disabled(previous):
+            return {"native": native}
+        try:
+            response = _view_path(str(path))
+        except HTTPException as error:
+            return {"native": native, "error": str(error.detail)}
+    else:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise HTTPException(400, "only http(s) and file URLs can be opened")
+        url = strip_passthrough(url.split("#", 1)[0])
+        native = with_passthrough(url)
+        try:
+            response = _view_url(url, base_url=_base_url(request), page=False)
+        except HTTPException as error:
+            return {"native": native, "error": str(error.detail)}
+    if isinstance(response, JSONResponse):
+        return response
+    target = response.headers.get("location", "") if isinstance(response, RedirectResponse) else ""
+    match = re.match(r"^/r/([a-f0-9]{6,32})/", target)
+    if match:
+        return {"reader": target, "hash": match.group(1)}
+    return {"native": native}
+
+
+@app.get("/extension/address/{hash_}")
+def extension_address(hash_: str):
+    """The address a tab shows for an entry when the extension reads PDFs in
+    place: its source URL or `file://` path. {"url": null} for an entry that
+    has neither (the tab then stays on the daemon's `/r/<hash>/`); `disabled`
+    says the entry is left to the browser's viewer at that address."""
+    _require_cached_entry(hash_)
+    source_ref = catalog.source_ref(hash_) or ""
+    url = None
+    if source_ref.startswith("/"):
+        url = pathlib.Path(source_ref).as_uri()
+    elif source_ref.startswith(("http://", "https://")):
+        url = source_ref
+    return {"url": url, "disabled": catalog.is_disabled(hash_)}
+
+
 @app.delete("/mapping/{hash_}")
 def delete_mapping(hash_: str):
     """Wipe a cache entry: drop its mappings.tsv row, rmtree the dir, forget visits.
@@ -1527,11 +1677,16 @@ def rename_entry(hash_: str, body: RenameRequest):
     CACHE_DIR.
     """
     try:
-        return catalog.rename(hash_, body.name)
+        result = catalog.rename(hash_, body.name)
     except InvalidCatalogInput as error:
         raise HTTPException(400, str(error)) from error
     except EntryNotFound as error:
         raise HTTPException(404, str(error)) from error
+    pdf = catalog.source_pdf(hash_)
+    if pdf is not None and str(result.get("href") or "").startswith("/r/"):
+        # The overlay puts this in the address bar: the titled address.
+        result["href"] = reader_path(hash_, _reader_title(hash_, pdf))
+    return result
 
 
 @app.get("/")
